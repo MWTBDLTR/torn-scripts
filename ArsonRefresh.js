@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ArsonWarehouse Foreign Stock Auto Refresh w/ Countdown Toggle
+// @name         ArsonWarehouse Foreign Stock Auto Refresh
 // @namespace    https://greasyfork.org/en/users/1463000-mwtbdltr
 // @version      1.3
-// @description  Refresh https://arsonwarehouse.com/foreign-stock every minute, with a draggable on/off toggle whose position persists and shows a countdown to next refresh.
+// @description  Refreshes foreign stock every minute, with a draggable on/off toggle button and countdown.
 // @author       MrChurchh [3654415]
 // @license      MIT
 // @match        https://arsonwarehouse.com/foreign-stock*
@@ -16,16 +16,16 @@
 (function() {
     'use strict';
 
-    // --- Config ---
+    // Config
     const REFRESH_INTERVAL = 60; // seconds
 
-    // --- State ---
+    // State
     let refreshEnabled = true;
     let secondsLeft = REFRESH_INTERVAL;
     let refreshTimer = null;
     let countdownTimer = null;
 
-    // --- Refresh & Countdown ---
+    // Refresh & Countdown
     function scheduleRefresh() {
         refreshTimer = setTimeout(() => {
             if (refreshEnabled) window.location.reload();
@@ -54,7 +54,7 @@
         startCountdown();
     }
 
-    // --- UI Setup ---
+    // UI Setup
     const toggleBox = document.createElement('div');
     Object.assign(toggleBox.style, {
         position: 'fixed',
@@ -87,7 +87,7 @@
         }
     }
 
-    // --- Drag vs. Click ---
+    // Drag vs. Click
     let isDragging = false, startX, startY, origX, origY;
     toggleBox.addEventListener('mousedown', e => {
         isDragging = false;
@@ -134,7 +134,7 @@
         e.preventDefault();
     });
 
-    // --- Initialize ---
+    // Init
     resetTimers();
 
 })();
