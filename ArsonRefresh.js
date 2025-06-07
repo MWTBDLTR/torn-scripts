@@ -3,7 +3,7 @@
 // @namespace    https://greasyfork.org/en/users/1463000-mwtbdltr
 // @version      1.3.1
 // @description  Refreshes foreign stock every minute, with a draggable on/off toggle button and countdown.
-// @author       MrChurchh [3654415]
+// @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://arsonwarehouse.com/foreign-stock*
 // @icon         https://arsonwarehouse.com/favicon.ico
