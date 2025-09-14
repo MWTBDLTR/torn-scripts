@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Time Table (optimized, live local time)
 // @namespace    https://greasyfork.org
-// @version      0.5.2
+// @version      0.5.3
 // @description  Shows your local time and a table to convert Torn time to your local time
 // @license      MIT
 // @author       MrChurch [3654415]
