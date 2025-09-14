@@ -9,6 +9,8 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @run-at       document-start
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
+// @updateURL    https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
 // ==/UserScript==
 
 (function () {
