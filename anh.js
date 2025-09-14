@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Torn.com Attack Numpad Helper (Configurable Keys)
+// @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
 // @version      1.0
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
@@ -10,8 +10,6 @@
 // @grant        GM.setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
-// @downloadURL  https://update.greasyfork.org/scripts/549158/Torncom%20Attack%20Numpad%20Helper.user.js
-// @updateURL    https://update.greasyfork.org/scripts/549158/Torncom%20Attack%20Numpad%20Helper.meta.js
 // ==/UserScript==
 
 (async function () {
