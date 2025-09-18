@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0
+// @version      1.1
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @match        https://www.torn.com/loader.php*
@@ -15,11 +15,11 @@
 (async function () {
   'use strict';
 
-  // Only run on the attack loader with a user2ID param
+  // only run on the attack page with a target specified
   const params = new URLSearchParams(location.search);
   if (!(params.get('sid') === 'attack' && params.has('user2ID'))) return;
 
-  // === GM compatibility ===
+  // prefer GM APIs, legacy GM_* or localStorage otherwise
   const GMAPI = {
     getValue: async (k, d) => {
       try {
@@ -38,44 +38,38 @@
     },
   };
 
-  // === Settings (persisted) ===
+  // default config; numpad map for weapon slots and then dialog choices followed by the "Continue" button behavior
   const DEFAULT_SETTINGS = {
-    // weaponSlots: nth-child selectors for the hoverEnabled cards
-    // slots 1..4 are visible weapon/action cards; 5/6 are Punch/Kick
     weaponSlotKeys: {
-      // arrays of KeyboardEvent.code values
       '1': ['Numpad1'],
       '2': ['Numpad2'],
       '3': ['Numpad3'],
       '4': ['Numpad0'],
-      '5': ['NumpadDecimal', 'NumpadComma'], // Punch by default
-      '6': [], // Kick (no default key; can be set by user)
+      '5': ['NumpadDecimal', 'NumpadComma'],
+      '6': [],
     },
-    // Which action gets the decimal by default: 'punch' (slot 5) or 'kick' (slot 6)
     decimalTarget: 'punch',
-    // Dialog (Leave / Mug / Hospitalize) key mappings (left/middle/right)
     dialogKeys: {
-      '1': ['Numpad4'], // left button (usually Leave)
-      '2': ['Numpad5'], // middle (Mug)
-      '3': ['Numpad6'], // right (Hospitalize)
+      '1': ['Numpad4'],
+      '2': ['Numpad5'],
+      '3': ['Numpad6'],
     },
-    // Continue button behavior
-    continueAction: 'default', // 'default' | 'close' | 'openFixed'
+    continueAction: 'default',
   };
 
-  // Load settings
+  // load settings or fallback to default
   let settings = (() => DEFAULT_SETTINGS)();
   try {
     const raw = await GMAPI.getValue('settingsV2', null);
     if (raw) settings = Object.assign({}, DEFAULT_SETTINGS, JSON.parse(raw));
   } catch {}
 
-  // Ensure arrays exist
+  // nested objects exist check
   for (const k of ['weaponSlotKeys', 'dialogKeys']) {
     if (!settings[k]) settings[k] = JSON.parse(JSON.stringify(DEFAULT_SETTINGS[k]));
   }
 
-  // Backward-compat for previous decimalTarget / continueAction
+  // legacy support
   try {
     const legacyDecimal = await GMAPI.getValue('decimalTarget', null);
     if (legacyDecimal && (legacyDecimal === 'punch' || legacyDecimal === 'kick')) {
@@ -89,11 +83,12 @@
     }
   } catch {}
 
+  // settings helper
   function saveSettings() {
     GMAPI.setValue('settingsV2', JSON.stringify(settings));
   }
 
-  // === Utilities ===
+  // utility functions for type checks, guards, etc
   const isNumpadKey = (code) => typeof code === 'string' && code.startsWith('Numpad');
   function isTypingInField(target) {
     return !!(
@@ -116,33 +111,39 @@
       w && w.close && w.close();
     } catch {}
   }
+
+  // handler for "Continue" behavior, 3 options to pick from
   function handleContinue() {
     if (settings.continueAction === 'close') {
       tryCloseTab();
       return true;
     }
     if (settings.continueAction === 'openFixed') {
-      window.location.href = 'https://www.torn.com/loader.php?sid=attack&user2ID=1598729';
+      window.location.href = 'https://www.torn.com/loader.php?sid=attack&user2ID=3547823';
       return true;
     }
-    return false; // default
+    return false;
   }
+
+  // check for the "Continue" button text
   function hasContinueText(btn) {
     const txt = (btn?.textContent || '').toLowerCase();
     return txt.includes('continue');
   }
+
+  // is hopsital the current block?
   function isHospitalBlocked() {
     return !!document.querySelector('.colored___sN72G.red___SANWO .title___fOh2J');
   }
 
-  // === Element Finders ===
+  // main logic for key handling, hints, menu, and mutation observer
   function findPrimaryButton() {
     return (
       document.querySelector('button.torn-btn:nth-child(1)') ||
       document.querySelector('button[class^="btn___"]:nth-child(1)')
     );
   }
-  function getOverrideButtons() { // dialog buttons (left/middle/right)
+  function getOverrideButtons() {
     const b3 =
       document.querySelector('button.torn-btn:nth-child(3)') ||
       document.querySelector('button[class^="btn___"]:nth-child(3)');
@@ -157,13 +158,12 @@
     return { b1, b2, b3 };
   }
 
-  // === Key Maps (derived) ===
+  // map keys to slots and dialog choices
   function buildKeyToWeaponSlot() {
     const map = new Map();
     for (const [slot, codes] of Object.entries(settings.weaponSlotKeys)) {
       for (const code of codes || []) map.set(code, Number(slot));
     }
-    // decimalTarget convenience: if decimal/comma assigned to neither 5 nor 6, route to target slot
     const decCodes = ['NumpadDecimal', 'NumpadComma'];
     const targetSlot = settings.decimalTarget === 'kick' ? 6 : 5;
     for (const dc of decCodes) {
@@ -181,14 +181,14 @@
     return map;
   }
 
-  // === Selectors for weapon slots ===
+  // selectors for weapons or melee cards
   function selectorForWeaponSlot(slot) {
     if (slot >= 1 && slot <= 4) return `div.hoverEnabled___skjqK:nth-child(${slot})`;
     if (slot === 5 || slot === 6) return `div.hoverEnabled___skjqK:nth-child(${slot})`; // Punch/Kick cards
     return null;
   }
 
-  // === Minimal key badges ===
+  // key hint ui
   const style = document.createElement('style');
   style.textContent = `
     .torn-keyhint { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,.55); color: #fff; border-radius: 4px; padding: 1px 4px; font-size: 10px; line-height: 1.2; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; letter-spacing: .2px; pointer-events: none; z-index: 2147483647; opacity: .9; }
@@ -196,6 +196,7 @@
   `;
   document.head.appendChild(style);
 
+  // helpers for add/remove key hints
   function clearAllHints() {
     document.querySelectorAll('.torn-keyhint').forEach((el) => el.remove());
   }
@@ -217,12 +218,12 @@
     if (el) ensureHintOnElement(el, text, isMulti);
   }
 
+  // prettifiers and reverse index to group keys by target
   function prettyKeys(arr) {
     return (arr && arr.length ? arr : []).map(k => k.replace('Numpad', '')).join(', ');
   }
 
   function reverseIndex(map) {
-    // Map<number, string[]> where number is slot or dialog index
     const out = new Map();
     for (const [code, n] of map.entries()) {
       if (!out.has(n)) out.set(n, []);
@@ -231,10 +232,10 @@
     return out;
   }
 
+  // main ui refresh, draw hints, buttons, or slots
   function updateHints() {
     clearAllHints();
 
-    // Dialog buttons present?
     const ob = getOverrideButtons();
     if (ob && (ob.b1 || ob.b2 || ob.b3)) {
       const keyToDlg = buildKeyToDialogIndex();
@@ -245,7 +246,6 @@
       return;
     }
 
-    // Primary button mode
     const primary = findPrimaryButton();
     if (primary) {
       const label = hasContinueText(primary)
@@ -255,7 +255,6 @@
       return;
     }
 
-    // Weapon cards (slots 1..6)
     const keyToSlot = buildKeyToWeaponSlot();
     const rev = reverseIndex(keyToSlot);
     for (let slot = 1; slot <= 6; slot++) {
@@ -264,20 +263,18 @@
     }
   }
 
-  // === Key handling ===
+  // global key handler, ignore in text fields, hospital block, etc
   document.addEventListener(
     'keydown',
     (e) => {
       if (isTypingInField(e.target)) return;
 
-      // Hospital check: any configured key reloads
       const keyToSlot = buildKeyToWeaponSlot();
       const keyToDlg = buildKeyToDialogIndex();
       if (isHospitalBlocked() && (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
         e.preventDefault(); e.stopPropagation(); location.reload(); return;
       }
 
-      // Dialog present?
       const ob = getOverrideButtons();
       if (ob && (ob.b1 || ob.b2 || ob.b3)) {
         const idx = buildKeyToDialogIndex().get(e.code);
@@ -287,7 +284,6 @@
         return;
       }
 
-      // Primary button present? (e.g., Continue)
       const primary = findPrimaryButton();
       if (primary) {
         if (!isNumpadKey(e.code)) return;
@@ -298,7 +294,6 @@
         return;
       }
 
-      // Weapon card clicks by configured keys
       const slot = keyToSlot.get(e.code);
       if (!slot) return;
       const selector = selectorForWeaponSlot(slot);
@@ -308,7 +303,7 @@
     true
   );
 
-  // === Menu ===
+  // track and clean up menu registrations
   let menuIds = [];
   function unregisterMenu() {
     if (menuIds.length && typeof GM_unregisterMenuCommand === 'function') {
@@ -317,8 +312,8 @@
     menuIds = [];
   }
 
+  // self-explanatory parser
   function parseKeyList(input) {
-    // Accept comma/space separated tokens like "1,2,3,Decimal" -> map to Numpad*
     if (!input) return [];
     return input
       .split(/[\s,]+/)
@@ -331,13 +326,14 @@
       .filter(tok => /^Numpad(\d|Enter|Add|Subtract|Multiply|Divide|Decimal|Comma)$/.test(tok));
   }
 
+  // user input for maps, apply and save, refresh ui and menu
   function editKeysFor(label, current, apply) {
     const pretty = prettyKeys(current.map(k => k.replace('Numpad', '')));
     const input = prompt(
       `${label}\nEnter keys separated by commas/spaces. Examples: 1 2 3 0 ., 4 5 6, 7 8\nUse '.' for Decimal and ',' for Comma.\nCurrent: ${pretty || '(none)'}\n`,
       current.map(k => k.replace('Numpad', '')).join(' ')
     );
-    if (input == null) return; // canceled
+    if (input == null) return;
     const parsed = parseKeyList(input);
     apply(parsed);
     saveSettings();
@@ -346,11 +342,11 @@
     console.info('[Torn Numpad Helper] Updated:', label, parsed);
   }
 
+  // menu registration with dynamic labels
   function registerMenu() {
     if (typeof GM_registerMenuCommand !== 'function') return;
     unregisterMenu();
 
-    // Show mappings
     const idShow = GM_registerMenuCommand('Show current mappings', () => {
       const keyToSlot = buildKeyToWeaponSlot();
       const keyToDlg = buildKeyToDialogIndex();
@@ -368,7 +364,6 @@
     });
     menuIds.push(idShow);
 
-    // Weapon slot editors
     for (let s = 1; s <= 6; s++) {
       const id = GM_registerMenuCommand(`Edit keys: Weapon slot ${s}`, () => {
         editKeysFor(
@@ -380,7 +375,6 @@
       menuIds.push(id);
     }
 
-    // Dialog editors (left/middle/right)
     const dialogLabels = { 1: 'Dialog 1 (Left: Leave)', 2: 'Dialog 2 (Middle: Mug)', 3: 'Dialog 3 (Right: Hospitalize)' };
     for (let d = 1; d <= 3; d++) {
       const id = GM_registerMenuCommand(`Edit keys: ${dialogLabels[d]}`, () => {
@@ -393,7 +387,6 @@
       menuIds.push(id);
     }
 
-    // Decimal mapping toggle (punch/kick)
     const labelDecimal = `Decimal target: ${settings.decimalTarget === 'kick' ? 'Kick (slot 6)' : 'Punch (slot 5)'} (toggle)`;
     const idDec = GM_registerMenuCommand(labelDecimal, async () => {
       settings.decimalTarget = settings.decimalTarget === 'kick' ? 'punch' : 'kick';
@@ -404,7 +397,6 @@
     });
     menuIds.push(idDec);
 
-    // Continue action toggle
     const labelContinue = `Continue action: ${
       settings.continueAction === 'close' ? 'Close tab' :
       settings.continueAction === 'openFixed' ? 'attack bodybagger' :
@@ -422,7 +414,6 @@
     });
     menuIds.push(idCont);
 
-    // Reset to defaults
     const idReset = GM_registerMenuCommand('Reset all mappings to defaults', () => {
       if (!confirm('Reset all key mappings and settings to defaults?')) return;
       settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -434,9 +425,10 @@
     menuIds.push(idReset);
   }
 
+  // init
   registerMenu();
 
-  // === Reactive hints ===
+  // throttle schedule to avoid extra DOM work
   const scheduleUpdate = (() => {
     let t = null;
     return () => {
@@ -445,8 +437,10 @@
     };
   })();
 
+  // init
   updateHints();
 
+  // real-time updates on DOM changes
   const observer = new MutationObserver(() => scheduleUpdate());
   observer.observe(document.body, {
     subtree: true,
@@ -455,5 +449,6 @@
     attributeFilter: ['class', 'style'],
   });
 
+  // refresh on focus (tab switching, etc)
   window.addEventListener('focus', scheduleUpdate);
 })();
