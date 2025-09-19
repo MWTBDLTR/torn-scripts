@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         War Attack Links (TWSE Safe)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1
-// @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced
+// @version      1.2
+// @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized (TWSE-O) - no network activity, no background requests, no automation, just DOM rewiring.
 // @author       MrChurch [3654415]
 // @match        https://www.torn.com/factions.php*
 // @grant        none
@@ -12,6 +12,15 @@
 (function () {
   'use strict';
 
+  // Policy notes:
+  // - This script only operates on the DOM of the current, manually loaded page.
+  // - It performs NO background or automated requests. Navigation only occurs on trusted user gestures.
+  // - It does not bypass captcha or attempt automation; it merely rewires visible "Attack" controls.
+  // - There is no network usage; no API calls; no background requests; just pure blissful DOM manipulation.
+  // - It does not store or transmit any user data.
+  // - It is intended to enhance user experience while complying with Torn's terms of service.
+
+  // Configuration
   const OPEN_IN_NEW_TAB = true;
   const MARK = 'attackLinkHandled';
   const ROW_MARK = 'attackRowHandled';
@@ -23,8 +32,14 @@
   const getAttackUrl = (userId) =>
     `https://www.torn.com/loader.php?sid=attack&user2ID=${userId}`;
 
+  const isVisible = (el) =>
+    !!el && el.offsetParent !== null && el.getClientRects().length > 0 && el.getAttribute('aria-hidden') !== 'true';
+
+  const isDisabled = (el) =>
+    el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
+
   const isAttackControl = (el) => {
-    if (!el) return false;
+    if (!el || !isVisible(el) || isDisabled(el)) return false;
     const txt = (el.textContent || '').trim();
     if (txt && txt.length <= 10 && txt.toLowerCase() === 'attack') return true;
     const title = (el.getAttribute?.('title') || '').toLowerCase();
@@ -32,6 +47,7 @@
     const aria  = (el.getAttribute?.('aria-label') || '').toLowerCase();
     return aria === 'attack';
   };
+
   const getUserIdForRow = (row) => {
     const profileLink = row.querySelector('a[href*="profiles.php?XID="]');
     if (!profileLink) return null;
@@ -59,9 +75,7 @@
         opacity: 0.6;
         pointer-events: none;
       }
-      /* Optional: keep layout stable if the page flips content in/out */
       .enemy .custom-attack-button { white-space: nowrap; }
-      /* Toggle button */
       .attack-toggle-btn {
         position: fixed; bottom: 5%; right: 10px; z-index: 9999;
         padding: 6px 10px; background-color: #008CBA; color: #fff;
@@ -77,14 +91,16 @@
     const button = document.createElement('button');
     button.textContent = 'Attack Script: ON';
     button.className = 'attack-toggle-btn';
-    button.addEventListener('click', () => {
+    // react to trusted user clicks
+    button.addEventListener('click', (e) => {
+      if (!e.isTrusted || (e.button !== 0 && e.button !== undefined)) return;
       scriptEnabled = !scriptEnabled;
       button.textContent = `Attack Script: ${scriptEnabled ? 'ON' : 'OFF'}`;
       button.classList.toggle('off', !scriptEnabled);
     });
     const add = () => document.body && document.body.appendChild(button);
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', add);
+      document.addEventListener('DOMContentLoaded', add, { once: true });
     } else {
       add();
     }
@@ -92,21 +108,30 @@
 
   function openAttackUrl(url){
     if (!scriptEnabled || !url) return;
+    // only occurs on trusted input events (enforced by listeners)
     if (OPEN_IN_NEW_TAB) {
-      window.open(url, '_blank', 'noopener');
+      // noopener for security, noreferrer to avoid leaking referrer
+      window.open(url, '_blank', 'noopener,noreferrer');
     } else {
       location.assign(url);
     }
   }
+
+  // only act on primary-button, trusted events, and elements with data-attack-url
   document.addEventListener('click', (e) => {
-    const t = e.target.closest?.('[data-attack-url]');
+    const t = e.target?.closest?.('[data-attack-url]');
     if (!t) return;
+    if (!e.isTrusted) return;
+    if (e.button !== 0) return; // primary clicks only
     e.preventDefault();
     openAttackUrl(t.getAttribute('data-attack-url'));
   }, { capture:false, passive:false });
+
+  // Keyboard activation: Enter/Space; only trusted events
   document.addEventListener('keydown', (e) => {
+    if (!e.isTrusted) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    const t = e.target.closest?.('[data-attack-url]');
+    const t = e.target?.closest?.('[data-attack-url]');
     if (!t) return;
     e.preventDefault();
     openAttackUrl(t.getAttribute('data-attack-url'));
@@ -115,8 +140,7 @@
   const processedRows = new WeakSet();
 
   function makeClickable(el, url) {
-    if (!el) return;
-    if (el.offsetParent === null) return;
+    if (!el || !isVisible(el) || isDisabled(el)) return;
     if (el.dataset[MARK] === '1') {
       if (el.tagName === 'A') {
         if (el.href !== url) el.href = url;
@@ -148,12 +172,12 @@
 
   function processRow(row){
     if (!row || !(row instanceof Element)) return;
+    if (processedRows.has(row)) return;
 
     const userId = getUserIdForRow(row);
     if (!userId) return;
 
     const url = getAttackUrl(userId);
-
     const candidates = row.querySelectorAll('a,button,span');
 
     for (const el of candidates) {
@@ -168,6 +192,7 @@
     if (!scriptEnabled || rows.size === 0) return;
     for (const row of rows) processRow(row);
   }
+
   function initialScan(){
     const rows = new Set(document.querySelectorAll('.enemy'));
     normalizeAttackControlsForRows(rows);
@@ -213,7 +238,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['title', 'aria-label', 'class', 'style', 'aria-hidden']
+      attributeFilter: ['title', 'aria-label', 'class', 'style', 'aria-hidden', 'disabled', 'aria-disabled']
     });
   }
 
@@ -221,10 +246,13 @@
     document.addEventListener('DOMContentLoaded', () => {
       initialScan();
       startObserver();
-    });
+    }, { once: true });
   } else {
     initialScan();
     startObserver();
+    console.log("[War Attack Links] Initialization successful");
   }
+
+  // Re-scan once after initial load to catch late content
   setTimeout(() => initialScan(), 800);
 })();

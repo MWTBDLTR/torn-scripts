@@ -1,20 +1,25 @@
 // ==UserScript==
 // @name         Torn Time Table (optimized, live local time)
 // @namespace    https://greasyfork.org
-// @version      0.5.3
-// @description  Shows your local time and a table to convert Torn time to your local time
+// @version      0.5.4
+// @description  Shows your local time and a table to convert Torn time to your local time. No network usage.
 // @license      MIT
 // @author       MrChurch [3654415]
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @run-at       document-start
 // @grant        none
+// @noframes
 // @downloadURL  https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
 // @updateURL    https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  // Compliance notes:
+  // - No network/API calls; only reads/modifies the DOM on the current page.
+  // - No automation beyond user UI; no captcha interaction; no scraping of unseen pages.
 
   const SHOW_ON_LOAD = true; // true = expanded by default
 
@@ -60,7 +65,6 @@
   }
 
   function minutesToHMS(totalMinutes, seconds = 0) {
-    // Accepts possibly-negative minutes, wraps to 0..23 for hours
     const tMin = Math.floor(totalMinutes);
     const h = ((Math.floor(tMin / 60) % 24) + 24) % 24;
     const m = ((tMin % 60) + 60) % 60;
@@ -73,7 +77,6 @@
     const offsetMin = now.getTimezoneOffset(); // minutes to add to LOCAL to get UTC
     const tctTotalMin = tctH * 60 + tctM;
     const localTotalMin = tctTotalMin - offsetMin;
-
     const { h: localH, m: localM } = minutesToHMS(localTotalMin);
 
     const wrap = document.createElement('div');
@@ -103,13 +106,12 @@
       tbody.appendChild(tr);
     }
 
-    // Return a function to live-update the header given a TCT string "HH:MM:SS"
     const localHeader = () => wrap.querySelector('#tt-local-time');
     const updater = (tctText) => {
+      if (document.hidden) return; // save cycles when not visible
       const p = parseHHMMSS(tctText);
       if (!p) return;
-      // Recompute from current timezone offset each tick (DST-safe)
-      const offMin = new Date().getTimezoneOffset();
+      const offMin = new Date().getTimezoneOffset(); // re-evaluate for DST
       const tctMinNow = p.h * 60 + p.mi;
       const localMinNow = tctMinNow - offMin;
       const { h, m } = minutesToHMS(localMinNow, p.s);
@@ -134,15 +136,31 @@
     // Toggle
     const toggle = wrap.querySelector('.tt-toggle');
     const table = wrap.querySelector('#myTornTimeTable');
-    toggle.addEventListener('click', () => table.classList.toggle('tt-hidden'));
+    toggle.addEventListener('click', (e) => {
+      if (!e.isTrusted) return;
+      table.classList.toggle('tt-hidden');
+    });
 
-    // Live-sync local time with Torn's clock by observing text changes
+    // Observe Torn's clock text; update local time in lockstep
     const mo = new MutationObserver(() => updater(timeSpan.textContent || ''));
     mo.observe(timeSpan, { characterData: true, subtree: true, childList: true });
 
+    // Clean up on hide/unload to avoid background work
+    const onVisibility = () => { /* updater skips when hidden; no work needed */ };
+    const onUnload = () => { mo.disconnect(); document.removeEventListener('visibilitychange', onVisibility); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onUnload, { once: true });
+    window.addEventListener('beforeunload', onUnload, { once: true });
+
     // Initial paint with seconds
     updater(timeSpan.textContent || '');
+    console.log("[Torn Time Table] Initialization successful");
   }
 
-  main();
+  // Defer to DOM to avoid early style injection issues on some pages
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', main, { once: true });
+  } else {
+    main();
+  }
 })();

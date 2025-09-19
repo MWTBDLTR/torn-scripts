@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced Optimized
+// @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0
-// @description  Travel status and hospital time, sorted by hospital time on war page.
+// @version      1.1
+// @description  Travel status and hospital time sorted on war page.
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
@@ -15,45 +15,76 @@
 (async function () {
   'use strict';
 
+  // Compliance notes:
+  // - Uses ONLY Torn's official API (https://api.torn.com). No scraping of unseen pages; no non-API network calls.
+  // - No captcha bypass; no click emulation. UI read/modify on the page you’re viewing is allowed.
+  // - Respects Torn API rate guidance (100 requests/min per user across keys). Adds visibility-aware throttling.
+  // - Key is stored locally (localStorage) and never transmitted anywhere except api.torn.com.
+
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
 
+  // play nice with FFScouter
   const ffScouterV2DisableWarMonitor = document.createElement("div");
   ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
   ffScouterV2DisableWarMonitor.style.display = "none";
   document.documentElement.appendChild(ffScouterV2DisableWarMonitor);
 
-  let apiKey =
-    localStorage.getItem("xentac-torn_war_stuff_enhanced-apikey") ??
-    "###PDA-APIKEY###";
+  const LS_KEY = "torn_war_stuff_enhanced_optimized-apikey";
+  let apiKey = localStorage.getItem(LS_KEY) ?? "###PDA-APIKEY###";
 
-  const sort_enemies = true;
-  let ever_sorted = false;
+  function hasValidKey() {
+    return typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
+  }
 
-  const CONTENT = "data-twse-content";
-  const TRAVELING = "data-twse-traveling";
-  const HIGHLIGHT = "data-twse-highlight";
-
-  try { GM_registerMenuCommand("Set Api Key", () => checkApiKey(false)); } catch {}
-
-  function checkApiKey(checkExisting = true) {
-    if (
-      !checkExisting || !apiKey ||
-      apiKey.includes("PDA-APIKEY") || apiKey.length !== 16
-    ) {
-      const userInput = prompt(
-        "Please enter a PUBLIC Api Key, it will be used to get basic faction information:",
-        apiKey ?? ""
-      );
-      if (userInput && userInput.length === 16) {
-        apiKey = userInput;
-        localStorage.setItem("xentac-torn_war_stuff_enhanced-apikey", userInput);
-      } else {
-        console.error("[TornWarStuffEnhancedOptimized] User cancelled the Api Key input.");
-      }
+  function promptSetKey() {
+    const userInput = prompt(
+      "Enter your PUBLIC Torn API key (16 chars). Stored locally; used only for faction basic data:",
+      hasValidKey() ? apiKey : ""
+    );
+    if (userInput && userInput.length === 16) {
+      apiKey = userInput.trim();
+      localStorage.setItem(LS_KEY, apiKey);
+      alert("API key saved locally.");
+    } else {
+      alert("No valid key provided. The script will not call the API until a valid key is set.");
     }
   }
 
-  // Only hide native text once we've set our replacement content
+  function clearKey() {
+    localStorage.removeItem(LS_KEY);
+    apiKey = "###PDA-APIKEY###";
+    alert("API key cleared from local storage.");
+  }
+
+  function showDataUse() {
+    alert(
+      [
+        "TWSE Optimized — Data Use / ToS Summary",
+        "",
+        "• Purpose: Show travel/hospital status & sort lists using Torn's official API.",
+        "• API Calls: faction/{id}?selections=basic (read-only).",
+        "• Key Storage: Your PUBLIC key is stored locally in your browser (localStorage).",
+        "• Sharing: Never shared with third parties; only sent to api.torn.com.",
+        "• Access Level: Minimal (basic selection).",
+        "• Rate Limits: Respects Torn’s 100 req/min per-user guidance; throttled and visibility-aware.",
+      ].join("\n")
+    );
+  }
+
+  try {
+    GM_registerMenuCommand("Set API Key", () => promptSetKey());
+    GM_registerMenuCommand("Clear API Key", () => clearKey());
+    GM_registerMenuCommand("Data Use / ToS Summary", () => showDataUse());
+  } catch {}
+
+  // ui
+  const sort_enemies = true;
+  let ever_sorted = false;
+
+  const CONTENT   = "data-twse-content";
+  const TRAVELING = "data-twse-traveling";
+  const HIGHLIGHT = "data-twse-highlight";
+
   GM_addStyle(`
     .members-list li:has(div.status[${HIGHLIGHT}="true"]) { background-color: #afa5 !important; }
     .members-list div.status[${TRAVELING}="true"]::after { color: #F287FF !important; }
@@ -75,19 +106,15 @@
   let found_war = false;
 
   const member_status = new Map(); // userId -> API member
-  const member_lis = new Map(); // userId -> <li>
+  const member_lis = new Map();    // userId -> <li>
 
   function nativeIsOK(statusDiv) {
     if (statusDiv.classList.contains('ok')) return true;
     const txt = statusDiv.textContent.trim().toLowerCase();
-    // catches "Okay", "Ok", "ok", "okay.", etc.
     return txt === 'ok' || txt.startsWith('okay');
   }
 
-  function safeRemoveAttr(el, name) {
-   if (el.hasAttribute(name)) el.removeAttribute(name);
-  }
-
+  function safeRemoveAttr(el, name) { if (el.hasAttribute(name)) el.removeAttribute(name); }
   function get_member_lists() { return document.querySelectorAll("ul.members-list"); }
 
   function get_faction_ids() {
@@ -174,63 +201,82 @@
     });
   }
 
-  // --- Networking / polling ---
+  // network / API
   let last_request_ts = 0;
-  const MIN_TIME_SINCE_LAST_REQUEST = 9000; // ms
+  const MIN_TIME_SINCE_LAST_REQUEST = 9000; // ms between request batches
+  let backoffUntil = 0; // ms epoch; set on rate-limit errors
 
   async function update_statuses() {
     if (!running) return;
+    if (!found_war) return;
+    if (document.hidden) return;
+    if (!hasValidKey()) return;
+
     const now = Date.now();
-    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST) return;
-    last_request_ts = now;
+    if (now < backoffUntil) return;
 
     const faction_ids = get_faction_ids();
+    if (!faction_ids.length) return;
+
+    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST) return;
+
+    let madeARequest = false;
     for (const id of faction_ids) {
       const ok = await update_status(id);
+      madeARequest = true;
       if (!ok) break;
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 150)); // tiny gap between factions
     }
+    if (madeARequest) last_request_ts = Date.now();
   }
 
   async function update_status(faction_id) {
-    let status;
     try {
       const r = await fetch(
-        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`
+        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`,
+        { method: 'GET', mode: 'cors', cache: 'no-store' }
       );
-      status = await r.json();
-    } catch (e) {
-      console.error("[TornWarStuffEnhancedOptimized] ", e);
-      return true;
-    }
+      const status = await r.json();
 
-    if (status?.error) {
-      const code = status.error.code ?? status.error;
-      // Non-recoverable
-      if ([0,1,2,3,4,6,7,10,12,13,14,16,18,21].includes(code)) {
-        running = false;
+      if (status?.error) {
+        const code = status.error.code ?? status.error;
+        // Retry/backoff: 5 = too many requests (temporary ban). 8/9 sometimes used for cooldown/unavailable.
+        if ([5, 8, 9].includes(code)) {
+          backoffUntil = Date.now() + 60_000; // 60s cool-off
+          return false;
+        }
+        // Non-retryable until user action (bad key/params/etc.)
+        if ([0,1,2,3,4,6,7,10,12,13,14,16,18,21].includes(code)) {
+          running = false;
+          console.warn("[TWSE-Optimized] API halted due to error code:", code);
+          return false;
+        }
+        // Unknown error: brief backoff
+        backoffUntil = Date.now() + 20_000;
         return false;
       }
-      // Retryable
-      if ([5,8,9].includes(code)) last_request_ts = Date.now() + 40000;
+
+      if (!status?.members) return true;
+
+      for (const [k, v] of Object.entries(status.members)) {
+        v.status.description = v.status.description
+          .replace("South Africa", "SA")
+          .replace("Cayman Islands", "CI")
+          .replace("United Kingdom", "UK")
+          .replace("Argentina", "Arg")
+          .replace("Switzerland", "Switz");
+        member_status.set(k, v);
+      }
+      return true;
+    } catch (e) {
+      console.error("[TWSE-Optimized] Network/parse error:", e && e.message ? e.message : e);
+      // network hiccup: short backoff
+      backoffUntil = Date.now() + 20_000;
       return false;
     }
-
-    if (!status?.members) return false;
-
-    for (const [k, v] of Object.entries(status.members)) {
-      v.status.description = v.status.description
-        .replace("South Africa", "SA")
-        .replace("Cayman Islands", "CI")
-        .replace("United Kingdom", "UK")
-        .replace("Argentina", "Arg")
-        .replace("Switzerland", "Switz");
-      member_status.set(k, v);
-    }
-    return true;
   }
 
-  // --- Rendering / watch loop ---
+  // render and watch
   let last_frame = 0;
   const TIME_BETWEEN_FRAMES = 500; // ms
 
@@ -266,7 +312,7 @@
         case "Traveling": {
           safeRemoveAttr(li, "data-until");
           safeRemoveAttr(li, "data-location");
-          // Always show travel info (don't depend on CSS classes existing)
+
           if (st.description.includes("Traveling to ")) {
             safeSetAttr(li, "data-sortA", "4");
             const content = "► " + st.description.split("Traveling to ")[1];
@@ -292,7 +338,6 @@
 
         case "Hospital":
         case "Jail": {
-          // If Torn's DOM says they're OK (revived/left early), trust it immediately.
           if (nativeIsOK(status_DIV)) {
             safeRemoveAttr(status_DIV, CONTENT);
             safeSetAttr(status_DIV, TRAVELING, "false");
@@ -302,7 +347,6 @@
             safeRemoveAttr(li, "data-location");
             break;
           }
-          // Always render timer; don't gate on DOM classes
           safeSetAttr(li, "data-sortA", "1");
           safeSetAttr(status_DIV, TRAVELING, st.description.includes("In a") ? "true" : "false");
 
@@ -313,7 +357,7 @@
           const remain = Math.max(0, Math.round(until - nowSec));
           if (remain <= 0) {
             safeSetAttr(status_DIV, HIGHLIGHT, "false");
-            safeSetAttr(status_DIV, CONTENT, status_DIV.innerText); // fallback to native text
+            safeSetAttr(status_DIV, CONTENT, status_DIV.innerText);
             safeRemoveAttr(li, "data-until");
             safeRemoveAttr(li, "data-location");
             break;
@@ -328,17 +372,16 @@
           safeSetAttr(status_DIV, HIGHLIGHT, remain < 300 ? "true" : "false");
           safeRemoveAttr(li, "data-location");
           break;
-          }
+        }
 
-          default: {
-            // show native text and clear our overlays/state
-            safeRemoveAttr(status_DIV, CONTENT);
-            safeSetAttr(li, "data-sortA", "0");
-            safeSetAttr(status_DIV, TRAVELING, "false");
-            safeSetAttr(status_DIV, HIGHLIGHT, "false");
-            safeRemoveAttr(li, "data-until");
-            safeRemoveAttr(li, "data-location");
-          }
+        default: {
+          safeRemoveAttr(status_DIV, CONTENT);
+          safeSetAttr(li, "data-sortA", "0");
+          safeSetAttr(status_DIV, TRAVELING, "false");
+          safeSetAttr(status_DIV, HIGHLIGHT, "false");
+          safeRemoveAttr(li, "data-until");
+          safeRemoveAttr(li, "data-location");
+        }
       }
     });
 
@@ -397,6 +440,6 @@
     requestAnimationFrame(watch);
   }, 1000);
 
-  console.log("[TornWarStuffEnhancedOptimized] Initialized");
+  console.log("[TWSE-Optimized] Initialization complete. Found war section:", found_war, "Valid API key:", hasValidKey());
   window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
 })();
