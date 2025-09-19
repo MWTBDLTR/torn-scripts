@@ -4,6 +4,7 @@
 // @version      1.1
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
+// @license      MIT
 // @match        https://www.torn.com/loader.php*
 // @run-at       document-idle
 // @grant        GM.getValue

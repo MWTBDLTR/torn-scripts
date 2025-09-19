@@ -4,9 +4,9 @@
 // @version      1.2
 // @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized (TWSE-O) - no network activity, no background requests, no automation, just DOM rewiring.
 // @author       MrChurch [3654415]
+// @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        none
-// @license      MIT Inherited
 // ==/UserScript==
 
 (function () {

@@ -1,17 +1,15 @@
 // ==UserScript==
 // @name         Torn Time Table (optimized, live local time)
-// @namespace    https://greasyfork.org
-// @version      0.5.4
+// @namespace    https://github.com/MWTBDLTR/torn-scripts/
+// @version      1.0
 // @description  Shows your local time and a table to convert Torn time to your local time. No network usage.
-// @license      MIT
 // @author       MrChurch [3654415]
+// @license      MIT
 // @match        https://www.torn.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @run-at       document-start
 // @grant        none
 // @noframes
-// @downloadURL  https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
-// @updateURL    https://raw.githubusercontent.com/MWTBDLTR/torn-scripts/refs/heads/main/ttt.js
 // ==/UserScript==
 
 (function () {
