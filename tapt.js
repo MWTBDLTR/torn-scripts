@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Torn Attack Page Timers (TAPT)
 // @namespace   https://github.com/MWTBDLTR/torn-scripts/
-// @version     1.1
-// @description Displays timers on the attack page (scripting rules compliant; CORS-safe)
+// @version     1.2
+// @description Displays timers on the attack page (scripting rules compliant; CORS-safe; menu to set API key; robust mount + console logs)
 // @author      MrChurch [3654415]
 // @license     MIT
 // @run-at      document-end
@@ -16,6 +16,7 @@
 // @match       https://www.torn.com/loader.php?sid=attack*
 // ==/UserScript==
 
+/** --- Settings: stored via userscript manager menu --- */
 const KEY_NAME = 'tapt_api_key';
 
 function setApiKeyInteractive() {
@@ -25,19 +26,23 @@ function setApiKeyInteractive() {
     const trimmed = entered.trim();
     if (trimmed) {
       GM_setValue(KEY_NAME, trimmed);
+      console.info('[TAPT] API key saved.');
       alert('Saved Torn API key.');
       location.reload();
     } else {
       GM_deleteValue(KEY_NAME);
+      console.info('[TAPT] API key cleared.');
       alert('Cleared Torn API key.');
       location.reload();
     }
   }
 }
+
 try {
   GM_registerMenuCommand('Set Torn API key', setApiKeyInteractive);
 } catch { /* menu not supported in some managers */ }
 
+/** --- Helpers --- */
 function fmtTimeLeft(untilEpochSec) {
   const now = Date.now();
   const outMs = Math.max(0, (untilEpochSec * 1000) - now);
@@ -57,9 +62,7 @@ function fmtTimeLeft(untilEpochSec) {
 }
 
 function renderInfo(untilEpochSec) {
-  const outDate = new Date(0);
-  outDate.setUTCSeconds(untilEpochSec);
-
+  const outDate = new Date(untilEpochSec * 1000);
   const secondsLeft = Math.floor(((untilEpochSec * 1000) - Date.now()) / 1000);
   const underMinute = secondsLeft <= 60;
 
@@ -84,13 +87,12 @@ function gmRequestJson(url) {
         headers: { 'Accept': 'application/json' },
         onload: (res) => {
           try { resolve(JSON.parse(res.responseText || '{}')); }
-          catch { resolve({ error: { code: -2, error: 'bad json' } }); }
+          catch (e) { console.warn('[TAPT] Bad JSON from API:', e); resolve({ error: { code: -2, error: 'bad json' } }); }
         },
         onerror: () => resolve({ error: { code: -1, error: 'network error' } }),
         ontimeout: () => resolve({ error: { code: -1, error: 'timeout' } }),
       });
     } else {
-      // fallback if GM_xmlhttpRequest isn’t available
       fetch(url, { credentials: 'omit', mode: 'cors' })
         .then(r => r.json()).then(resolve)
         .catch(() => resolve({ error: { code: -1, error: 'network error' } }));
@@ -100,7 +102,9 @@ function gmRequestJson(url) {
 
 async function getProfile(userId, apiKey) {
   const url = `https://api.torn.com/user/${userId}?selections=profile&key=${encodeURIComponent(apiKey)}&comment=tapt`;
-  return gmRequestJson(url);
+  console.info('[TAPT] Fetching profile:', { userId, url });
+  const data = await gmRequestJson(url);
+  return data;
 }
 
 function mountContainer() {
@@ -109,15 +113,33 @@ function mountContainer() {
     '[class*="dialog"] [class*="buttons"]',
     '[class*="header"]',
     '#react-root',
-    'body'
   ];
   for (const sel of candidates) {
     const el = document.querySelector(sel);
-    if (el) return el;
+    if (el) {
+      console.info('[TAPT] Mount target found:', sel);
+      return { parent: el, overlay: false };
+    }
   }
-  return document.body;
+  console.warn('[TAPT] No stable mount target found; using fixed overlay.');
+  return { parent: document.body, overlay: true };
 }
 
+function applyOverlayStyle(el) {
+  el.style.position = 'fixed';
+  el.style.top = '10px';
+  el.style.right = '12px';
+  el.style.zIndex = '9999';
+  el.style.background = 'rgba(0,0,0,0.6)';
+  el.style.color = '#fff';
+  el.style.padding = '8px 10px';
+  el.style.borderRadius = '10px';
+  el.style.fontSize = '13px';
+  el.style.lineHeight = '1.25';
+  el.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+}
+
+/** --- Main --- */
 (function () {
   'use strict';
 
@@ -129,8 +151,10 @@ function mountContainer() {
 
   const initialTitle = document.title;
   const userId = safeGetUserIdFromUrl();
+  console.info('[TAPT] Detected user2ID:', userId);
+
   if (!userId) {
-    console.warn('[TAPT] Unable to detect user2ID in URL.');
+    console.warn('[TAPT] Unable to detect user2ID in URL. Ensure the attack URL includes user2ID=...');
     return;
   }
 
@@ -146,14 +170,27 @@ function mountContainer() {
     const name = user?.name || 'Player';
     const status = user?.status;
     if (!status || typeof status.state !== 'string') {
-      console.warn('[TAPT] Missing status in profile payload.');
+      console.warn('[TAPT] Missing status in profile payload:', user);
       return;
     }
 
     const inHospital = status.state.toLowerCase() === 'hospital';
     const until = Number(status.until); // epoch seconds
 
-    if (!inHospital || !Number.isFinite(until) || until <= 0) {
+    console.info('[TAPT] API OK:', {
+      name,
+      state: status.state,
+      until,
+      untilLocal: new Date(until * 1000).toLocaleString(),
+      timeLeft: fmtTimeLeft(until)
+    });
+
+    if (!inHospital) {
+      console.info('[TAPT] Target not in hospital; timer not shown.');
+      return;
+    }
+    if (!Number.isFinite(until) || until <= 0) {
+      console.warn('[TAPT] Invalid/zero hospital "until" timestamp.');
       return;
     }
 
@@ -163,13 +200,14 @@ function mountContainer() {
     wrapper.style.fontSize = '13px';
     wrapper.style.lineHeight = '1.25';
 
-    const parent = mountContainer();
+    const { parent, overlay } = mountContainer();
     parent.appendChild(wrapper);
+    if (overlay) applyOverlayStyle(wrapper);
 
-    // keep attached across react re-renders
+    // Keep attached across React re-renders unless overlay (fixed to body)
     const obs = new MutationObserver(() => {
-      if (!document.contains(wrapper)) {
-        try { mountContainer().appendChild(wrapper); } catch {}
+      if (!overlay && !document.contains(wrapper)) {
+        try { mountContainer().parent.appendChild(wrapper); } catch {}
       }
     });
     obs.observe(document.body, { childList: true, subtree: true });
@@ -190,7 +228,7 @@ function mountContainer() {
     tickInterval = setInterval(updateUI, 1000);
   })();
 
-  // clean up
+  // Clean up on nav-away
   window.addEventListener('beforeunload', () => {
     if (tickInterval) clearInterval(tickInterval);
   });
