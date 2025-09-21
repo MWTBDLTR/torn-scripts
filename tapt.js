@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Torn Attack Page Timers (TAPT)
 // @namespace   https://github.com/MWTBDLTR/torn-scripts/
-// @version     1.3
-// @description Displays hospital timers on the attack page (rules-compliant; CORS-safe; menu for API key + Local/TCT time mode; robust mount + console logs)
+// @version     1.4
+// @description Displays hospital timers on the attack page (rules-compliant; CORS-safe; menu for API key + Local/TCT time mode; prefers dialogButtons mount)
 // @author      MrChurch [3654415]
 // @license     MIT
 // @run-at      document-end
@@ -18,7 +18,7 @@
 
 /** --- Settings stored via userscript manager menu --- */
 const KEY_API   = 'tapt_api_key';
-const KEY_MODE  = 'tapt_time_mode'; // 'local' | 'tct'
+const KEY_MODE  = 'tapt_time_mode';
 const DEFAULT_MODE = 'local';
 
 function setApiKeyInteractive() {
@@ -105,7 +105,7 @@ function renderInfo(untilEpochSec, timeMode) {
   return `
     <div style="height:6px"></div>
     <div>Coming out at ${time} <span style="opacity:.8">(${label})</span></div>
-    <div>in <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
+    <div>In <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
   `;
 }
 
@@ -142,23 +142,8 @@ async function getProfile(userId, apiKey) {
   return gmRequestJson(url);
 }
 
-function mountContainer() {
-  const candidates = [
-    '[class*="dialogButtons"]',
-    '[class*="dialog"] [class*="buttons"]',
-    '[class*="header"]',
-    '#react-root',
-  ];
-  for (const sel of candidates) {
-    const el = document.querySelector(sel);
-    if (el) {
-      console.info('[TAPT] Mount target found:', sel);
-      return { parent: el, overlay: false };
-    }
-  }
-  console.warn('[TAPT] No stable mount target found; using fixed overlay.');
-  return { parent: document.body, overlay: true };
-}
+const DIALOG_SELECTOR = '[class*="dialogButtons"]';
+const HEADER_SELECTOR = '[class*="header"]';
 
 function applyOverlayStyle(el) {
   el.style.position = 'fixed';
@@ -172,6 +157,28 @@ function applyOverlayStyle(el) {
   el.style.fontSize = '13px';
   el.style.lineHeight = '1.25';
   el.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+}
+function clearOverlayStyle(el) {
+  Object.assign(el.style, {
+    position: '', top: '', right: '', zIndex: '', background: '',
+    color: '', padding: '', borderRadius: '', boxShadow: ''
+  });
+}
+
+function waitForSelector(selector, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    const existing = document.querySelector(selector);
+    if (existing) return resolve(existing);
+    const obs = new MutationObserver(() => {
+      const el = document.querySelector(selector);
+      if (el) {
+        obs.disconnect();
+        resolve(el);
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => { obs.disconnect(); resolve(null); }, timeoutMs);
+  });
 }
 
 (function () {
@@ -238,19 +245,50 @@ function applyOverlayStyle(el) {
     wrapper.style.fontSize = '13px';
     wrapper.style.lineHeight = '1.25';
 
-    const { parent, overlay } = mountContainer();
+    // wait briefly; else header; else overlay on body
+    let parent = await waitForSelector(DIALOG_SELECTOR, 2500);
+    let overlay = false;
+
+    if (parent) {
+      console.info('[TAPT] Mount target found (preferred):', DIALOG_SELECTOR);
+    } else {
+      parent = document.querySelector(HEADER_SELECTOR);
+      if (parent) {
+        console.info('[TAPT] Preferred not found; mounting to header:', HEADER_SELECTOR);
+      } else {
+        parent = document.body;
+        overlay = true;
+        console.warn('[TAPT] Neither preferred nor header found; using fixed overlay on body.');
+      }
+    }
+
     parent.appendChild(wrapper);
     if (overlay) applyOverlayStyle(wrapper);
 
-    const obs = new MutationObserver(() => {
-      if (!overlay && !document.contains(wrapper)) {
+    //  move to dialogButtons when it appears
+    //  reattach if wrapper gets detached during SPA re-renders
+    const anchorObserver = new MutationObserver(() => {
+      // move to dialogButtons if available and not already there
+      const dlg = document.querySelector(DIALOG_SELECTOR);
+      if (dlg && wrapper.parentElement !== dlg) {
         try {
-          const m = mountContainer();
-          m.parent.appendChild(wrapper);
+          clearOverlayStyle(wrapper);
+          dlg.appendChild(wrapper);
+          console.info('[TAPT] Moved timer to preferred mount:', DIALOG_SELECTOR);
         } catch {}
       }
+      // if wrapper somehow got removed, re-attach to best target
+      if (!document.contains(wrapper)) {
+        const best = document.querySelector(DIALOG_SELECTOR)
+                  || document.querySelector(HEADER_SELECTOR)
+                  || document.body;
+        if (best === document.body) applyOverlayStyle(wrapper);
+        else clearOverlayStyle(wrapper);
+        try { best.appendChild(wrapper); } catch {}
+        console.info('[TAPT] Reattached timer to:', best === document.body ? 'body (overlay)' : (best === document.querySelector(HEADER_SELECTOR) ? 'header' : 'dialogButtons'));
+      }
     });
-    obs.observe(document.body, { childList: true, subtree: true });
+    anchorObserver.observe(document.body, { childList: true, subtree: true });
 
     const updateUI = () => {
       const remainingMs = (until * 1000) - Date.now();
@@ -259,7 +297,7 @@ function applyOverlayStyle(el) {
         document.title = `${fmtTimeLeft(until)} | ${name}`;
       } else {
         clearInterval(tickInterval);
-        obs.disconnect();
+        anchorObserver.disconnect();
         document.title = initialTitle;
       }
     };
