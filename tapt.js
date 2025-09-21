@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Torn Attack Page Timers (TAPT)
 // @namespace   https://github.com/MWTBDLTR/torn-scripts/
-// @version     1.2
-// @description Displays timers on the attack page (scripting rules compliant; CORS-safe; menu to set API key; robust mount + console logs)
+// @version     1.3
+// @description Displays hospital timers on the attack page (rules-compliant; CORS-safe; menu for API key + Local/TCT time mode; robust mount + console logs)
 // @author      MrChurch [3654415]
 // @license     MIT
 // @run-at      document-end
@@ -16,21 +16,23 @@
 // @match       https://www.torn.com/loader.php?sid=attack*
 // ==/UserScript==
 
-/** --- Settings: stored via userscript manager menu --- */
-const KEY_NAME = 'tapt_api_key';
+/** --- Settings stored via userscript manager menu --- */
+const KEY_API   = 'tapt_api_key';
+const KEY_MODE  = 'tapt_time_mode'; // 'local' | 'tct'
+const DEFAULT_MODE = 'local';
 
 function setApiKeyInteractive() {
-  const current = GM_getValue(KEY_NAME, '');
+  const current = GM_getValue(KEY_API, '');
   const entered = prompt('Enter your Torn API key (User key with Basic read access):', current || '');
   if (entered !== null) {
     const trimmed = entered.trim();
     if (trimmed) {
-      GM_setValue(KEY_NAME, trimmed);
+      GM_setValue(KEY_API, trimmed);
       console.info('[TAPT] API key saved.');
       alert('Saved Torn API key.');
       location.reload();
     } else {
-      GM_deleteValue(KEY_NAME);
+      GM_deleteValue(KEY_API);
       console.info('[TAPT] API key cleared.');
       alert('Cleared Torn API key.');
       location.reload();
@@ -38,11 +40,25 @@ function setApiKeyInteractive() {
   }
 }
 
+function setTimeMode(mode) {
+  const normalized = (mode === 'tct') ? 'tct' : 'local';
+  GM_setValue(KEY_MODE, normalized);
+  console.info(`[TAPT] Time mode set to: ${normalized.toUpperCase()}`);
+  alert(`Time display set to: ${normalized.toUpperCase()}`);
+  location.reload();
+}
+
+function chooseLocalTime() { setTimeMode('local'); }
+function chooseTornTime()  { setTimeMode('tct');   }
+
 try {
   GM_registerMenuCommand('Set Torn API key', setApiKeyInteractive);
-} catch { /* menu not supported in some managers */ }
+  const currentMode = (GM_getValue(KEY_MODE, DEFAULT_MODE) || 'local').toLowerCase();
+  const label = currentMode === 'tct' ? 'Torn Time (TCT)' : 'Local Time';
+  GM_registerMenuCommand(`Time display (current: ${label}) → Set LOCAL`, chooseLocalTime);
+  GM_registerMenuCommand(`Time display (current: ${label}) → Set TCT`,   chooseTornTime);
+} catch { /* menu may not be supported in some managers */ }
 
-/** --- Helpers --- */
 function fmtTimeLeft(untilEpochSec) {
   const now = Date.now();
   const outMs = Math.max(0, (untilEpochSec * 1000) - now);
@@ -61,15 +77,35 @@ function fmtTimeLeft(untilEpochSec) {
   return `${seconds}s`;
 }
 
-function renderInfo(untilEpochSec) {
-  const outDate = new Date(untilEpochSec * 1000);
+function formatOutTime(untilEpochSec, timeMode) {
+  const d = new Date(untilEpochSec * 1000);
+  if (timeMode === 'tct') {
+    return {
+      label: 'TCT',
+      time: d.toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', second: '2-digit',
+        hour12: true, timeZone: 'UTC'
+      })
+    };
+  }
+  return {
+    label: 'Local',
+    time: d.toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit', second: '2-digit',
+      hour12: true
+    })
+  };
+}
+
+function renderInfo(untilEpochSec, timeMode) {
   const secondsLeft = Math.floor(((untilEpochSec * 1000) - Date.now()) / 1000);
   const underMinute = secondsLeft <= 60;
+  const { time, label } = formatOutTime(untilEpochSec, timeMode);
 
   return `
     <div style="height:6px"></div>
-    <div>Coming out at ${outDate.toLocaleTimeString('en-US')}</div>
-    <div>In <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
+    <div>Coming out at ${time} <span style="opacity:.8">(${label})</span></div>
+    <div>in <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
   `;
 }
 
@@ -103,8 +139,7 @@ function gmRequestJson(url) {
 async function getProfile(userId, apiKey) {
   const url = `https://api.torn.com/user/${userId}?selections=profile&key=${encodeURIComponent(apiKey)}&comment=tapt`;
   console.info('[TAPT] Fetching profile:', { userId, url });
-  const data = await gmRequestJson(url);
-  return data;
+  return gmRequestJson(url);
 }
 
 function mountContainer() {
@@ -139,11 +174,10 @@ function applyOverlayStyle(el) {
   el.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
 }
 
-/** --- Main --- */
 (function () {
   'use strict';
 
-  const storedKey = GM_getValue(KEY_NAME, '');
+  const storedKey = GM_getValue(KEY_API, '');
   if (!storedKey) {
     console.warn('[TAPT] No API key set. Use script menu → "Set Torn API key".');
     return;
@@ -152,6 +186,9 @@ function applyOverlayStyle(el) {
   const initialTitle = document.title;
   const userId = safeGetUserIdFromUrl();
   console.info('[TAPT] Detected user2ID:', userId);
+
+  const timeMode = (GM_getValue(KEY_MODE, DEFAULT_MODE) || 'local').toLowerCase();
+  console.info('[TAPT] Using time mode:', timeMode.toUpperCase());
 
   if (!userId) {
     console.warn('[TAPT] Unable to detect user2ID in URL. Ensure the attack URL includes user2ID=...');
@@ -182,6 +219,7 @@ function applyOverlayStyle(el) {
       state: status.state,
       until,
       untilLocal: new Date(until * 1000).toLocaleString(),
+      untilTCT:   new Date(until * 1000).toLocaleString('en-US', { timeZone: 'UTC' }),
       timeLeft: fmtTimeLeft(until)
     });
 
@@ -204,17 +242,19 @@ function applyOverlayStyle(el) {
     parent.appendChild(wrapper);
     if (overlay) applyOverlayStyle(wrapper);
 
-    // Keep attached across React re-renders unless overlay (fixed to body)
     const obs = new MutationObserver(() => {
       if (!overlay && !document.contains(wrapper)) {
-        try { mountContainer().parent.appendChild(wrapper); } catch {}
+        try {
+          const m = mountContainer();
+          m.parent.appendChild(wrapper);
+        } catch {}
       }
     });
     obs.observe(document.body, { childList: true, subtree: true });
 
     const updateUI = () => {
       const remainingMs = (until * 1000) - Date.now();
-      wrapper.innerHTML = renderInfo(until);
+      wrapper.innerHTML = renderInfo(until, timeMode);
       if (remainingMs > 0) {
         document.title = `${fmtTimeLeft(until)} | ${name}`;
       } else {
@@ -228,7 +268,6 @@ function applyOverlayStyle(el) {
     tickInterval = setInterval(updateUI, 1000);
   })();
 
-  // Clean up on nav-away
   window.addEventListener('beforeunload', () => {
     if (tickInterval) clearInterval(tickInterval);
   });
