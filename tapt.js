@@ -1,18 +1,42 @@
 // ==UserScript==
 // @name        Torn Attack Page Timers (TAPT)
 // @namespace   https://github.com/MWTBDLTR/torn-scripts/
-// @version     1.0
+// @version     1.1
 // @description Displays timers on the attack page (scripting rules compliant; CORS-safe)
 // @author      MrChurch [3654415]
 // @license     MIT
 // @run-at      document-end
 // @grant       GM_log
 // @grant       GM_xmlhttpRequest
+// @grant       GM_registerMenuCommand
+// @grant       GM_getValue
+// @grant       GM_setValue
+// @grant       GM_deleteValue
 // @connect     api.torn.com
 // @match       https://www.torn.com/loader.php?sid=attack*
 // ==/UserScript==
 
-const apiKey = "";
+const KEY_NAME = 'tapt_api_key';
+
+function setApiKeyInteractive() {
+  const current = GM_getValue(KEY_NAME, '');
+  const entered = prompt('Enter your Torn API key (User key with Basic read access):', current || '');
+  if (entered !== null) {
+    const trimmed = entered.trim();
+    if (trimmed) {
+      GM_setValue(KEY_NAME, trimmed);
+      alert('Saved Torn API key.');
+      location.reload();
+    } else {
+      GM_deleteValue(KEY_NAME);
+      alert('Cleared Torn API key.');
+      location.reload();
+    }
+  }
+}
+try {
+  GM_registerMenuCommand('Set Torn API key', setApiKeyInteractive);
+} catch { /* menu not supported in some managers */ }
 
 function fmtTimeLeft(untilEpochSec) {
   const now = Date.now();
@@ -74,8 +98,8 @@ function gmRequestJson(url) {
   });
 }
 
-async function getProfile(userId) {
-  const url = `https://api.torn.com/user/${userId}?selections=profile&key=${encodeURIComponent(apiKey)}&comment=attack_stats`;
+async function getProfile(userId, apiKey) {
+  const url = `https://api.torn.com/user/${userId}?selections=profile&key=${encodeURIComponent(apiKey)}&comment=tapt`;
   return gmRequestJson(url);
 }
 
@@ -97,29 +121,32 @@ function mountContainer() {
 (function () {
   'use strict';
 
+  const storedKey = GM_getValue(KEY_NAME, '');
+  if (!storedKey) {
+    console.warn('[TAPT] No API key set. Use script menu → "Set Torn API key".');
+    return;
+  }
+
   const initialTitle = document.title;
   const userId = safeGetUserIdFromUrl();
   if (!userId) {
-    console.warn('[torn-attack-hospital-timer] Unable to detect user2ID in URL.');
-    return;
-  }
-  if (!apiKey) {
-    console.warn('[torn-attack-hospital-timer] No API key set.');
+    console.warn('[TAPT] Unable to detect user2ID in URL.');
     return;
   }
 
   let tickInterval = null;
 
   (async () => {
-    const user = await getProfile(userId);
+    const user = await getProfile(userId, storedKey);
     if (user?.error) {
-      console.warn('[torn-attack-hospital-timer] API error:', user.error);
+      console.warn('[TAPT] API error:', user.error);
       return;
     }
 
+    const name = user?.name || 'Player';
     const status = user?.status;
     if (!status || typeof status.state !== 'string') {
-      console.warn('[torn-attack-hospital-timer] Missing status in profile payload.');
+      console.warn('[TAPT] Missing status in profile payload.');
       return;
     }
 
@@ -131,12 +158,12 @@ function mountContainer() {
     }
 
     const wrapper = document.createElement('div');
-    wrapper.setAttribute('data-taht', '1');
+    wrapper.setAttribute('data-tapt', '1');
     wrapper.style.marginTop = '8px';
     wrapper.style.fontSize = '13px';
     wrapper.style.lineHeight = '1.25';
 
-    let parent = mountContainer();
+    const parent = mountContainer();
     parent.appendChild(wrapper);
 
     // keep attached across react re-renders
@@ -148,25 +175,22 @@ function mountContainer() {
     obs.observe(document.body, { childList: true, subtree: true });
 
     const updateUI = () => {
-      const now = Date.now();
-      const remainingMs = (until * 1000) - now;
-      if (remainingMs <= 0) {
-        // stop once timer finishes; restore title
+      const remainingMs = (until * 1000) - Date.now();
+      wrapper.innerHTML = renderInfo(until);
+      if (remainingMs > 0) {
+        document.title = `${fmtTimeLeft(until)} | ${name}`;
+      } else {
         clearInterval(tickInterval);
         obs.disconnect();
-        wrapper.innerHTML = renderInfo(until);
         document.title = initialTitle;
-        return;
       }
-      wrapper.innerHTML = renderInfo(until);
-      document.title = `${fmtTimeLeft(until)} | ${user.name || 'Player'}`;
     };
 
     updateUI();
     tickInterval = setInterval(updateUI, 1000);
   })();
 
-  // Clean up on nav-away
+  // clean up
   window.addEventListener('beforeunload', () => {
     if (tickInterval) clearInterval(tickInterval);
   });
