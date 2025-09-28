@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.6
+// @version      1.1.7
 // @description  Travel status and hospital time sorted on war page.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -15,12 +15,6 @@
 (async function () {
   'use strict';
 
-  // Compliance notes:
-  // - Uses ONLY Torn's official API (https://api.torn.com). No scraping of unseen pages; no non-API network calls.
-  // - No captcha bypass; no click emulation. UI read/modify on the page you’re viewing is allowed.
-  // - Respects Torn API rate guidance (100 requests/min per user across keys). Adds visibility-aware throttling.
-  // - Key is stored locally (localStorage) and never transmitted anywhere except api.torn.com.
-
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
 
   // play nice with FFScouter
@@ -32,16 +26,15 @@
   const LS_KEY = "torn_war_stuff_enhanced_optimized-apikey";
   let apiKey = localStorage.getItem(LS_KEY) ?? "###PDA-APIKEY###";
 
-  function hasValidKey() {
-    return typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
-  }
+  const hasValidKey = () =>
+    typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
 
   function promptSetKey() {
     const userInput = prompt(
       "Enter your PUBLIC Torn API key (16 chars). Stored locally; used only for faction basic data:",
       hasValidKey() ? apiKey : ""
     );
-    if (userInput && userInput.length === 16) {
+    if (userInput && userInput.trim().length === 16) {
       apiKey = userInput.trim();
       localStorage.setItem(LS_KEY, apiKey);
       alert("API key saved locally.");
@@ -104,17 +97,20 @@
 
   let running = true;
   let found_war = false;
-  
+  let warRoot = null;
+
   function onWarFound() {
     if (found_war) return; // de-dupe
     found_war = true;
+    warRoot = document.querySelector(".faction-war") || document;
     extract_all_member_lis();
     prime_status_placeholders();
     window.dispatchEvent(new Event("twse-war-found"));
   }
 
   const member_status = new Map(); // userId -> API member
-  const member_lis = new Map(); // userId -> <li>
+  const member_lis = new Map();    // userId -> <li>
+  let memberListsCache = [];        // cached Node[] of ul.members-list
 
   function nativeIsOK(statusDiv) {
     if (statusDiv.classList.contains('ok')) return true;
@@ -122,10 +118,19 @@
     return txt === 'ok' || txt.startsWith('okay');
   }
 
-  function safeRemoveAttr(el, name) { if (el.hasAttribute(name)) el.removeAttribute(name); }
-  function get_member_lists() { return document.querySelectorAll("ul.members-list"); }
+  const safeRemoveAttr = (el, name) => { if (el.hasAttribute(name)) el.removeAttribute(name); };
+
+  function get_member_lists() {
+    // prefer cache; refresh only when DOM mutates (observer will update)
+    return memberListsCache;
+  }
+
+  function refresh_member_lists_cache() {
+    memberListsCache = Array.from((warRoot || document).querySelectorAll("ul.members-list"));
+  }
 
   function get_faction_ids() {
+    // compute once per batch, scoped to warRoot for cheaper lookup
     const ids = new Set();
     get_member_lists().forEach((elem) => {
       const a = elem.querySelector(`a[href^="/factions.php"]`);
@@ -163,11 +168,18 @@
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (node?.classList?.contains("faction-war")) {
-          found_war = true;
-          extract_all_member_lis();
-          prime_status_placeholders();
-          window.dispatchEvent(new Event("twse-war-found")); // notify logger
+          onWarFound();
+          refresh_member_lists_cache();
           return;
+        }
+        // Keep lists cache fresh if war area changes dynamically
+        if (node?.nodeType === 1 && (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list"))) {
+          refresh_member_lists_cache();
+        }
+      }
+      for (const node of m.removedNodes) {
+        if (node?.nodeType === 1 && (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list"))) {
+          refresh_member_lists_cache();
         }
       }
     }
@@ -181,6 +193,7 @@
 
   function extract_all_member_lis() {
     member_lis.clear();
+    refresh_member_lists_cache();
     get_member_lists().forEach(extract_member_lis);
   }
 
@@ -201,8 +214,9 @@
   }
 
   function prime_status_placeholders() {
-    document.querySelectorAll(".members-list div.status").forEach((el) => {
-      if (!el.hasAttribute(CONTENT)) el.setAttribute(CONTENT, el.innerText);
+    // use textContent (no layout), and only write when needed
+    (warRoot || document).querySelectorAll(".members-list div.status").forEach((el) => {
+      if (!el.hasAttribute(CONTENT)) el.setAttribute(CONTENT, el.textContent);
     });
   }
 
@@ -210,12 +224,21 @@
   let last_request_ts = 0;
   const MIN_TIME_SINCE_LAST_REQUEST = 9000; // ms between request batches
   let backoffUntil = 0; // ms epoch; set on rate-limit errors
+  let inFlightController = null;
+
+  function abortInFlight() {
+    if (inFlightController) {
+      try { inFlightController.abort(); } catch {}
+      inFlightController = null;
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) abortInFlight();
+  }, { passive: true });
 
   async function update_statuses() {
-    if (!running) return;
-    if (!found_war) return;
-    if (document.hidden) return;
-    if (!hasValidKey()) return;
+    if (!running || !found_war || document.hidden || !hasValidKey()) return;
 
     const now = Date.now();
     if (now < backoffUntil) return;
@@ -225,21 +248,24 @@
 
     if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST) return;
 
+    inFlightController = new AbortController();
     let madeARequest = false;
     for (const id of faction_ids) {
-      const ok = await update_status(id);
+      const ok = await update_status(id, inFlightController.signal);
       madeARequest = true;
       if (!ok) break;
       await new Promise((r) => setTimeout(r, 150)); // tiny gap between factions
+      if (document.hidden) break;
     }
     if (madeARequest) last_request_ts = Date.now();
+    inFlightController = null;
   }
 
-  async function update_status(faction_id) {
+  async function update_status(faction_id, signal) {
     try {
       const r = await fetch(
         `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`,
-        { method: 'GET', mode: 'cors', cache: 'no-store' }
+        { method: 'GET', mode: 'cors', cache: 'no-store', signal }
       );
       const status = await r.json();
 
@@ -263,8 +289,11 @@
 
       if (!status?.members) return true;
 
+      // micro-normalize once per batch
       for (const [k, v] of Object.entries(status.members)) {
-        v.status.description = v.status.description
+        const d = v.status?.description || "";
+        // cheap replacements (common ones first)
+        v.status.description = d
           .replace("South Africa", "SA")
           .replace("Cayman Islands", "CI")
           .replace("United Kingdom", "UK")
@@ -274,6 +303,7 @@
       }
       return true;
     } catch (e) {
+      if (e?.name === 'AbortError') return false;
       console.error("[TWSE-Optimized] Network/parse error:", e && e.message ? e.message : e);
       // network hiccup: short backoff
       backoffUntil = Date.now() + 20_000;
@@ -283,12 +313,26 @@
 
   // render and watch
   let last_frame = 0;
-  const TIME_BETWEEN_FRAMES = 500; // ms
+  // refresh cadence 1s
+  const TIME_BETWEEN_FRAMES = 1000; // ms
+  const pad = (n) => n < 10 ? "0"+n : ""+n;
 
-  function pad(n){ return n < 10 ? "0"+n : ""+n; }
   function safeSetAttr(el, name, value) {
     const v = String(value);
     if (el.getAttribute(name) !== v) el.setAttribute(name, v);
+  }
+  function setDataset(el, key, value) {
+    const v = value == null ? "" : String(value);
+    if (el.dataset[key] !== v) el.dataset[key] = v;
+  }
+
+  // stable ASCII-ish compare and faster than ad-hoc < and >
+  const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: false });
+
+  function nowSeconds() {
+    // don’t recompute Math.floor twice in hot path
+    const ts = window.getCurrentTimestamp ? window.getCurrentTimestamp() : Date.now();
+    return (ts / 1000) | 0;
   }
 
   function watch() {
@@ -304,13 +348,14 @@
       if (!status_DIV) return;
 
       if (!state || !running) {
-        safeSetAttr(status_DIV, CONTENT, status_DIV.innerText);
+        // restore original (no layout read)
+        safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
         return;
       }
 
       const st = state.status;
-      safeSetAttr(li, "data-until", st.until ?? "");
-      safeSetAttr(li, "data-location", "");
+      setDataset(li, "until", st.until ?? "");
+      setDataset(li, "location", "");
 
       switch (st.state) {
         case "Abroad":
@@ -319,23 +364,23 @@
           safeRemoveAttr(li, "data-location");
 
           if (st.description.includes("Traveling to ")) {
-            safeSetAttr(li, "data-sortA", "4");
+            setDataset(li, "sortA", 4);
             const content = "► " + st.description.split("Traveling to ")[1];
-            safeSetAttr(li, "data-location", content);
+            setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
           } else if (st.description.includes("In ")) {
-            safeSetAttr(li, "data-sortA", "3");
+            setDataset(li, "sortA", 3);
             const content = st.description.split("In ")[1];
-            safeSetAttr(li, "data-location", content);
+            setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
           } else if (st.description.includes("Returning")) {
-            safeSetAttr(li, "data-sortA", "2");
+            setDataset(li, "sortA", 2);
             const content = "◄ " + st.description.split("Returning to Torn from ")[1];
-            safeSetAttr(li, "data-location", content);
+            setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
           } else {
-            safeSetAttr(li, "data-sortA", "5");
-            safeSetAttr(li, "data-location", "Traveling");
+            setDataset(li, "sortA", 5);
+            setDataset(li, "location", "Traveling");
             safeSetAttr(status_DIV, CONTENT, "Traveling");
           }
           break;
@@ -347,30 +392,26 @@
             safeRemoveAttr(status_DIV, CONTENT);
             safeSetAttr(status_DIV, TRAVELING, "false");
             safeSetAttr(status_DIV, HIGHLIGHT, "false");
-            safeSetAttr(li, "data-sortA", "0");
+            setDataset(li, "sortA", 0);
             safeRemoveAttr(li, "data-until");
             safeRemoveAttr(li, "data-location");
             break;
           }
-          safeSetAttr(li, "data-sortA", "1");
+          setDataset(li, "sortA", 1);
           safeSetAttr(status_DIV, TRAVELING, st.description.includes("In a") ? "true" : "false");
 
-          let nowSec = Math.floor(Date.now() / 1000);
-          if (window.getCurrentTimestamp) nowSec = Math.floor(window.getCurrentTimestamp() / 1000);
-
-          const until = Number.isFinite(st.until) ? st.until : 0;
-          const remain = Math.max(0, Math.round(until - nowSec));
+          const remain = Math.max(0, ((st.until >>> 0) - nowSeconds()) | 0);
           if (remain <= 0) {
             safeSetAttr(status_DIV, HIGHLIGHT, "false");
-            safeSetAttr(status_DIV, CONTENT, status_DIV.innerText);
+            safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
             safeRemoveAttr(li, "data-until");
             safeRemoveAttr(li, "data-location");
             break;
           }
 
-          const s = Math.floor(remain % 60);
-          const m = Math.floor((remain / 60) % 60);
-          const h = Math.floor(remain / 3600);
+          const s = remain % 60;
+          const m = ((remain / 60) | 0) % 60;
+          const h = (remain / 3600) | 0;
           const t = `${pad(h)}:${pad(m)}:${pad(s)}`;
 
           if (status_DIV.getAttribute(CONTENT) !== t) safeSetAttr(status_DIV, CONTENT, t);
@@ -381,7 +422,7 @@
 
         default: {
           safeRemoveAttr(status_DIV, CONTENT);
-          safeSetAttr(li, "data-sortA", "0");
+          setDataset(li, "sortA", 0);
           safeSetAttr(status_DIV, TRAVELING, "false");
           safeSetAttr(status_DIV, HIGHLIGHT, "false");
           safeRemoveAttr(li, "data-until");
@@ -398,31 +439,32 @@
         if (sorted_column.column !== "status") continue;
 
         const lis = lists[i].querySelectorAll("li.enemy, li.your");
-        const arr = Array.from(lis);
+        // Pre-read once for cheaper sorting
+        const arr = Array.from(lis).map(li => ({
+          li,
+          a: +(li.dataset.sortA || 0),
+          loc: li.getAttribute("data-location") || "",
+          until: +(li.getAttribute("data-until") || 0)
+        }));
 
-        const sorted = arr.slice().sort((a, b) => {
-          let left = a, right = b;
-          if (sorted_column.order === "desc") [left, right] = [b, a];
+        const asc = sorted_column.order === "asc";
+        const sorted = arr.slice().sort((L, R) => {
+          let left = L, right = R;
+          if (!asc) [left, right] = [R, L];
 
-          const aA = Number(left.getAttribute("data-sortA") || 0);
-          const bA = Number(right.getAttribute("data-sortA") || 0);
-          if (aA !== bA) return aA - bA;
+          if (left.a !== right.a) return left.a - right.a;
 
-          const lLoc = left.getAttribute("data-location") || "";
-          const rLoc = right.getAttribute("data-location") || "";
-          if (lLoc && rLoc) {
-            if (lLoc < rLoc) return -1;
-            if (lLoc > rLoc) return 1;
+          if (left.loc && right.loc) {
+            const cmp = collator.compare(left.loc, right.loc);
+            if (cmp !== 0) return cmp;
           }
+          return left.until - right.until;
+        }).map(o => o.li);
 
-          const lUntil = Number(left.getAttribute("data-until") || 0);
-          const rUntil = Number(right.getAttribute("data-until") || 0);
-          return lUntil - rUntil;
-        });
-
+        // Only touch DOM if real change
         let isSame = true;
         for (let j = 0; j < sorted.length; j++) {
-          if (lists[i].children[j] !== sorted[j]) { isSame = false; break; }
+          if (lis[j] !== sorted[j]) { isSame = false; break; }
         }
         if (!isSame) {
           const frag = document.createDocumentFragment();
@@ -435,6 +477,7 @@
     requestAnimationFrame(watch);
   }
 
+  // simple scheduler (unchanged cadence)
   (function tick() {
     update_statuses();
     setTimeout(tick, 1000);
