@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced — Optimized & Merged
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      0.1
-// @description  Show travel status and hospital time and sort by hospital time on the war page. Merged from "Torn War Stuff Enhanced" and "TWSE-Optimized".
-// @author       xentac + MrChurch [3654415] + merge
+// @version      0.2
+// @description  Show travel status and hospital time and sort by hospital time on the war page. Merged from "Torn War Stuff Enhanced" and "TWSE-Optimized", plus performance tweaks.
+// @author       xentac + MrChurch [3654415] + merge (+opt pass)
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
-// @grant        GM_xmlhttpRequest
 // @connect      api.torn.com
 // ==/UserScript==
 
@@ -37,6 +36,9 @@
       apiKey = userInput.trim();
       localStorage.setItem(LS_KEY, apiKey);
       alert("API key saved locally.");
+      running = true; // re-enable if it was halted
+      backoffMs = 0;
+      backoffUntil = 0;
     } else {
       alert("No valid key provided. The script will not call the API until a valid key is set.");
     }
@@ -69,16 +71,12 @@
   const TRAVELING = "data-twse-traveling";
   const HIGHLIGHT = "data-twse-highlight";
   const HCLASS    = "twse-highlight"; // fallback class for old browsers (no :has)
+  const HAS_HAS   = CSS.supports?.("selector(:has(*))") ?? false;
 
   GM_addStyle(`
-    /* New: class fallback so highlight works without :has */
     .members-list li.${HCLASS} { background-color: #afa5 !important; }
-
-    /* Preferred (supported browsers): :has selector */
     .members-list li:has(div.status[${HIGHLIGHT}="true"]) { background-color: #afa5 !important; }
-
     .members-list div.status[${TRAVELING}="true"]::after { color: #F287FF !important; }
-
     .members-list div.status { position: relative !important; }
     .members-list div.status[${CONTENT}] { color: transparent !important; }
     .members-list div.status[${CONTENT}]::after {
@@ -95,34 +93,44 @@
   // state
   const sort_enemies = true;
   let ever_sorted = false;
-
   let running = true;
   let found_war = false;
   let warRoot = null;
 
   const member_status = new Map(); // userId -> API member
-  const member_lis = new Map(); // userId -> <li>
+  const member_lis = new Map();    // userId -> <li>
   let memberListsCache = [];
 
-  // utilities
-  const safeRemoveAttr = (el, name) => { if (el && el.hasAttribute && el.hasAttribute(name)) el.removeAttribute(name); };
-  const safeSetAttr = (el, name, value) => {
-    if (!el) return;
-    const v = String(value);
-    if (el.getAttribute(name) !== v) el.setAttribute(name, v);
-  };
+  // cached nodes / helpers
+  const liStatusDiv = new WeakMap(); // li -> div.status
+
+  function getStatusDiv(li) {
+    let d = liStatusDiv.get(li);
+    if (!d || !d.isConnected) {
+      d = li.querySelector("div.status");
+      if (d) liStatusDiv.set(li, d);
+    }
+    return d;
+  }
+
   const setDataset = (el, key, value) => {
     if (!el) return;
     const v = value == null ? "" : String(value);
     if (el.dataset[key] !== v) el.dataset[key] = v;
   };
-  const pad = (n) => n < 10 ? "0" + n : "" + n;
+  const getDataNum = (el, key) => {
+    const v = el?.dataset?.[key];
+    return v ? Number(v) : 0;
+  };
+  const safeRemoveAttr = (el, name) => { if (el?.hasAttribute?.(name)) el.removeAttribute(name); };
+  const safeSetAttr = (el, name, value) => {
+    if (!el) return;
+    const v = String(value);
+    if (el.getAttribute(name) !== v) el.setAttribute(name, v);
+  };
+  const pad2 = (n) => (n < 10 ? "0" : "") + n;
   const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: false });
-
-  function nowSeconds() {
-    const ts = window.getCurrentTimestamp ? window.getCurrentTimestamp() : Date.now();
-    return (ts / 1000) | 0; // int seconds
-  }
+  const nowSeconds = () => Math.trunc((window.getCurrentTimestamp?.() ?? Date.now()) / 1000);
 
   function nativeIsOK(statusDiv) {
     if (!statusDiv) return false;
@@ -130,6 +138,17 @@
     const txt = statusDiv.textContent.trim().toLowerCase();
     return txt === 'ok' || txt.startsWith('okay');
   }
+
+  // place abbreviations (single pass)
+  const COUNTRY_MAP = {
+    "South Africa": "SA",
+    "Cayman Islands": "CI",
+    "United Kingdom": "UK",
+    "Argentina": "Arg",
+    "Switzerland": "Switz"
+  };
+  const COUNTRY_RX = new RegExp(Object.keys(COUNTRY_MAP).join("|"), "g");
+  const abbreviatePlaces = (s) => s?.replace(COUNTRY_RX, (m) => COUNTRY_MAP[m]) ?? "";
 
   // SPA lifecycle
   function onWarGone() {
@@ -223,17 +242,27 @@
     });
   }
 
-  // observer (SPA mount/unmount + lists keep-fresh)
+  // observer (SPA mount/unmount + lists keep-fresh) with micro-debounce
+  let refreshPending = false;
+  function scheduleRefreshLists() {
+    if (refreshPending) return;
+    refreshPending = true;
+    setTimeout(() => {
+      refreshPending = false;
+      refresh_member_lists_cache();
+    }, 0);
+  }
+
   const observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (node?.classList?.contains?.("faction-war")) {
           onWarFound();
-          refresh_member_lists_cache();
+          scheduleRefreshLists();
           return;
         }
         if (node?.nodeType === 1 && (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list"))) {
-          refresh_member_lists_cache();
+          scheduleRefreshLists();
         }
       }
       for (const node of m.removedNodes) {
@@ -242,7 +271,7 @@
             onWarGone();
           }
           if (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list")) {
-            refresh_member_lists_cache();
+            scheduleRefreshLists();
           }
         }
       }
@@ -256,6 +285,15 @@
   const MIN_TIME_SINCE_LAST_REQUEST = 9000; // ms between request batches
   let backoffUntil = 0; // ms epoch; set on rate-limit errors
   let inFlightController = null;
+
+  // exponential backoff with jitter
+  let backoffMs = 0;
+  const BACKOFF_BASE = 2000, BACKOFF_MAX = 120000;
+  const jitter = (ms) => ms + Math.floor(Math.random() * 1000) - 500;
+  function setBackoff(escalate = true) {
+    backoffMs = escalate ? Math.min(BACKOFF_MAX, backoffMs ? backoffMs * 2 : BACKOFF_BASE) : BACKOFF_BASE;
+    backoffUntil = Date.now() + jitter(backoffMs);
+  }
 
   function abortInFlight() {
     const c = inFlightController;
@@ -275,7 +313,7 @@
 
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
-    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST) return;
+    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + Math.floor(Math.random()*2000) - 1000) return;
 
     inFlightController = new AbortController();
     const controller = inFlightController;
@@ -286,7 +324,7 @@
       const ok = await update_status(id, controller.signal);
       madeARequest = true;
       if (!ok) break; // stop on error/backoff
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 150 + Math.floor(Math.random()*120)));
       if (document.hidden || controller.signal.aborted) break;
     }
     if (madeARequest) last_request_ts = Date.now();
@@ -303,6 +341,8 @@
     return null;
   }
 
+  let fatalAlertShown = false;
+
   async function update_status(faction_id, signal) {
     try {
       const r = await fetch(
@@ -315,37 +355,38 @@
       if (code != null) {
         // rate-limit / temporary issues
         if ([5, 8, 9].includes(code)) { // too many reqs, IP block, API disabled
-          backoffUntil = Date.now() + 60_000;
+          setBackoff(true);
           return false;
         }
-        // non-recoverable / fatal
+        // non-recoverable / fatal -> halt + surface once
         if ([0,1,2,3,4,6,7,10,12,13,14,16,18,21].includes(code)) {
           running = false;
-          console.warn("[TWSE-Merged] API halted due to error code:", code);
+          if (!fatalAlertShown) {
+            fatalAlertShown = true;
+            setTimeout(() => alert(
+              `TWSE halted due to API error code ${code}.` +
+              `\n\nUse “Set API Key” to update your PUBLIC API key, then reload.`
+            ), 0);
+          }
           return false;
         }
         // default minor backoff
-        backoffUntil = Date.now() + 20_000;
+        setBackoff(false);
         return false;
       }
 
       if (!status?.members) return true;
 
       for (const [k, v] of Object.entries(status.members)) {
-        const d = v.status?.description || "";
-        v.status.description = d
-          .replace("South Africa", "SA")
-          .replace("Cayman Islands", "CI")
-          .replace("United Kingdom", "UK")
-          .replace("Argentina", "Arg")
-          .replace("Switzerland", "Switz");
+        const d = abbreviatePlaces(v.status?.description || "");
+        v.status.description = d;
         member_status.set(k, v);
       }
       return true;
     } catch (e) {
       if (e?.name === 'AbortError') return false;
       console.error("[TWSE-Merged] Network/parse error:", e && e.message ? e.message : e);
-      backoffUntil = Date.now() + 20_000;
+      setBackoff(false);
       return false;
     }
   }
@@ -357,6 +398,7 @@
   function watch() {
     if (found_war && warRoot && !warRoot.isConnected) onWarGone();
     if (!found_war) return requestAnimationFrame(watch);
+    if (document.hidden) return requestAnimationFrame(watch);
 
     const now = performance.now();
     if (now - last_frame < TIME_BETWEEN_FRAMES) return requestAnimationFrame(watch);
@@ -364,11 +406,11 @@
 
     member_lis.forEach((li, id) => {
       const state = member_status.get(id);
-      const status_DIV = li.querySelector("div.status");
+      const status_DIV = getStatusDiv(li);
       if (!status_DIV) return;
 
-      // clear fallback class each frame; re-apply if needed later
-      li.classList.remove(HCLASS);
+      // clear fallback class; re-apply if needed later (only if no :has())
+      if (!HAS_HAS && li.classList.contains(HCLASS)) li.classList.remove(HCLASS);
 
       if (!state || !running) {
         safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
@@ -384,19 +426,21 @@
         case "Traveling": {
           safeRemoveAttr(li, "data-until");
           safeRemoveAttr(li, "data-location");
-          if ((st.description || "").includes("Traveling to ")) {
+
+          const desc = st.description || "";
+          if (desc.includes("Traveling to ")) {
             setDataset(li, "sortA", 4);
-            const content = "► " + st.description.split("Traveling to ")[1];
+            const content = "► " + desc.split("Traveling to ")[1];
             setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
-          } else if ((st.description || "").includes("In ")) {
+          } else if (desc.includes("In ")) {
             setDataset(li, "sortA", 3);
-            const content = st.description.split("In ")[1];
+            const content = desc.split("In ")[1];
             setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
-          } else if ((st.description || "").includes("Returning")) {
+          } else if (desc.includes("Returning")) {
             setDataset(li, "sortA", 2);
-            const content = "◄ " + st.description.split("Returning to Torn from ")[1];
+            const content = "◄ " + desc.split("Returning to Torn from ")[1];
             setDataset(li, "location", content);
             safeSetAttr(status_DIV, CONTENT, content);
           } else {
@@ -409,7 +453,6 @@
 
         case "Hospital":
         case "Jail": {
-          // respect native OK badges (prevents incorrect overrides)
           if (nativeIsOK(status_DIV)) {
             safeRemoveAttr(status_DIV, CONTENT);
             safeSetAttr(status_DIV, TRAVELING, "false");
@@ -435,14 +478,14 @@
           const s = remain % 60;
           const m = ((remain / 60) | 0) % 60;
           const h = (remain / 3600) | 0;
-          const t = `${pad(h)}:${pad(m)}:${pad(s)}`;
+          const t = `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
 
           if (status_DIV.getAttribute(CONTENT) !== t) safeSetAttr(status_DIV, CONTENT, t);
           const isSoon = remain < 300 ? "true" : "false";
           safeSetAttr(status_DIV, HIGHLIGHT, isSoon);
 
           // fallback highlight class for browsers without :has()
-          if (isSoon === "true") li.classList.add(HCLASS);
+          if (!HAS_HAS && isSoon === "true" && !li.classList.contains(HCLASS)) li.classList.add(HCLASS);
 
           safeRemoveAttr(li, "data-location");
           break;
@@ -470,8 +513,8 @@
         const arr = Array.from(lis).map(li => ({
           li,
           a: +(li.dataset.sortA || 0),
-          loc: li.getAttribute("data-location") || "",
-          until: +(li.getAttribute("data-until") || 0)
+          loc: li.dataset.location || "",
+          until: +(li.dataset.until || 0)
         }));
 
         const asc = sorted_column.order === "asc";
@@ -486,14 +529,19 @@
           return left.until - right.until;
         }).map(o => o.li);
 
+        // detect if the order differs
         let isSame = true;
         for (let j = 0; j < sorted.length; j++) {
           if (lis[j] !== sorted[j]) { isSame = false; break; }
         }
         if (!isSame) {
+          const ul = lists[i];
+          const prevDisplay = ul.style.display;
+          ul.style.display = "none";
           const frag = document.createDocumentFragment();
           sorted.forEach((li) => frag.appendChild(li));
-          lists[i].appendChild(frag);
+          ul.appendChild(frag);
+          ul.style.display = prevDisplay;
         }
       }
     }
@@ -501,11 +549,16 @@
     requestAnimationFrame(watch);
   }
 
-  // scheduler
-  (function tick() {
-    update_statuses();
-    setTimeout(tick, 1000);
-  })();
+  // scheduler (visibility-aware)
+  let tickTimer = null;
+  function scheduleTick() {
+    clearTimeout(tickTimer);
+    tickTimer = setTimeout(() => {
+      if (!document.hidden) update_statuses();
+      scheduleTick();
+    }, 1000);
+  }
+  scheduleTick();
 
   setTimeout(() => {
     prime_status_placeholders();
@@ -517,8 +570,15 @@
     onWarGone();
     setTimeout(() => {
       if (document.querySelector(".faction-war")) onWarFound();
-      refresh_member_lists_cache();
+      scheduleRefreshLists();
     }, 300);
+  }, { passive: true });
+
+  // cleanup on pagehide
+  window.addEventListener("pagehide", () => {
+    observer.disconnect();
+    clearTimeout(tickTimer);
+    abortInFlight();
   }, { passive: true });
 
   // init log
@@ -528,7 +588,9 @@
         "[TWSE-Merged] Initialization complete. Found war section:",
         found_war,
         "Valid API key:",
-        hasValidKey()
+        hasValidKey(),
+        "HAS(:has):",
+        HAS_HAS
       );
     };
     const timeoutId = setTimeout(logInit, 1500);
