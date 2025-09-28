@@ -112,6 +112,14 @@
       w && w.close && w.close();
     } catch {}
   }
+  
+  let _hospitalReloading = false;
+  function reloadOnce() {
+    if (_hospitalReloading) return;
+    _hospitalReloading = true;
+    // Use replace() so Back doesn’t return you to the blocked state
+    try { location.replace(location.href); } catch { location.reload(); }
+  }
 
   // handler for "Continue" behavior, 3 options to pick from
   function handleContinue() {
@@ -131,11 +139,27 @@
     const txt = (btn?.textContent || '').toLowerCase();
     return txt.includes('continue');
   }
-
-  // is hopsital the current block?
+  
+  // robust, class-agnostic detection for "target is in hospital" banners
   function isHospitalBlocked() {
-    return !!document.querySelector('.colored___sN72G.red___SANWO .title___fOh2J');
+  // Quick, cheap checks first
+  // Many Torn banners put alert-like roles or status text in the DOM
+    const alertNodes = document.querySelectorAll('[role="alert"], [aria-live="assertive"], [class*="alert"], [class*="notice"], [class*="banner"], [class*="warning"]');
+    for (const n of alertNodes) {
+      const t = (n.textContent || '').toLowerCase();
+      if (/\bhospital\b/.test(t) && /\b(in|is|currently|target)\b/.test(t)) return true;
   }
+
+  // Fallback: scan a limited slice of the page text (avoid full body reflow cost)
+  // Reads the first big content container or falls back to body if needed
+  const container =
+    document.querySelector('#mainContainer, #root, .content, [class*="content"]') || document.body;
+  // Only read a small amount of text to stay cheap
+  const text = (container.innerText || '').toLowerCase().slice(0, 5000);
+  // Match common wordings Torn uses ("is in the hospital", "target is in hospital", "hospitalized", etc.)
+  return /\b(is|target|opponent).{0,18}\b(hospital|hospitalized)\b/.test(text)
+      || /\b(in|into)\s+the?\s*hospital\b/.test(text);
+}
 
   // main logic for key handling, hints, menu, and mutation observer
   function findPrimaryButton() {
@@ -273,7 +297,10 @@
       const keyToSlot = buildKeyToWeaponSlot();
       const keyToDlg = buildKeyToDialogIndex();
       if (isHospitalBlocked() && (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
-        e.preventDefault(); e.stopPropagation(); location.reload(); return;
+        e.preventDefault();
+        e.stopPropagation();
+        reloadOnce();
+        return;
       }
 
       const ob = getOverrideButtons();
