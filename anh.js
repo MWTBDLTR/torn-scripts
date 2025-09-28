@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.1
+// @version      1.1.2
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -142,24 +142,24 @@
   
   // robust, class-agnostic detection for "target is in hospital" banners
   function isHospitalBlocked() {
-  // Quick, cheap checks first
-  // Many Torn banners put alert-like roles or status text in the DOM
-    const alertNodes = document.querySelectorAll('[role="alert"], [aria-live="assertive"], [class*="alert"], [class*="notice"], [class*="banner"], [class*="warning"]');
-    for (const n of alertNodes) {
-      const t = (n.textContent || '').toLowerCase();
-      if (/\bhospital\b/.test(t) && /\b(in|is|currently|target)\b/.test(t)) return true;
-  }
+    // 1) Fast path: literal banner you said you see
+    const literal = /this person is currently in hospital and cannot be attacked/i;
+    const bodyText = (document.body?.innerText || document.body?.textContent || '');
+    if (literal.test(bodyText)) return true;
 
-  // Fallback: scan a limited slice of the page text (avoid full body reflow cost)
-  // Reads the first big content container or falls back to body if needed
-  const container =
-    document.querySelector('#mainContainer, #root, .content, [class*="content"]') || document.body;
-  // Only read a small amount of text to stay cheap
-  const text = (container.innerText || '').toLowerCase().slice(0, 5000);
-  // Match common wordings Torn uses ("is in the hospital", "target is in hospital", "hospitalized", etc.)
-  return /\b(is|target|opponent).{0,18}\b(hospital|hospitalized)\b/.test(text)
-      || /\b(in|into)\s+the?\s*hospital\b/.test(text);
-}
+    // 2) Fallback scan in a likely container, limited length
+    const container = document.querySelector(
+      '#mainContainer, #root, main, [role="main"], .content, [class*="content"]'
+    ) || document.body;
+
+    const text = (container.innerText || container.textContent || '').toLowerCase().slice(0, 5000);
+
+    // Precompiled, newline-tolerant patterns
+    const rxNearby = /\b(is|target|opponent)[\s\S]{0,40}\b(hospital|hospitalized|hospitalised)\b/; // handles breaks
+    const rxInHospital = /\b(in|into)\s+the?\s*hospital\b/;
+
+    return rxNearby.test(text) || rxInHospital.test(text);
+  }
 
   // main logic for key handling, hints, menu, and mutation observer
   function findPrimaryButton() {
@@ -198,6 +198,7 @@
     }
     return map;
   }
+
   function buildKeyToDialogIndex() {
     const map = new Map(); // code -> 1|2|3
     for (const [idx, codes] of Object.entries(settings.dialogKeys)) {
@@ -287,6 +288,24 @@
       if (sel) ensureHintOnSelector(sel, prettyKeys(rev.get(slot) || []) || '');
     }
   }
+  function isAttackUiMissing() {
+    // If there’s no primary action button and no weapon/punch/kick cards,
+    // we’re effectively blocked. This is resilient to class hash changes.
+    const hasPrimary =
+      document.querySelector('button.torn-btn, button[class^="btn___"]') != null;
+
+    const hasAnyCard =
+      document.querySelector('.hoverEnabled___skjqK, [data-test*="weapon-card"], [data-test*="attack-card"]') != null;
+
+    return !hasPrimary && !hasAnyCard;
+  }
+
+  let _reloadGuard = false;
+  function reloadOnce() {
+    if (_reloadGuard) return;
+    _reloadGuard = true;
+    try { location.replace(location.href); } catch { location.reload(); }
+  }
 
   // global key handler, ignore in text fields, hospital block, etc
   document.addEventListener(
@@ -296,10 +315,12 @@
 
       const keyToSlot = buildKeyToWeaponSlot();
       const keyToDlg = buildKeyToDialogIndex();
-      if (isHospitalBlocked() && (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
+      if ((isHospitalBlocked() || isAttackUiMissing()) &&
+          (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
         e.preventDefault();
         e.stopPropagation();
         reloadOnce();
+        console.log('[HospCheck]', /this person is currently in hospital and cannot be attacked/i.test(document.body?.innerText||''), /this person is currently in hospital and cannot be attacked/i.test(document.body?.textContent||''));
         return;
       }
 
