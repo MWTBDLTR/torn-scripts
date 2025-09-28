@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.8
+// @version      1.1.9
 // @description  Travel status and hospital time sorted on war page, optimized and un-janked.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -14,9 +14,7 @@
 
 (async function () {
   'use strict';
-
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
-
   // plays nice with FFScouter
   const ffScouterV2DisableWarMonitor = document.createElement("div");
   ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
@@ -69,7 +67,6 @@
     GM_registerMenuCommand("Clear API Key", () => clearKey());
     GM_registerMenuCommand("Data Use / ToS Summary", () => showDataUse());
   } catch {}
-
   // ui
   const sort_enemies = true;
   let ever_sorted = false;
@@ -124,11 +121,11 @@
     // prefer cache; refresh only when DOM mutates (observer will update)
     return memberListsCache;
   }
-
+  
   function refresh_member_lists_cache() {
     memberListsCache = Array.from((warRoot || document).querySelectorAll("ul.members-list"));
   }
-
+  
   function get_faction_ids() {
     // compute once per batch, scoped to warRoot for cheaper lookup
     const ids = new Set();
@@ -188,7 +185,6 @@
   setTimeout(() => {
     if (document.querySelector(".faction-war")) onWarFound();
   }, 800);
-
   observer.observe(document.body, { subtree: true, childList: true });
 
   function extract_all_member_lis() {
@@ -219,7 +215,6 @@
       if (!el.hasAttribute(CONTENT)) el.setAttribute(CONTENT, el.textContent);
     });
   }
-
   // network / API
   let last_request_ts = 0;
   const MIN_TIME_SINCE_LAST_REQUEST = 9000; // ms between request batches
@@ -227,9 +222,9 @@
   let inFlightController = null;
 
   function abortInFlight() {
-    if (inFlightController) {
-      try { inFlightController.abort(); } catch {}
-      inFlightController = null;
+    // Abort if present; do not null it here to avoid races while a loop is using it.
+    const c = inFlightController;
+    if (c) { try { c.abort(); } catch {}
     }
   }
 
@@ -239,26 +234,27 @@
 
   async function update_statuses() {
     if (!running || !found_war || document.hidden || !hasValidKey()) return;
-
     const now = Date.now();
     if (now < backoffUntil) return;
 
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
-
     if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST) return;
-
+    // Create and snapshot the controller to avoid races with visibilitychange.
     inFlightController = new AbortController();
+    const controller = inFlightController; // stable reference
     let madeARequest = false;
     for (const id of faction_ids) {
-      const ok = await update_status(id, inFlightController.signal);
+      if (!controller || controller.signal.aborted) break;
+      const ok = await update_status(id, controller.signal);
       madeARequest = true;
       if (!ok) break;
-      await new Promise((r) => setTimeout(r, 150)); // tiny gap between factions
-      if (document.hidden) break;
+      await new Promise((r) => setTimeout(r, 150));
+      if (document.hidden || controller.signal.aborted) break;
     }
     if (madeARequest) last_request_ts = Date.now();
-    inFlightController = null;
+    // Only clear if we're still the active controller.
+    if (inFlightController === controller) inFlightController = null;
   }
 
   async function update_status(faction_id, signal) {
@@ -268,7 +264,6 @@
         { method: 'GET', mode: 'cors', cache: 'no-store', signal }
       );
       const status = await r.json();
-
       if (status?.error) {
         const code = status.error.code ?? status.error;
         // retry/backoff: 5 = too many requests (temporary ban). 8/9 sometimes used for cooldown/unavailable.
@@ -286,9 +281,7 @@
         backoffUntil = Date.now() + 20_000;
         return false;
       }
-
       if (!status?.members) return true;
-
       // micro-normalize once per batch
       for (const [k, v] of Object.entries(status.members)) {
         const d = v.status?.description || "";
@@ -310,7 +303,6 @@
       return false;
     }
   }
-
   // render and watch
   let last_frame = 0;
   // refresh cadence 1s
@@ -325,7 +317,6 @@
     const v = value == null ? "" : String(value);
     if (el.dataset[key] !== v) el.dataset[key] = v;
   }
-
   // stable ASCII-ish compare and faster than ad-hoc < and >
   const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: false });
 
@@ -337,22 +328,18 @@
 
   function watch() {
     if (!found_war) return requestAnimationFrame(watch);
-
     const now = performance.now();
     if (now - last_frame < TIME_BETWEEN_FRAMES) return requestAnimationFrame(watch);
     last_frame = now;
-
     member_lis.forEach((li, id) => {
       const state = member_status.get(id);
       const status_DIV = li.querySelector("div.status");
       if (!status_DIV) return;
-
       if (!state || !running) {
         // restore original (no layout read)
         safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
         return;
       }
-
       const st = state.status;
       setDataset(li, "until", st.until ?? "");
       setDataset(li, "location", "");
@@ -362,7 +349,6 @@
         case "Traveling": {
           safeRemoveAttr(li, "data-until");
           safeRemoveAttr(li, "data-location");
-
           if (st.description.includes("Traveling to ")) {
             setDataset(li, "sortA", 4);
             const content = "► " + st.description.split("Traveling to ")[1];
@@ -408,7 +394,6 @@
             safeRemoveAttr(li, "data-location");
             break;
           }
-
           const s = remain % 60;
           const m = ((remain / 60) | 0) % 60;
           const h = (remain / 3600) | 0;
@@ -419,7 +404,6 @@
           safeRemoveAttr(li, "data-location");
           break;
         }
-
         default: {
           safeRemoveAttr(status_DIV, CONTENT);
           setDataset(li, "sortA", 0);
@@ -437,7 +421,6 @@
         let sorted_column = get_sorted_column(lists[i]);
         if (!ever_sorted) sorted_column = { column: "status", order: "asc" };
         if (sorted_column.column !== "status") continue;
-
         const lis = lists[i].querySelectorAll("li.enemy, li.your");
         // pre-read once for cheaper sorting
         const arr = Array.from(lis).map(li => ({
@@ -451,16 +434,13 @@
         const sorted = arr.slice().sort((L, R) => {
           let left = L, right = R;
           if (!asc) [left, right] = [R, L];
-
           if (left.a !== right.a) return left.a - right.a;
-
           if (left.loc && right.loc) {
             const cmp = collator.compare(left.loc, right.loc);
             if (cmp !== 0) return cmp;
           }
           return left.until - right.until;
         }).map(o => o.li);
-
         // only touch DOM if real change
         let isSame = true;
         for (let j = 0; j < sorted.length; j++) {
@@ -473,10 +453,8 @@
         }
       }
     }
-
     requestAnimationFrame(watch);
   }
-
   // simple scheduler
   (function tick() {
     update_statuses();
@@ -504,6 +482,5 @@
       logInit();
     }, { once: true });
   })();
-
   window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
 })();
