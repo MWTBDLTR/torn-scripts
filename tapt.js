@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Torn Attack Page Timers (TAPT)
 // @namespace   https://github.com/MWTBDLTR/torn-scripts/
-// @version     1.4
+// @version     1.4.1
 // @description Displays hospital timers on the attack page (rules-compliant; CORS-safe; menu for API key + Local/TCT time mode; prefers dialogButtons mount)
 // @author      MrChurch [3654415]
 // @license     MIT
@@ -105,7 +105,7 @@ function renderInfo(untilEpochSec, timeMode) {
   return `
     <div style="height:6px"></div>
     <div>Coming out at ${time} <span style="opacity:.8">(${label})</span></div>
-    <div>In <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
+    <div>in <span class="bold" style="${underMinute ? 'color:#98FB98' : ''}">${fmtTimeLeft(untilEpochSec)}</span></div>
   `;
 }
 
