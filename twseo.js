@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.3
+// @version      1.1.4
 // @description  Travel status and hospital time sorted on war page.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -440,38 +440,19 @@
     requestAnimationFrame(watch);
   }, 1000);
 
-  // Logs only after the war section has had a chance to appear
-  function logInit() {
-    console.log(
-      "[TWSE-Optimized] Initialization complete. Found war section:",
-      found_war,
-      "Valid API key:",
-      hasValidKey()
-    );
-  }
-
-  // detects the war section
-  window.addEventListener("twse-war-found", logInit, { once: true });
-
-  setTimeout(logInit, 1500);
-
-  const origObserverCallback = (mutations) => {
-    for (const m of mutations) {
-      for (const node of m.addedNodes) {
-        if (node?.classList?.contains("faction-war")) {
-          found_war = true;
-          extract_all_member_lis();
-          prime_status_placeholders();
-          // Notify listeners that the war section was found
-          window.dispatchEvent(new Event("twse-war-found"));
-          return;
-        }
-      }
-    }
-  };
-  observer.disconnect();
-  observer = new MutationObserver(origObserverCallback);
-  observer.observe(document.body, { subtree: true, childList: true });
+  // Defer the init log until war section appears (or fallback after 1.5s)
+  (function initLog() {
+    const logInit = () => {
+      console.log(
+        "[TWSE-Optimized] Initialization complete. Found war section:",
+        found_war,
+        "Valid API key:",
+        hasValidKey()
+      );
+    };
+    window.addEventListener("twse-war-found", logInit, { once: true });
+    setTimeout(logInit, 1500); // fallback if war section never appears
+  })();
 
   window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
 })();
