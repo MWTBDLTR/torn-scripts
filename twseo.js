@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.1
+// @version      1.1
 // @description  Travel status and hospital time sorted on war page.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -20,32 +20,6 @@
   // - No captcha bypass; no click emulation. UI read/modify on the page you’re viewing is allowed.
   // - Respects Torn API rate guidance (100 requests/min per user across keys). Adds visibility-aware throttling.
   // - Key is stored locally (localStorage) and never transmitted anywhere except api.torn.com.
-  // Deep (shadow-aware) query helpers
-  function qsaDeep(selector, root = document) {
-    const out = new Set();
-
-    const walk = (node) => {
-      // Search this node
-      if (node.querySelectorAll) {
-        try { node.querySelectorAll(selector).forEach(el => out.add(el)); } catch {}
-      }
-      // Recurse into shadow root (if any)
-      if (node.shadowRoot) walk(node.shadowRoot);
-      // Recurse into children that have shadow roots
-      if (node.querySelectorAll) {
-        node.querySelectorAll('*').forEach(child => {
-          if (child.shadowRoot) walk(child.shadowRoot);
-        });
-      }
-    };
-
-    walk(root);
-    return [...out];
-  }
-  function qsDeep(selector, root = document) {
-    const list = qsaDeep(selector, root);
-    return list.length ? list[0] : null;
-  }
 
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
 
@@ -141,7 +115,7 @@
   }
 
   function safeRemoveAttr(el, name) { if (el.hasAttribute(name)) el.removeAttribute(name); }
-  function get_member_lists() { return qsaDeep("ul.members-list"); }
+  function get_member_lists() { return document.querySelectorAll("ul.members-list"); }
 
   function get_faction_ids() {
     const ids = new Set();
@@ -180,17 +154,8 @@
   const observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
-        // Check node itself
         if (node?.classList?.contains("faction-war")) {
           found_war = true;
-        } else {
-          // Check descendants (including inside any shadow roots)
-          const warHit = (node instanceof Element || node instanceof DocumentFragment) &&
-                         (qsDeep(".faction-war", node) || qsaDeep("ul.members-list", node).length);
-          if (warHit) found_war = true;
-        }
-
-        if (found_war) {
           extract_all_member_lis();
           prime_status_placeholders();
           return;
@@ -200,22 +165,12 @@
   });
 
   setTimeout(() => {
-    if (qsDeep(".faction-war") || get_member_lists().length) {
+    if (document.querySelector(".faction-war")) {
       found_war = true;
       extract_all_member_lis();
       prime_status_placeholders();
     }
   }, 500);
-  
-  window.addEventListener("hashchange", () => {
-    setTimeout(() => {
-      if (qsDeep(".faction-war") || get_member_lists().length) {
-        found_war = true;
-        extract_all_member_lis();
-        prime_status_placeholders();
-      }
-    }, 300);
-  });
 
   observer.observe(document.body, { subtree: true, childList: true });
 
@@ -241,7 +196,7 @@
   }
 
   function prime_status_placeholders() {
-    qsaDeep(".members-list div.status").forEach((el) => {
+    document.querySelectorAll(".members-list div.status").forEach((el) => {
       if (!el.hasAttribute(CONTENT)) el.setAttribute(CONTENT, el.innerText);
     });
   }
