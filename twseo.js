@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.7
-// @description  Travel status and hospital time sorted on war page.
+// @version      1.1.8
+// @description  Travel status and hospital time sorted on war page, optimized and un-janked.
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
@@ -17,7 +17,7 @@
 
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
 
-  // play nice with FFScouter
+  // plays nice with FFScouter
   const ffScouterV2DisableWarMonitor = document.createElement("div");
   ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
   ffScouterV2DisableWarMonitor.style.display = "none";
@@ -109,8 +109,8 @@
   }
 
   const member_status = new Map(); // userId -> API member
-  const member_lis = new Map();    // userId -> <li>
-  let memberListsCache = [];        // cached Node[] of ul.members-list
+  const member_lis = new Map(); // userId -> <li>
+  let memberListsCache = []; // cached Node[] of ul.members-list
 
   function nativeIsOK(statusDiv) {
     if (statusDiv.classList.contains('ok')) return true;
@@ -172,7 +172,7 @@
           refresh_member_lists_cache();
           return;
         }
-        // Keep lists cache fresh if war area changes dynamically
+        // keep lists cache fresh
         if (node?.nodeType === 1 && (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list"))) {
           refresh_member_lists_cache();
         }
@@ -271,18 +271,18 @@
 
       if (status?.error) {
         const code = status.error.code ?? status.error;
-        // Retry/backoff: 5 = too many requests (temporary ban). 8/9 sometimes used for cooldown/unavailable.
+        // retry/backoff: 5 = too many requests (temporary ban). 8/9 sometimes used for cooldown/unavailable.
         if ([5, 8, 9].includes(code)) {
           backoffUntil = Date.now() + 60_000; // 60s cool-off
           return false;
         }
-        // Non-retryable until user action (bad key/params/etc.)
+        // non-retryable until user action (bad key/params/etc.)
         if ([0,1,2,3,4,6,7,10,12,13,14,16,18,21].includes(code)) {
           running = false;
           console.warn("[TWSE-Optimized] API halted due to error code:", code);
           return false;
         }
-        // Unknown error: brief backoff
+        // unknown error: brief backoff
         backoffUntil = Date.now() + 20_000;
         return false;
       }
@@ -439,7 +439,7 @@
         if (sorted_column.column !== "status") continue;
 
         const lis = lists[i].querySelectorAll("li.enemy, li.your");
-        // Pre-read once for cheaper sorting
+        // pre-read once for cheaper sorting
         const arr = Array.from(lis).map(li => ({
           li,
           a: +(li.dataset.sortA || 0),
@@ -461,7 +461,7 @@
           return left.until - right.until;
         }).map(o => o.li);
 
-        // Only touch DOM if real change
+        // only touch DOM if real change
         let isSame = true;
         for (let j = 0; j < sorted.length; j++) {
           if (lis[j] !== sorted[j]) { isSame = false; break; }
@@ -477,7 +477,7 @@
     requestAnimationFrame(watch);
   }
 
-  // simple scheduler (unchanged cadence)
+  // simple scheduler
   (function tick() {
     update_statuses();
     setTimeout(tick, 1000);
@@ -497,8 +497,12 @@
         hasValidKey()
       );
     };
-    window.addEventListener("twse-war-found", logInit, { once: true });
-    setTimeout(logInit, 1500); // fallback if war section never appears
+    // log once — if event fires, cancel fallback
+    const timeoutId = setTimeout(logInit, 1500); // fallback if war section missing
+    window.addEventListener("twse-war-found", () => {
+      clearTimeout(timeoutId); // cancel fallback when war section found
+      logInit();
+    }, { once: true });
   })();
 
   window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
