@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.4
+// @version      1.1.6
 // @description  Travel status and hospital time sorted on war page.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -104,9 +104,17 @@
 
   let running = true;
   let found_war = false;
+  
+  function onWarFound() {
+    if (found_war) return; // de-dupe
+    found_war = true;
+    extract_all_member_lis();
+    prime_status_placeholders();
+    window.dispatchEvent(new Event("twse-war-found"));
+  }
 
   const member_status = new Map(); // userId -> API member
-  const member_lis = new Map();    // userId -> <li>
+  const member_lis = new Map(); // userId -> <li>
 
   function nativeIsOK(statusDiv) {
     if (statusDiv.classList.contains('ok')) return true;
@@ -158,6 +166,7 @@
           found_war = true;
           extract_all_member_lis();
           prime_status_placeholders();
+          window.dispatchEvent(new Event("twse-war-found")); // notify logger
           return;
         }
       }
@@ -165,12 +174,8 @@
   });
 
   setTimeout(() => {
-    if (document.querySelector(".faction-war")) {
-      found_war = true;
-      extract_all_member_lis();
-      prime_status_placeholders();
-    }
-  }, 500);
+    if (document.querySelector(".faction-war")) onWarFound();
+  }, 800);
 
   observer.observe(document.body, { subtree: true, childList: true });
 
@@ -440,7 +445,6 @@
     requestAnimationFrame(watch);
   }, 1000);
 
-  // Defer the init log until war section appears (or fallback after 1.5s)
   (function initLog() {
     const logInit = () => {
       console.log(
