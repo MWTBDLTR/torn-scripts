@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.16
+// @version      1.0.17
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -205,7 +205,6 @@
   `;
   document.body.appendChild(root);
 
-  // Draggable
   (function makeDraggable(handleId, wrap) {
     const handle = root.querySelector("#" + handleId);
     let dragging = false, sx=0, sy=0, ox=0, oy=0;
@@ -259,7 +258,6 @@
   };
 
   function tctExportHistoryCSV() {
-    // export the current filtered result set (not just the current page)
     const rows = [["id","start","end","duration_sec","length","respect"]];
     (window.HIST_VIEW || HIST_VIEW || []).forEach(r => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
     const csv = rows.map(r => r.map(v => {
@@ -277,7 +275,6 @@
     URL.revokeObjectURL(url);
   }
 
-  // Auto-width for History
   function adjustPanelWidth(which){
     if (which === "hist") {
       const w = Math.min(Math.max(760, Math.floor(window.innerWidth * 0.9)), 1000);
@@ -304,7 +301,6 @@
   refs.cfg.addEventListener("click", configure);
   refs.btnReloadHist.addEventListener("click", () => loadHistory(true));
 
-  // History controls
   refs.histSearch.addEventListener("input", applyHistoryFilters);
   refs.histMinLen.addEventListener("change", applyHistoryFilters);
   refs.histSort.addEventListener("change", applyHistoryFilters);
@@ -490,16 +486,37 @@
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Per-hit timeline requires a private key with faction attacks access. Showing summary only.</td></tr>`;
       } else {
         const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300), expectedLen).catch(()=>[]);
+        // Temporary debug: peek at one row to confirm field names
+        if (attacks && attacks.length) {
+          const a0 = attacks[0];
+          console.debug("attack sample keys:", Object.keys(a0));
+          console.debug("sample fields:", { 
+            chain_link: a0.chain_link, 
+            modifiers_chain: a0?.modifiers?.chain, 
+            chain: a0.chain 
+          });
+        }
 
         const points = buildChainTimeline(attacks, startTs, expectedLen || null);
+        
+        if (!points || points.length <= 1) {
+          // nothing plausible parsed
+          refs.chartCanvas.parentElement.style.display = "none";
+          refs.hdLen.textContent = "0";
+          refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
+            No per-hit data parsed for this chain window. This can happen if attacks access is missing
+            or the API payload doesn’t include per-hit link numbers for this chain.
+          </td></tr>`;
+          toast(`chain #${chainId}: no per-hit data`);
+          return;
+        }
+
         refs.chartCanvas.parentElement.style.display = "";
         renderChart(points);
 
-        // Use plotted data for length to avoid report inconsistencies
         const finalLen = points.length ? points[points.length - 1].y : 0;
         refs.hdLen.textContent = String(finalLen);
 
-        // Make sure the table includes the final link even if it’s not in STATE.thresholds
         const thresholdsForTable = Array.from(
           new Set(
             [...STATE.thresholds, finalLen]
@@ -508,7 +525,6 @@
         ).sort((a,b) => a - b);
 
         const crossed = computeThresholdMoments(points, thresholdsForTable);
-
         refs.hdThresholdsBody.innerHTML = crossed.map(c => {
           const isFinal = c.th === finalLen;
           const label = isFinal ? `${c.th} (final)` : `${c.th}`;
@@ -525,27 +541,35 @@
     } catch (e) { console.error(e); toast(e.message || "error"); }
   }
   
-  // --- FIX: safe chain-link extractor ---
-  function getLinkNumber(row) {
-    // prefer the real per-hit link number
+  function getLinkNumber(row, expectedLen = null) {
     const v1 = Number(row.chain_link);
     if (Number.isFinite(v1) && v1 > 0) return v1;
-    // fallback if some API payloads nest it
+
     const v2 = Number(row.modifiers?.chain);
-    if (Number.isFinite(v2) && v2 > 0 && v2 < 100000) return v2;
+    if (Number.isFinite(v2) && v2 > 0) {
+      if (!expectedLen || v2 <= expectedLen * 1.2) return v2;
+      return NaN;
+    }
+
+    const v3 = Number(row.chain);
+    if (Number.isFinite(v3) && v3 > 0) {
+      const hardCap = 100000;
+      if (v3 > hardCap) return NaN;
+      if (!expectedLen || v3 <= expectedLen * 1.2) return v3;
+    }
+
     return NaN;
   }
 
-  // --- FIX: only use true chain_link, guard outliers ---
+  // --- FIX v2: only accept plausible link numbers, guard outliers ---
   function buildChainTimeline(attacks, startTsSec, expectedLen = null) {
     const startMs = startTsSec * 1000;
     const linkMinTs = new Map();
     let maxLink = 0;
 
     for (const a of attacks) {
-      const link = getLinkNumber(a);
+      const link = getLinkNumber(a, expectedLen);
       if (!Number.isFinite(link) || link <= 0) continue;
-      if (expectedLen && link > expectedLen * 1.2) continue; // drop absurd values
 
       const ts = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
       if (!Number.isFinite(ts) || ts <= 0) continue;
@@ -561,17 +585,16 @@
     const pts = [{ t: startMs, y: 0 }];
     for (let l = 1; l <= maxLink; l++) {
       let t = linkMinTs.get(l);
-      if (!t) t = pts[pts.length - 1].t + 1;
+      if (!t) t = pts[pts.length - 1].t + 1;   // keep X strictly increasing
       pts.push({ t, y: l });
     }
     return spreadWithinSecond(pts);
   }
 
-  // Distribute hits that share the same *second* across that second so X is strictly increasing.
   function spreadWithinSecond(pts) {
     if (!pts || pts.length < 3) return pts || [];
 
-    let i = 1; // skip anchor at index 0
+    let i = 1;
     while (i < pts.length) {
       const sec = Math.floor(pts[i].t / 1000);
       let j = i + 1;
@@ -584,7 +607,7 @@
         const step = Math.max(1, Math.floor((end - base) / count));
         for (let k = 0; k < count; k++) {
           pts[i + k].t = base + k * step;
-          if (pts[i + k].t <= pts[i + k - 1]?.t) pts[i + k].t = pts[i + k - 1].t + 1; // guard
+          if (pts[i + k].t <= pts[i + k - 1]?.t) pts[i + k].t = pts[i + k - 1].t + 1;
         }
       }
       i = j;
@@ -592,13 +615,11 @@
     return pts;
   }
 
-  // Find the first time each threshold is reached (no interpolation needed once we have per-hit points; times are unique after spread)
   function computeThresholdMoments(points, thresholds) {
     const tsByHit = new Map(points.map(p => [p.y, p.t]));
     return thresholds.map(th => ({ th, ts: tsByHit.get(th) ?? null }));
   }
 
-  // Chart (time on X, chain hit # on Y)
   function renderChart(points) {
     if (!refs.chartCanvas) return;
     if (tctChart) { tctChart.destroy(); tctChart = null; }
@@ -685,7 +706,6 @@
     });
   }
 
-  // Cache (IndexedDB) ------------- (unchanged infra)
   const DB_NAME = "torn_chain_cache"; const DB_VER = 1; let dbp = null;
   function db() { if (dbp) return dbp; dbp = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
@@ -761,7 +781,6 @@
     const key = String(chainId);
     const cached = await idbGet("attacks", key);
 
-    // If we already have enough unique links, reuse.
     if (cached && cached.complete && Array.isArray(cached.rows)) {
       if (!targetHits || (cached.seenLinks || 0) >= targetHits) {
         return cached.rows;
@@ -777,15 +796,15 @@
   function countUniqueLinks(rows) {
     const s = new Set();
     for (const r of rows) {
-      const l = getLinkNumber(r);
+      const l = getLinkNumber(r, null);
       if (Number.isFinite(l) && l > 0) s.add(l);
     }
     return s.size;
   }
 
   async function fetchAttacksWindow(fromSec, toSec, targetHits = null) {
-    const byId = new Map();         // attack_id -> row
-    const seenLinks = new Set();    // chain link numbers we’ve seen
+    const byId = new Map();
+    const seenLinks = new Set();
     let page = 0;
     let cursor = fromSec;
     let lastMaxTs = -1;
@@ -811,14 +830,12 @@
         if (Number.isFinite(link) && link > 0) seenLinks.add(link);
       }
 
-      // If we’ve seen all hit numbers we expect, stop early.
       if (targetHits && seenLinks.size >= targetHits) break;
 
-      // Keep paging at the same second until it’s exhausted; then move forward.
       if (maxTs <= 0 || maxTs === lastMaxTs || newRows === 0) {
-        cursor = cursor + 1;                // nudge +1s to advance window
+        cursor = cursor + 1;
       } else {
-        cursor = maxTs;                     // keep same second to catch more
+        cursor = maxTs;
         lastMaxTs = maxTs;
       }
 
