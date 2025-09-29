@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Chain ETA (Threshold Forecaster)
+// @name         Torn Chain ETA + History & Graphs
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.0
-// @description  Estimates when chain thresholds (10,50,100,250,1000,...) will be reached using recent hits/min from Torn API.
+// @version      1.0.1
+// @description  Live chain ETAs plus history browser with per-chain chart (cumulative hits vs time) reconstructed from faction chain report and faction attacks.
 // @author       MrChurch
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
@@ -11,39 +11,35 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @require      https://cdn.jsdelivr.net/npm/chart.js
 // ==/UserScript==
 
 (function () {
   "use strict";
 
   /**********************
-   * User-config (saved)
+   * Persistent settings
    **********************/
   const DEF_THRESHOLDS = [10, 50, 100, 250, 1000, 2500, 5000];
   const STATE = {
     apiKey: GM_getValue("torn_chain_eta_apiKey", ""),
     thresholds: GM_getValue("torn_chain_eta_thresholds", DEF_THRESHOLDS),
-    pollSec: GM_getValue("torn_chain_eta_pollSec", 15), // API poll interval
-    rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5), // Minutes of history to compute hits/min
-    historyMaxMin: 15, // cap stored history (minutes)
+    pollSec: GM_getValue("torn_chain_eta_pollSec", 15),
+    rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5),
+    historyMaxMin: 15,
+    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 30), // safety cap (30k attacks)
   };
 
   GM_registerMenuCommand("Torn Chain ETA → Configure…", configure);
-  GM_registerMenuCommand("Torn Chain ETA → Reset history", () => {
-    HISTORY.splice(0, HISTORY.length);
-    notify("History reset.");
-  });
+  GM_registerMenuCommand("Torn Chain ETA → Reset live history", () => { HISTORY.length = 0; toast("Live rate history reset."); });
 
   function configure() {
-    const k = prompt("Enter your Torn API key (saved locally):", STATE.apiKey || "");
+    const k = prompt("Enter your Torn API key:", STATE.apiKey || "");
     if (k === null) return;
     STATE.apiKey = (k || "").trim();
     GM_setValue("torn_chain_eta_apiKey", STATE.apiKey);
 
-    const t = prompt(
-      `Enter comma-separated thresholds (current: ${STATE.thresholds.join(", ")}):`,
-      STATE.thresholds.join(", ")
-    );
+    const t = prompt(`Comma-separated thresholds:`, STATE.thresholds.join(", "));
     if (t !== null) {
       const arr = (t || "")
         .split(",")
@@ -56,102 +52,129 @@
       }
     }
 
-    const p = prompt(`API poll interval (seconds):`, String(STATE.pollSec));
+    const p = prompt(`API poll interval (5–60s):`, String(STATE.pollSec));
     if (p !== null) {
-      const val = Math.max(5, Math.min(60, parseInt(p, 10) || STATE.pollSec));
-      STATE.pollSec = val;
-      GM_setValue("torn_chain_eta_pollSec", STATE.pollSec);
+      const val = clampInt(parseInt(p, 10), 5, 60, STATE.pollSec);
+      STATE.pollSec = val; GM_setValue("torn_chain_eta_pollSec", STATE.pollSec);
     }
 
-    const w = prompt(`Rate window (minutes, for hits/min):`, String(STATE.rateWindowMin));
+    const w = prompt(`Rate window (1–${STATE.historyMaxMin} minutes):`, String(STATE.rateWindowMin));
     if (w !== null) {
-      const val = Math.max(1, Math.min(STATE.historyMaxMin, parseInt(w, 10) || STATE.rateWindowMin));
-      STATE.rateWindowMin = val;
-      GM_setValue("torn_chain_eta_rateWindowMin", STATE.rateWindowMin);
+      const val = clampInt(parseInt(w, 10), 1, STATE.historyMaxMin, STATE.rateWindowMin);
+      STATE.rateWindowMin = val; GM_setValue("torn_chain_eta_rateWindowMin", STATE.rateWindowMin);
     }
 
-    notify("Settings saved. They’ll take effect on the next update.");
+    const mp = prompt(`Max attacks pages per chain (safety cap, default ${STATE.maxAttackPages}, 10–100):`, String(STATE.maxAttackPages));
+    if (mp !== null) {
+      const val = clampInt(parseInt(mp, 10), 10, 100, STATE.maxAttackPages);
+      STATE.maxAttackPages = val; GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages);
+    }
+
+    toast("Settings saved.");
+  }
+
+  function clampInt(n, lo, hi, dflt) {
+    if (!Number.isFinite(n)) return dflt;
+    return Math.max(lo, Math.min(hi, n));
   }
 
   /**********************
-   * DOM + Styles
+   * Styles + DOM
    **********************/
   GM_addStyle(`
-    .tce-wrap {
-      position: fixed;
-      top: 88px;
-      right: 18px;
-      z-index: 99999;
-      width: 320px;
-      background: #101418;
-      color: #e7edf3;
-      font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      border: 1px solid #27313a;
-      border-radius: 12px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-      user-select: none;
-    }
-    .tce-header {
-      cursor: move;
-      padding: 10px 12px;
-      font-weight: 600;
-      background: #0c1116;
-      border-bottom: 1px solid #22303a;
-      display: flex; align-items: center; gap: 8px; justify-content: space-between;
-    }
-    .tce-badge {
-      font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #1f2a33; color: #9bd2ff;
-    }
-    .tce-body { padding: 10px 12px; }
-    .tce-grid { width:100%; border-collapse: collapse; margin-top: 8px; }
-    .tce-grid th, .tce-grid td {
-      padding: 6px 6px; text-align: left; border-bottom: 1px solid #1c252e; white-space: nowrap;
-    }
-    .tce-grid th { font-size: 11px; color: #a9b7c6; text-transform: uppercase; letter-spacing: .04em; }
+    .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 380px; background:#0f1419; color:#e7edf3; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; border:1px solid #27313a; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
+    .tce-header { cursor:move; padding:10px 12px; font-weight:600; background:#0b1015; border-bottom:1px solid #22303a; display:flex; gap:8px; align-items:center; justify-content:space-between; }
+    .tce-tabs { display:flex; gap:6px; }
+    .tce-tab { background:#15202b; border:1px solid #27313a; color:#cfe7ff; padding:4px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
+    .tce-tab.active { background:#1b2733; }
+    .tce-badge { font-size:11px; padding:2px 6px; border-radius:999px; background:#1f2a33; color:#9bd2ff; }
+    .tce-body { padding:10px 12px; max-height: 66vh; overflow:auto; }
+    .tce-grid { width:100%; border-collapse:collapse; margin-top:8px; }
+    .tce-grid th, .tce-grid td { padding:6px 6px; text-align:left; border-bottom:1px solid #1c252e; white-space:nowrap; }
+    .tce-grid th { font-size:11px; color:#a9b7c6; text-transform:uppercase; letter-spacing:.04em; }
     .tce-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .tce-row-dim td { color: #7f8b96; }
-    .tce-footer { padding: 8px 12px 10px; display:flex; gap:8px; justify-content: space-between; align-items:center; }
-    .tce-btn {
-      background:#16202a; border:1px solid #27313a; color:#cfe7ff; padding:6px 8px; border-radius:8px; cursor:pointer;
-    }
+    .tce-row-dim td { color:#7f8b96; }
+    .tce-small { font-size:11px; color:#9aa8b6; }
+    .tce-footer { padding:8px 12px 10px; display:flex; gap:8px; justify-content:space-between; align-items:center; }
+    .tce-btn { background:#16202a; border:1px solid #27313a; color:#cfe7ff; padding:6px 8px; border-radius:8px; cursor:pointer; }
     .tce-btn:hover { background:#1a2631; }
-    .tce-warn { color: #ffd27d; }
-    .tce-good { color: #9cffb3; }
-    .tce-bad  { color: #ff9a9a; }
-    .tce-small { font-size: 11px; color: #9aa8b6; }
+    .tce-warn { color:#ffd27d; }
+    .tce-good { color:#9cffb3; }
+    .tce-bad  { color:#ff9a9a; }
+    .tce-link { color:#9bd2ff; cursor:pointer; text-decoration:underline; }
+    .tce-chart { width:100%; height: 240px; }
+    .tce-hbox { display:flex; gap:8px; flex-wrap: wrap; }
+    .tce-hbox > div { flex:1 1 48%; }
+    .tce-muted { color:#8fa2b1; }
   `);
 
-  const el = document.createElement("div");
-  el.className = "tce-wrap";
-  el.innerHTML = `
+  const root = document.createElement("div");
+  root.className = "tce-wrap";
+  root.innerHTML = `
     <div class="tce-header" id="tceDrag">
-      <div>Chain ETA <span class="tce-badge" id="tceStatus">init…</span></div>
-      <div>
-        <button class="tce-btn" id="tceRefresh">Refresh</button>
+      <div>Chain Tools <span class="tce-badge" id="tceStatus">init…</span></div>
+      <div class="tce-tabs">
+        <button class="tce-tab active" id="tabLive">Live</button>
+        <button class="tce-tab" id="tabHist">History</button>
       </div>
     </div>
     <div class="tce-body">
-      <div><b>Current chain:</b> <span class="tce-mono" id="tceCurrent">—</span></div>
-      <div><b>Hits/min (avg ${STATE.rateWindowMin}m):</b> <span class="tce-mono" id="tceRate">—</span></div>
-      <div><b>Timeout per hit:</b> <span class="tce-mono" id="tceTimeout">—</span></div>
-      <div><b>Avg inter-hit:</b> <span class="tce-mono" id="tceInterHit">—</span> <span id="tceRisk" class="tce-small"></span></div>
-      <table class="tce-grid" id="tceTable">
-        <thead><tr><th>Threshold</th><th>ΔHits</th><th>ETA (clock)</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="tce-footer">
-      <span class="tce-small">Polling every ${STATE.pollSec}s</span>
-      <div>
-        <button class="tce-btn" id="tceCfg">Settings</button>
+      <div id="panelLive">
+        <div class="tce-hbox">
+          <div><b>Current chain:</b> <span class="tce-mono" id="tceCurrent">—</span></div>
+          <div><b>Hits/min (avg ${STATE.rateWindowMin}m):</b> <span class="tce-mono" id="tceRate">—</span></div>
+        </div>
+        <div class="tce-hbox">
+          <div><b>Timeout per hit:</b> <span class="tce-mono" id="tceTimeout">—</span></div>
+          <div><b>Avg inter-hit:</b> <span class="tce-mono" id="tceInterHit">—</span> <span id="tceRisk" class="tce-small"></span></div>
+        </div>
+        <table class="tce-grid" id="tceTable">
+          <thead><tr><th>Threshold</th><th>ΔHits</th><th>ETA (clock)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="tce-footer">
+          <span class="tce-small">Polling every ${STATE.pollSec}s</span>
+          <div>
+            <button class="tce-btn" id="tceRefresh">Refresh</button>
+            <button class="tce-btn" id="tceCfg">Settings</button>
+          </div>
+        </div>
+      </div>
+      <div id="panelHist" style="display:none">
+        <div class="tce-hbox">
+          <div><b>Recent chains</b> <span class="tce-small tce-muted">(click an ID)</span></div>
+          <div style="text-align:right"><button class="tce-btn" id="btnReloadHist">Reload</button></div>
+        </div>
+        <table class="tce-grid" id="histTable">
+          <thead><tr><th>ID</th><th>Start</th><th>End</th><th>Len</th><th>Respect</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="histDetail" style="margin-top:10px; display:none">
+          <hr style="border-color:#1c252e; margin:8px 0;">
+          <div class="tce-hbox">
+            <div><b>Chain:</b> <span class="tce-mono" id="hdId">—</span></div>
+            <div><b>Window:</b> <span class="tce-mono" id="hdWindow">—</span></div>
+          </div>
+          <div class="tce-hbox">
+            <div><b>Length:</b> <span class="tce-mono" id="hdLen">—</span></div>
+            <div><b>Respect:</b> <span class="tce-mono" id="hdResp">—</span></div>
+          </div>
+          <div style="margin-top:8px">
+            <canvas id="chainChart" class="tce-chart"></canvas>
+          </div>
+          <table class="tce-grid" id="hdThresholds">
+            <thead><tr><th>Threshold</th><th>Reached at</th><th>Δ from start</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </div>
   `;
-  document.body.appendChild(el);
+  document.body.appendChild(root);
 
-  // Draggable header
+  // Draggable
   (function makeDraggable(handleId, wrap) {
-    const handle = el.querySelector("#" + handleId);
+    const handle = root.querySelector("#" + handleId);
     let dragging = false, sx=0, sy=0, ox=0, oy=0;
     handle.addEventListener("mousedown", (e)=>{ dragging=true; sx=e.clientX; sy=e.clientY; const r=wrap.getBoundingClientRect(); ox=r.left; oy=r.top; e.preventDefault(); });
     window.addEventListener("mousemove",(e)=>{
@@ -163,53 +186,80 @@
       wrap.style.position="fixed";
     });
     window.addEventListener("mouseup", ()=> dragging=false);
-  })("tceDrag", el);
+  })("tceDrag", root);
 
   // UI refs
   const refs = {
-    status:    el.querySelector("#tceStatus"),
-    current:   el.querySelector("#tceCurrent"),
-    rate:      el.querySelector("#tceRate"),
-    timeout:   el.querySelector("#tceTimeout"),
-    interHit:  el.querySelector("#tceInterHit"),
-    risk:      el.querySelector("#tceRisk"),
-    tableBody: el.querySelector("#tceTable tbody"),
-    refresh:   el.querySelector("#tceRefresh"),
-    cfg:       el.querySelector("#tceCfg"),
+    status: root.querySelector("#tceStatus"),
+    tabLive: root.querySelector("#tabLive"),
+    tabHist: root.querySelector("#tabHist"),
+    panelLive: root.querySelector("#panelLive"),
+    panelHist: root.querySelector("#panelHist"),
+    // live
+    current: root.querySelector("#tceCurrent"),
+    rate: root.querySelector("#tceRate"),
+    timeout: root.querySelector("#tceTimeout"),
+    interHit: root.querySelector("#tceInterHit"),
+    risk: root.querySelector("#tceRisk"),
+    tableBody: root.querySelector("#tceTable tbody"),
+    refresh: root.querySelector("#tceRefresh"),
+    cfg: root.querySelector("#tceCfg"),
+    // history
+    btnReloadHist: root.querySelector("#btnReloadHist"),
+    histTableBody: root.querySelector("#histTable tbody"),
+    histDetail: root.querySelector("#histDetail"),
+    hdId: root.querySelector("#hdId"),
+    hdWindow: root.querySelector("#hdWindow"),
+    hdLen: root.querySelector("#hdLen"),
+    hdResp: root.querySelector("#hdResp"),
+    hdThresholdsBody: root.querySelector("#hdThresholds tbody"),
+    chartCanvas: root.querySelector("#chainChart"),
   };
+
+  // Tabs
+  refs.tabLive.addEventListener("click", () => switchTab("live"));
+  refs.tabHist.addEventListener("click", () => switchTab("hist"));
+  function switchTab(which) {
+    const live = which === "live";
+    refs.tabLive.classList.toggle("active", live);
+    refs.tabHist.classList.toggle("active", !live);
+    refs.panelLive.style.display = live ? "" : "none";
+    refs.panelHist.style.display = live ? "none" : "";
+    if (!live) loadHistory();
+  }
 
   refs.refresh.addEventListener("click", tickNow);
   refs.cfg.addEventListener("click", configure);
+  refs.btnReloadHist.addEventListener("click", loadHistory);
 
   /**********************
-   * Data + Logic
+   * Live stats logic
    **********************/
   const HISTORY = []; // {t, chain}
   let pollTimer = null;
 
-  function notify(msg) {
-    refs.status.textContent = msg;
-  }
-
+  function toast(msg) { refs.status.textContent = msg; }
   function fmtClock(ts) {
     const d = new Date(ts);
     const hh = d.getHours().toString().padStart(2, "0");
     const mm = d.getMinutes().toString().padStart(2, "0");
     return `${hh}:${mm}`;
   }
-  function fmtDelta(mins) {
+  function fmtTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleString();
+  }
+  function fmtDeltaMin(mins) {
     if (!Number.isFinite(mins)) return "—";
     if (mins < 1) return `${Math.round(mins * 60)}s`;
     const h = Math.floor(mins / 60);
     const m = Math.round(mins % 60);
     return h ? `${h}h ${m}m` : `${m}m`;
   }
-
   function pruneHistory() {
     const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000;
     while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift();
   }
-
   function computeRate() {
     pruneHistory();
     const windowMs = STATE.rateWindowMin * 60 * 1000;
@@ -217,40 +267,29 @@
     const startIdx = HISTORY.findIndex(pt => pt.t >= (now - windowMs));
     const slice = startIdx === -1 ? HISTORY.slice() : HISTORY.slice(startIdx);
     if (slice.length < 2) return 0;
-
     const dtMin = (slice[slice.length - 1].t - slice[0].t) / 60000;
     const dHits = (slice[slice.length - 1].chain - slice[0].chain);
     if (dtMin <= 0 || dHits <= 0) return 0;
-    return dHits / dtMin; // hits/min
+    return dHits / dtMin;
   }
-
-  function estimate(ctr, rate, thresholds) {
-    const rows = [];
+  function estimateRows(current, rate, thresholds) {
     const now = Date.now();
-    thresholds.forEach(th => {
-      const delta = th - ctr;
-      if (delta <= 0) {
-        rows.push({ th, delta: 0, etaMin: 0, clock: "reached" });
-      } else if (rate > 0) {
+    return thresholds.map(th => {
+      const delta = th - current;
+      if (delta <= 0) return { th, delta: 0, etaMin: 0, clock: "reached" };
+      if (rate > 0) {
         const etaMin = delta / rate;
-        rows.push({ th, delta, etaMin, clock: fmtClock(now + etaMin * 60000) });
-      } else {
-        rows.push({ th, delta, etaMin: Infinity, clock: "—" });
+        return { th, delta, etaMin, clock: fmtClock(now + etaMin * 60000) };
       }
+      return { th, delta, etaMin: Infinity, clock: "—" };
     });
-    return rows;
   }
-
-  function setUI({ chainCurrent, timeoutSec, rateHPM }) {
+  function setLiveUI({ chainCurrent, timeoutSec, rateHPM }) {
     refs.current.textContent = String(chainCurrent);
     refs.rate.textContent = rateHPM ? rateHPM.toFixed(2) : "0.00";
     refs.timeout.textContent = timeoutSec ? `${timeoutSec}s` : "—";
-
-    // Average inter-hit time from current rate
     const interHitSec = rateHPM > 0 ? (60 / rateHPM) : Infinity;
     refs.interHit.textContent = Number.isFinite(interHitSec) ? `${Math.round(interHitSec)}s` : "—";
-
-    // Risk advisory: if average inter-hit exceeds timeout
     refs.risk.textContent = "";
     refs.risk.className = "tce-small";
     if (timeoutSec && Number.isFinite(interHitSec)) {
@@ -262,112 +301,296 @@
         refs.risk.classList.add("tce-good");
       }
     }
-
-    // Table
-    const rows = estimate(chainCurrent, rateHPM, STATE.thresholds);
+    const rows = estimateRows(chainCurrent, rateHPM, STATE.thresholds);
     refs.tableBody.innerHTML = rows.map(r => {
       const dim = r.delta <= 0 ? " tce-row-dim" : "";
       return `<tr class="${dim}">
         <td class="tce-mono">${r.th}</td>
         <td class="tce-mono">${r.delta <= 0 ? "—" : r.delta}</td>
-        <td class="tce-mono">${r.clock}${Number.isFinite(r.etaMin) && r.etaMin>0 ? ` (${fmtDelta(r.etaMin)})` : ""}</td>
+        <td class="tce-mono">${r.clock}${Number.isFinite(r.etaMin) && r.etaMin>0 ? ` (${fmtDeltaMin(r.etaMin)})` : ""}</td>
       </tr>`;
     }).join("");
   }
-
   function tickNow() {
-    if (!STATE.apiKey) {
-      configure();
-      if (!STATE.apiKey) {
-        notify("API key required.");
-        return;
-      }
-    }
-    notify("updating…");
-    fetchChain()
-      .then(data => {
-        notify("live");
-        const { chainCurrent, timeoutSec } = data;
-        HISTORY.push({ t: Date.now(), chain: chainCurrent });
-        const rate = computeRate();
-        setUI({ chainCurrent, timeoutSec, rateHPM: rate });
-      })
-      .catch(err => {
-        console.error(err);
-        notify("error");
-      });
+    if (!ensureKey()) return;
+    toast("updating…");
+    fetchChain().then(data => {
+      toast("live");
+      const { chainCurrent, timeoutSec } = data;
+      HISTORY.push({ t: Date.now(), chain: chainCurrent });
+      const rate = computeRate();
+      setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
+    }).catch(err => { console.error(err); toast("error"); });
   }
-
-  function startPolling() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(tickNow, STATE.pollSec * 1000);
-    tickNow();
-  }
+  function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
 
   /**********************
-   * API (Faction → chain)
-   * Endpoint: https://api.torn.com/faction/?selections=chain&key=YOUR_KEY
-   * We only rely on: chain.current and chain.timeout (seconds).
+   * History browser
    **********************/
-  function fetchChain() {
-    const url = `https://api.torn.com/faction/?selections=chain&key=${encodeURIComponent(STATE.apiKey)}`;
-    return httpGetJSON(url).then(json => {
-      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
-      // Defensive parsing: accept a few plausible shapes
-      let chainCurrent = undefined, timeoutSec = undefined;
+  let chart = null;
 
-      // Common/expected layout
-      if (json && json.chain) {
-        chainCurrent = num(json.chain.current);
-        timeoutSec   = num(json.chain.timeout);
-        // Some responses may use time_left or cooldown—fall back if timeout is missing
-        if (!Number.isFinite(timeoutSec) && Number.isFinite(num(json.chain.time_left))) {
-          timeoutSec = num(json.chain.time_left);
-        }
-      }
-      // Fallbacks if API surface differs
-      if (!Number.isFinite(chainCurrent) && Number.isFinite(num(json.current))) {
-        chainCurrent = num(json.current);
-      }
-      if (!Number.isFinite(timeoutSec) && Number.isFinite(num(json.timeout))) {
-        timeoutSec = num(json.timeout);
-      }
+  function loadHistory() {
+    if (!ensureKey()) return;
+    toast("loading history…");
+    fetchChains().then(list => {
+      refs.histTableBody.innerHTML = list.map(row => {
+        const len = row.chain || row.length || row.hits || 0;
+        const start = row.start || row.started || 0;
+        const end = row.end || row.ended || 0;
+        const resp = row.respect || 0;
+        return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
+          <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
+          <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
+          <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
+          <td class="tce-mono">${len}</td>
+          <td class="tce-mono">${resp.toFixed ? resp.toFixed(2) : resp}</td>
+        </tr>`;
+      }).join("");
+      refs.histTableBody.querySelectorAll("tr").forEach(tr => {
+        tr.addEventListener("click", () => {
+          const id = parseInt(tr.getAttribute("data-id"), 10);
+          const start = parseInt(tr.getAttribute("data-start"), 10);
+          const end = parseInt(tr.getAttribute("data-end"), 10);
+          openChainDetail(id, start, end);
+        });
+      });
+      toast("history ready");
+    }).catch(err => { console.error(err); toast("error"); });
+  }
 
-      if (!Number.isFinite(chainCurrent)) throw new Error("Missing chain.current in API response.");
-      return { chainCurrent, timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null, raw: json };
+  async function openChainDetail(chainId, startTs, endTs) {
+    if (!ensureKey()) return;
+    refs.histDetail.style.display = "";
+    refs.hdId.textContent = String(chainId);
+    refs.hdWindow.textContent = `${fmtTime(startTs)} → ${fmtTime(endTs)}`;
+    refs.hdLen.textContent = "…";
+    refs.hdResp.textContent = "…";
+    refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Loading…</td></tr>`;
+    toast(`loading chain #${chainId}…`);
+
+    const [report, attacks] = await Promise.all([
+      fetchChainReport(chainId).catch(()=>null),
+      fetchAttacksWindow(startTs, endTs).catch(()=>[])
+    ]);
+
+    // report stats
+    if (report) {
+      const len = report?.chainreport?.stats?.chain || report?.stats?.chain || 0;
+      const resp = report?.chainreport?.stats?.respect || report?.stats?.respect || 0;
+      refs.hdLen.textContent = String(len);
+      refs.hdResp.textContent = (Number.isFinite(resp) ? resp.toFixed(2) : String(resp));
+    } else {
+      refs.hdLen.textContent = "—";
+      refs.hdResp.textContent = "—";
+    }
+
+    // attacks → timeline
+    const points = buildChainTimeline(attacks, startTs);
+    renderChart(points);
+
+    // thresholds table
+    const crossed = computeThresholdMoments(points, STATE.thresholds);
+    refs.hdThresholdsBody.innerHTML = crossed.map(c => {
+      return `<tr>
+        <td class="tce-mono">${c.th}</td>
+        <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
+        <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts - startTs*1000)/60000) : "—"}</td>
+      </tr>`;
+    }).join("");
+
+    toast(`chain #${chainId} ready`);
+  }
+
+  function buildChainTimeline(attacks, startTsSec) {
+    // Keep only those with chain index > 0; sort by timestamp asc
+    const rows = attacks
+      .map(a => ({
+        ts: (a.timestamp_started || a.timestamp || a.modifiers?.timestamp || 0) * 1000,
+        chain: a.chain || a.chain_link || a.modifiers?.chain || 0
+      }))
+      .filter(r => r.ts && r.chain >= 0)
+      .sort((a,b)=>a.ts-b.ts);
+
+    // Ensure monotonic chain: if chain resets within window, keep increasing segment
+    let maxSeen = -1;
+    const pts = [];
+    for (const r of rows) {
+      if (r.chain >= maxSeen) {
+        maxSeen = r.chain;
+        pts.push({ t: r.ts, y: r.chain });
+      }
+    }
+    // Prepend start zero point
+    if (pts.length === 0 || pts[0].y > 0) {
+      pts.unshift({ t: startTsSec * 1000, y: 0 });
+    }
+    return pts;
+  }
+
+  function computeThresholdMoments(points, thresholds) {
+    const out = [];
+    let i = 0;
+    for (const th of thresholds) {
+      // find first point with y >= th
+      let ts = null;
+      while (i < points.length && points[i].y < th) i++;
+      if (i < points.length && points[i].y >= th) ts = points[i].t;
+      out.push({ th, ts });
+    }
+    return out;
+  }
+
+  function renderChart(points) {
+    if (!refs.chartCanvas) return;
+    if (chart) { chart.destroy(); chart = null; }
+    const labels = points.map(p => new Date(p.t));
+    const data = points.map(p => p.y);
+    chart = new Chart(refs.chartCanvas.getContext("2d"), {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "Cumulative chain",
+          data,
+          fill: false,
+          lineTension: 0.15,
+          pointRadius: 0,
+          borderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        scales: {
+          x: { type: "time", time: { tooltipFormat: "MMM d, HH:mm" } },
+          y: { beginAtZero: true, ticks: { precision: 0 } }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => `Chain: ${ctx.parsed.y}`
+            }
+          }
+        },
+        animation: false,
+      }
     });
   }
 
-  function num(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : NaN;
+  /**********************
+   * API helpers
+   **********************/
+  function ensureKey() {
+    if (!STATE.apiKey) { configure(); }
+    if (!STATE.apiKey) { toast("API key required."); return false; }
+    return true;
   }
 
   function httpGetJSON(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        url,
-        method: "GET",
-        headers: { "Accept": "application/json" },
+        url, method: "GET", headers: { "Accept": "application/json" },
         onload: (res) => {
           try {
             if (res.status < 200 || res.status >= 300) {
               reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`));
               return;
             }
-            const json = JSON.parse(res.responseText || "{}");
-            resolve(json);
-          } catch (e) {
-            reject(e);
-          }
+            resolve(JSON.parse(res.responseText || "{}"));
+          } catch (e) { reject(e); }
         },
-        onerror: (e) => reject(new Error("Network error")),
+        onerror: () => reject(new Error("Network error")),
         ontimeout: () => reject(new Error("Request timed out")),
-        timeout: 15000,
+        timeout: 20000,
       });
     });
   }
 
-  // kick off
+  function apiBase() { return "https://api.torn.com"; }
+
+  // Live chain
+  function fetchChain() {
+    const url = `${apiBase()}/faction/?selections=chain&key=${encodeURIComponent(STATE.apiKey)}`;
+    return httpGetJSON(url).then(json => {
+      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+      let chainCurrent = undefined, timeoutSec = undefined;
+      if (json && json.chain) {
+        chainCurrent = toNum(json.chain.current);
+        timeoutSec   = toNum(json.chain.timeout);
+        if (!Number.isFinite(timeoutSec) && Number.isFinite(toNum(json.chain.time_left))) timeoutSec = toNum(json.chain.time_left);
+      }
+      if (!Number.isFinite(chainCurrent) && Number.isFinite(toNum(json.current))) chainCurrent = toNum(json.current);
+      if (!Number.isFinite(timeoutSec) && Number.isFinite(toNum(json.timeout))) timeoutSec = toNum(json.timeout);
+      if (!Number.isFinite(chainCurrent)) throw new Error("Missing chain.current");
+      return { chainCurrent, timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null, raw: json };
+    });
+  }
+
+  // History list (recent chains)
+  function fetchChains() {
+    const url = `${apiBase()}/faction/?selections=chains&key=${encodeURIComponent(STATE.apiKey)}`;
+    return httpGetJSON(url).then(json => {
+      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+      // Normalize to array of {chain_id, start, end, chain, respect}
+      const out = [];
+      const src = json?.chains || json;
+      if (src && typeof src === "object") {
+        Object.values(src).forEach(rec => {
+          const chain_id = rec?.chain || rec?.id || rec?.chain_id;
+          if (!chain_id) return;
+          out.push({
+            chain_id,
+            start: rec.start || rec.started || rec.timestamp || 0,
+            end: rec.end || rec.ended || rec.timestamp_end || 0,
+            chain: rec.chain_count || rec.length || rec.hits || rec.chain || 0,
+            respect: rec.respect || 0
+          });
+        });
+      }
+      // Sort by end desc
+      out.sort((a,b)=> (b.end||0) - (a.end||0));
+      return out.slice(0, 100);
+    });
+  }
+
+  // Chain report by ID
+  function fetchChainReport(chainId) {
+    const url = `${apiBase()}/torn/${encodeURIComponent(chainId)}?selections=chainreport&key=${encodeURIComponent(STATE.apiKey)}`;
+    return httpGetJSON(url).then(json => {
+      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+      return json;
+    });
+  }
+
+  // All attacks in [fromTsSec, toTsSec], paginated
+  async function fetchAttacksWindow(fromSec, toSec) {
+    const all = [];
+    let page = 0;
+    let cursor = fromSec;
+    while (cursor <= toSec && page < STATE.maxAttackPages) {
+      page++;
+      const url = `${apiBase()}/faction/?selections=attacks&key=${encodeURIComponent(STATE.apiKey)}&from=${cursor}&to=${toSec}&limit=1000`;
+      const json = await httpGetJSON(url);
+      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+
+      const obj = json?.attacks || json;
+      const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
+      if (!rows.length) break;
+      rows.sort((a,b)=> (a.timestamp_started||a.timestamp||0) - (b.timestamp_started||b.timestamp||0));
+      all.push(...rows);
+
+      const last = rows[rows.length - 1];
+      const lastTs = (last.timestamp_started || last.timestamp || 0);
+      if (!lastTs || lastTs >= toSec) break;
+      cursor = lastTs + 1; // continue after last seen
+    }
+    return all;
+  }
+
+  function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : NaN; }
+
+  // Kick off live polling immediately; history loads when tab opened
   startPolling();
 })();
