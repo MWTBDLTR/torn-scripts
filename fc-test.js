@@ -499,12 +499,25 @@
         const finalLen = points.length ? points[points.length - 1].y : 0;
         refs.hdLen.textContent = String(finalLen);
 
-        const crossed = computeThresholdMoments(points, STATE.thresholds);
+        // Make sure the table includes the final link even if it’s not in STATE.thresholds
+        const thresholdsForTable = Array.from(
+          new Set(
+            [...STATE.thresholds, finalLen]
+              .filter(n => Number.isFinite(n) && n > 0)
+          )
+        ).sort((a,b) => a - b);
+
+        const crossed = computeThresholdMoments(points, thresholdsForTable);
+
         refs.hdThresholdsBody.innerHTML = crossed.map(c => {
+          const isFinal = c.th === finalLen;
+          const label = isFinal ? `${c.th} (final)` : `${c.th}`;
+          const reached = c.ts ? new Date(c.ts).toLocaleString() : "—";
+          const delta = c.ts ? fmtDeltaMin((c.ts/1000 - startTs)/60) : "—";
           return `<tr>
-            <td class="tce-mono">${c.th}</td>
-            <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
-            <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts/1000 - startTs)/60) : "—"}</td>
+            <td class="tce-mono">${label}</td>
+            <td class="tce-mono">${reached}</td>
+            <td class="tce-mono">${delta}</td>
           </tr>`;
         }).join("");
       }
