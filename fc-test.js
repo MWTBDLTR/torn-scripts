@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Chain ETA + History & Graphs
+// @name         Torn Chain ETA + History & Graphs (with Cache)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.1
-// @description  Live chain ETAs plus history browser with per-chain chart (cumulative hits vs time) reconstructed from faction chain report and faction attacks.
+// @version      1.0.3
+// @description  Live chain ETAs plus history browser with cached chain reports and attacks; rate-over-time graph per chain.
 // @author       MrChurch
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
@@ -27,11 +27,20 @@
     pollSec: GM_getValue("torn_chain_eta_pollSec", 15),
     rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5),
     historyMaxMin: 15,
-    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 30), // safety cap (30k attacks)
+    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 30), // 30k attacks safety cap
+    chainsTTLms: GM_getValue("torn_chain_eta_chainsTTLms", 2 * 60 * 1000), // 2 minutes
   };
 
-  GM_registerMenuCommand("Torn Chain ETA → Configure…", configure);
-  GM_registerMenuCommand("Torn Chain ETA → Reset live history", () => { HISTORY.length = 0; toast("Live rate history reset."); });
+  GM_registerMenuCommand("Torn Chain → Configure…", configure);
+  GM_registerMenuCommand("Torn Chain → Reset live rate history", () => { HISTORY.length = 0; toast("Live rate history reset."); });
+  GM_registerMenuCommand("Torn Chain → Clear Chain Cache", async () => {
+    await cacheClearAll();
+    toast("Cache cleared.");
+  });
+  GM_registerMenuCommand("Torn Chain → Cache stats", async () => {
+    const s = await cacheStats();
+    alert(`Cache objects: chainsList=${s.chainsList}, chainReports=${s.chainReports}, attacks=${s.attacks}\nApprox bytes: ~${s.approxBytes.toLocaleString()}`);
+  });
 
   function configure() {
     const k = prompt("Enter your Torn API key:", STATE.apiKey || "");
@@ -68,6 +77,13 @@
     if (mp !== null) {
       const val = clampInt(parseInt(mp, 10), 10, 100, STATE.maxAttackPages);
       STATE.maxAttackPages = val; GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages);
+    }
+
+    const ct = prompt(`Chains list cache TTL in minutes (default 2):`, String(STATE.chainsTTLms / 60000));
+    if (ct !== null) {
+      const min = clampInt(parseInt(ct, 10), 1, 15, STATE.chainsTTLms / 60000);
+      STATE.chainsTTLms = min * 60000;
+      GM_setValue("torn_chain_eta_chainsTTLms", STATE.chainsTTLms);
     }
 
     toast("Settings saved.");
@@ -230,7 +246,7 @@
 
   refs.refresh.addEventListener("click", tickNow);
   refs.cfg.addEventListener("click", configure);
-  refs.btnReloadHist.addEventListener("click", loadHistory);
+  refs.btnReloadHist.addEventListener("click", () => loadHistory(true));
 
   /**********************
    * Live stats logic
@@ -325,37 +341,36 @@
   function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
 
   /**********************
-   * History browser
+   * History browser (with caching)
    **********************/
   let chart = null;
 
-  function loadHistory() {
+  async function loadHistory(forceRefetch = false) {
     if (!ensureKey()) return;
     toast("loading history…");
-    fetchChains().then(list => {
-      refs.histTableBody.innerHTML = list.map(row => {
-        const len = row.chain || row.length || row.hits || 0;
-        const start = row.start || row.started || 0;
-        const end = row.end || row.ended || 0;
-        const resp = row.respect || 0;
-        return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
-          <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
-          <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
-          <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
-          <td class="tce-mono">${len}</td>
-          <td class="tce-mono">${resp.toFixed ? resp.toFixed(2) : resp}</td>
-        </tr>`;
-      }).join("");
-      refs.histTableBody.querySelectorAll("tr").forEach(tr => {
-        tr.addEventListener("click", () => {
-          const id = parseInt(tr.getAttribute("data-id"), 10);
-          const start = parseInt(tr.getAttribute("data-start"), 10);
-          const end = parseInt(tr.getAttribute("data-end"), 10);
-          openChainDetail(id, start, end);
-        });
+    const list = await cachedFetchChains(forceRefetch);
+    refs.histTableBody.innerHTML = list.map(row => {
+      const len = row.chain || row.length || row.hits || 0;
+      const start = row.start || row.started || 0;
+      const end = row.end || row.ended || 0;
+      const resp = row.respect || 0;
+      return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
+        <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
+        <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
+        <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
+        <td class="tce-mono">${len}</td>
+        <td class="tce-mono">${Number.isFinite(resp) ? Number(resp).toFixed(2) : resp}</td>
+      </tr>`;
+    }).join("");
+    refs.histTableBody.querySelectorAll("tr").forEach(tr => {
+      tr.addEventListener("click", () => {
+        const id = parseInt(tr.getAttribute("data-id"), 10);
+        const start = parseInt(tr.getAttribute("data-start"), 10);
+        const end = parseInt(tr.getAttribute("data-end"), 10);
+        openChainDetail(id, start, end);
       });
-      toast("history ready");
-    }).catch(err => { console.error(err); toast("error"); });
+    });
+    toast("history ready");
   }
 
   async function openChainDetail(chainId, startTs, endTs) {
@@ -369,8 +384,8 @@
     toast(`loading chain #${chainId}…`);
 
     const [report, attacks] = await Promise.all([
-      fetchChainReport(chainId).catch(()=>null),
-      fetchAttacksWindow(startTs, endTs).catch(()=>[])
+      cachedFetchChainReport(chainId).catch(()=>null),
+      cachedFetchAttacksForChain(chainId, startTs, endTs).catch(()=>[])
     ]);
 
     // report stats
@@ -402,7 +417,6 @@
   }
 
   function buildChainTimeline(attacks, startTsSec) {
-    // Keep only those with chain index > 0; sort by timestamp asc
     const rows = attacks
       .map(a => ({
         ts: (a.timestamp_started || a.timestamp || a.modifiers?.timestamp || 0) * 1000,
@@ -411,7 +425,6 @@
       .filter(r => r.ts && r.chain >= 0)
       .sort((a,b)=>a.ts-b.ts);
 
-    // Ensure monotonic chain: if chain resets within window, keep increasing segment
     let maxSeen = -1;
     const pts = [];
     for (const r of rows) {
@@ -420,7 +433,6 @@
         pts.push({ t: r.ts, y: r.chain });
       }
     }
-    // Prepend start zero point
     if (pts.length === 0 || pts[0].y > 0) {
       pts.unshift({ t: startTsSec * 1000, y: 0 });
     }
@@ -431,7 +443,6 @@
     const out = [];
     let i = 0;
     for (const th of thresholds) {
-      // find first point with y >= th
       let ts = null;
       while (i < points.length && points[i].y < th) i++;
       if (i < points.length && points[i].y >= th) ts = points[i].t;
@@ -468,11 +479,7 @@
         },
         plugins: {
           legend: { display: false },
-          tooltip: {
-            callbacks: {
-              label: (ctx) => `Chain: ${ctx.parsed.y}`
-            }
-          }
+          tooltip: { callbacks: { label: (ctx) => `Chain: ${ctx.parsed.y}` } }
         },
         animation: false,
       }
@@ -480,14 +487,13 @@
   }
 
   /**********************
-   * API helpers
+   * API (live)
    **********************/
   function ensureKey() {
     if (!STATE.apiKey) { configure(); }
     if (!STATE.apiKey) { toast("API key required."); return false; }
     return true;
   }
-
   function httpGetJSON(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -507,10 +513,8 @@
       });
     });
   }
-
   function apiBase() { return "https://api.torn.com"; }
 
-  // Live chain
   function fetchChain() {
     const url = `${apiBase()}/faction/?selections=chain&key=${encodeURIComponent(STATE.apiKey)}`;
     return httpGetJSON(url).then(json => {
@@ -527,13 +531,112 @@
       return { chainCurrent, timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null, raw: json };
     });
   }
+  function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : NaN; }
 
-  // History list (recent chains)
+  /**********************
+   * Caching layer (IndexedDB)
+   **********************/
+  const DB_NAME = "torn_chain_cache";
+  const DB_VER = 1;
+  let dbp = null;
+
+  function db() {
+    if (dbp) return dbp;
+    dbp = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VER);
+      req.onupgradeneeded = (e) => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList"); // key: "singleton"
+        if (!d.objectStoreNames.contains("chainReports")) d.createObjectStore("chainReports"); // key: chainId
+        if (!d.objectStoreNames.contains("attacks")) d.createObjectStore("attacks"); // key: chainId
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbp;
+  }
+  async function idbGet(store, key) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readonly");
+      const st = tx.objectStore(store);
+      const req = st.get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function idbPut(store, key, value) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readwrite");
+      const st = tx.objectStore(store);
+      st.put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async function idbDelete(store, key) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readwrite");
+      const st = tx.objectStore(store);
+      st.delete(key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async function idbClear(store) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readwrite");
+      const st = tx.objectStore(store);
+      st.clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function cacheClearAll() {
+    await idbClear("chainsList");
+    await idbClear("chainReports");
+    await idbClear("attacks");
+  }
+  async function cacheStats() {
+    const d = await db();
+    async function count(store) {
+      return new Promise((resolve) => {
+        const tx = d.transaction(store, "readonly");
+        const st = tx.objectStore(store);
+        const req = st.count();
+        req.onsuccess = () => resolve(req.result || 0);
+        req.onerror = () => resolve(0);
+      });
+    }
+    const [a,b,c] = await Promise.all([count("chainsList"), count("chainReports"), count("attacks")]);
+    // very rough size: read all keys not necessary; give coarse estimate
+    const approxBytes = (a*4 + b*512 + c*4096);
+    return { chainsList: a, chainReports: b, attacks: c, approxBytes };
+  }
+
+  /**********************
+   * Cached fetchers
+   **********************/
+  async function cachedFetchChains(force = false) {
+    const key = "singleton";
+    const cached = await idbGet("chainsList", key);
+    const now = Date.now();
+    if (!force && cached && (now - (cached.ts || 0) < STATE.chainsTTLms)) {
+      return cached.data;
+    }
+    const fresh = await fetchChains();
+    await idbPut("chainsList", key, { data: fresh, ts: now });
+    return fresh;
+  }
+
   function fetchChains() {
     const url = `${apiBase()}/faction/?selections=chains&key=${encodeURIComponent(STATE.apiKey)}`;
     return httpGetJSON(url).then(json => {
       if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
-      // Normalize to array of {chain_id, start, end, chain, respect}
       const out = [];
       const src = json?.chains || json;
       if (src && typeof src === "object") {
@@ -549,13 +652,19 @@
           });
         });
       }
-      // Sort by end desc
       out.sort((a,b)=> (b.end||0) - (a.end||0));
       return out.slice(0, 100);
     });
   }
 
-  // Chain report by ID
+  async function cachedFetchChainReport(chainId) {
+    const key = String(chainId);
+    const cached = await idbGet("chainReports", key);
+    if (cached && cached.data) return cached.data; // immutable
+    const data = await fetchChainReport(chainId);
+    await idbPut("chainReports", key, { data, ts: Date.now() });
+    return data;
+  }
   function fetchChainReport(chainId) {
     const url = `${apiBase()}/torn/${encodeURIComponent(chainId)}?selections=chainreport&key=${encodeURIComponent(STATE.apiKey)}`;
     return httpGetJSON(url).then(json => {
@@ -564,7 +673,19 @@
     });
   }
 
-  // All attacks in [fromTsSec, toTsSec], paginated
+  async function cachedFetchAttacksForChain(chainId, fromSec, toSec) {
+    const key = String(chainId);
+    const cached = await idbGet("attacks", key);
+    if (cached && cached.complete && Array.isArray(cached.rows)) {
+      return cached.rows;
+    }
+    // Fetch once (complete set), then store
+    const rows = await fetchAttacksWindow(fromSec, toSec);
+    await idbPut("attacks", key, { rows, from: fromSec, to: toSec, ts: Date.now(), complete: true });
+    return rows;
+  }
+
+  // All attacks in [fromSec, toSec], paginated
   async function fetchAttacksWindow(fromSec, toSec) {
     const all = [];
     let page = 0;
@@ -574,23 +695,19 @@
       const url = `${apiBase()}/faction/?selections=attacks&key=${encodeURIComponent(STATE.apiKey)}&from=${cursor}&to=${toSec}&limit=1000`;
       const json = await httpGetJSON(url);
       if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
-
       const obj = json?.attacks || json;
       const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
       if (!rows.length) break;
       rows.sort((a,b)=> (a.timestamp_started||a.timestamp||0) - (b.timestamp_started||b.timestamp||0));
       all.push(...rows);
-
       const last = rows[rows.length - 1];
       const lastTs = (last.timestamp_started || last.timestamp || 0);
       if (!lastTs || lastTs >= toSec) break;
-      cursor = lastTs + 1; // continue after last seen
+      cursor = lastTs + 1;
     }
     return all;
   }
 
-  function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : NaN; }
-
-  // Kick off live polling immediately; history loads when tab opened
+  // Kick off
   startPolling();
 })();
