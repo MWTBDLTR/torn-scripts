@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.9
+// @version      1.0.10
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -257,6 +257,25 @@
     chartCanvas: root.querySelector("#chainChart"),
   };
 
+  function tctExportHistoryCSV() {
+    // export the current filtered result set (not just the current page)
+    const rows = [["id","start","end","duration_sec","length","respect"]];
+    (window.HIST_VIEW || HIST_VIEW || []).forEach(r => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
+    const csv = rows.map(r => r.map(v => {
+      const s = String(v);
+      return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g,'""')}"` : s;
+    }).join(",")).join("\n");
+    const blob = new Blob([csv], {type:"text/csv"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `torn_chains_${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   // Auto-width for History
   function adjustPanelWidth(which){
     if (which === "hist") {
@@ -295,7 +314,7 @@
     const totalPages = Math.max(1, Math.ceil(HIST_VIEW.length / getPageSize()));
     if (histPage < totalPages){ histPage++; renderHistoryTable(); }
   });
-  refs.btnExportCSV.addEventListener("click", exportHistoryCSV);
+  refs.btnExportCSV.addEventListener("click", tctExportHistoryCSV);
   refs.btnClearCache.addEventListener("click", async () => { await cacheClearAll(); toast("Cache cleared."); });
 
   // ----------------- Live stats -----------------
