@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.1
+// @version      1.2.2
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -963,6 +963,7 @@
       tctChart.destroy();
       tctChart = null;
     }
+
     const data = points.map((p) => ({ x: p.t, y: p.y }));
     tctChart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
@@ -971,10 +972,14 @@
           {
             label: "Hit #",
             data,
-            fill: false,
-            tension: 0.15,
-            pointRadius: 0,
             borderWidth: 2,
+            tension: 0.15,
+            // ---- show points ----
+            pointRadius: 3, // radius in pixels
+            pointHoverRadius: 5, // larger on hover
+            pointBackgroundColor: "#4fc3f7", // pick a color you like
+            pointBorderColor: "#1e88e5",
+            fill: false,
           },
         ],
       },
