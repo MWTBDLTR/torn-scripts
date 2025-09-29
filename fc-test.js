@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -548,6 +548,17 @@
       if (v3 > hardCap) return NaN;
       if (!expectedLen || v3 <= expectedLen * 1.2) return v3;
     }
+
+    return NaN;
+  }
+  // === Timestamp helper ===
+  // Prefer when the attack actually ended; fall back to started.
+  function getAttackTimestamp(row) {
+    const te = Number(row.timestamp_ended);
+    if (Number.isFinite(te) && te > 0) return te;
+
+    const ts = Number(row.timestamp_started);
+    if (Number.isFinite(ts) && ts > 0) return ts;
 
     return NaN;
   }
