@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Chain Tools: Live ETA + History
+// @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.9
-// @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
+// @version      1.2.0
+// @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
 // @match        https://www.torn.com/factions.php*
@@ -125,35 +125,12 @@
     toast("Settings saved.");
   }
 
-  async function testKey() {
-    try {
-      if (isPublicMode()) {
-        if (!STATE.factionIdOverride)
-          throw new Error("Public mode: set Faction ID in Settings.");
-        await httpGetJSON(buildFactionChainUrl());
-        await httpGetJSON(buildFactionChainsUrl());
-        alert(
-          `Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`
-        );
-        return;
-      }
-      const u = await fetchUserProfile();
-      alert(
-        `Key OK.\nPlayer: ${u.name} [${u.player_id}]\nFaction: ${
-          u.faction_name || "(none)"
-        } (${u.faction_id || 0})`
-      );
-    } catch (e) {
-      alert(`Key test failed: ${e.message || e}`);
-    }
-  }
-
   function clampInt(n, lo, hi, dflt) {
     if (!Number.isFinite(n)) return dflt;
     return Math.max(lo, Math.min(hi, n));
   }
 
-  // ---------- Styles / UI (trimmed to essentials for brevity) ----------
+  // ---------- Styles / UI ----------
   GM_addStyle(`
     .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 420px; background:#0f1419; color:#eaf2ff; font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; border:1px solid #2a3641; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
     .tce-header { cursor:move; padding:10px 12px; font-weight:600; background:#0b1015; border-bottom:1px solid #1e2a34; display:flex; gap:8px; align-items:center; justify-content:space-between; }
@@ -463,13 +440,10 @@
     if (m) return `${m}m ${s}s`;
     return `${s}s`;
   }
-
   function withEndBuffer(sec, buf = 300) {
-    // +5 minutes
     const n = Number(sec);
     return Number.isFinite(n) ? n + buf : sec;
   }
-
   function pruneHistory() {
     const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000;
     while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift();
@@ -520,14 +494,14 @@
       .map((r) => {
         const dim = r.delta <= 0 ? " tce-row-dim" : "";
         return `<tr class="${dim}">
-        <td class="tce-mono">${r.th}</td>
-        <td class="tce-mono">${r.delta <= 0 ? "—" : r.delta}</td>
-        <td class="tce-mono">${r.clock}${
+          <td class="tce-mono">${r.th}</td>
+          <td class="tce-mono">${r.delta <= 0 ? "—" : r.delta}</td>
+          <td class="tce-mono">${r.clock}${
           Number.isFinite(r.etaMin) && r.etaMin > 0
             ? ` (${fmtDeltaMin(r.etaMin)})`
             : ""
         }</td>
-      </tr>`;
+        </tr>`;
       })
       .join("");
   }
@@ -621,13 +595,13 @@
         return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${
           r.end
         }">
-        <td class="tce-mono"><span class="tce-link">${r.id}</span></td>
-        <td class="tce-mono">${r.start ? fmtTime(r.start) : "—"}</td>
-        <td class="tce-mono">${r.end ? fmtTime(r.end) : "—"}</td>
-        <td class="tce-mono">${fmtDur(r.dur)}</td>
-        <td class="tce-mono">${fmtInt(r.len)}</td>
-        <td class="tce-mono">${fmtRespect(r.respect)}</td>
-      </tr>`;
+          <td class="tce-mono"><span class="tce-link">${r.id}</span></td>
+          <td class="tce-mono">${r.start ? fmtTime(r.start) : "—"}</td>
+          <td class="tce-mono">${r.end ? fmtTime(r.end) : "—"}</td>
+          <td class="tce-mono">${fmtDur(r.dur)}</td>
+          <td class="tce-mono">${fmtInt(r.len)}</td>
+          <td class="tce-mono">${fmtRespect(r.respect)}</td>
+        </tr>`;
       })
       .join("");
     refs.histTableBody.querySelectorAll("tr").forEach((tr) => {
@@ -653,6 +627,7 @@
     return Number.isFinite(n) ? n : 0;
   }
 
+  // ---------- Chain detail (V2-only) ----------
   function getChainStats(report) {
     const cr = report?.chainreport ?? report ?? {};
     const d = cr?.details || {};
@@ -704,13 +679,61 @@
     };
   }
 
-  function num(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  }
-  function toFloat(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
+  function normalizeV2Members(attackersArr, nonAttackersArr, factionID) {
+    const rows = [];
+
+    for (const a of attackersArr) {
+      const att = a?.attacks || {};
+      const rsp = a?.respect || {};
+      rows.push({
+        userID: num(a.id),
+        level: null,
+        factionID: factionID || null,
+
+        attacks: num(att.total),
+        respect: toFloat(rsp.total),
+        avg: toFloat(rsp.average),
+        besthit: toFloat(rsp.best),
+
+        leave: num(att.leave),
+        mug: num(att.mug),
+        hospitalize: num(att.hospitalize),
+        assists: num(att.assists),
+        retaliations: num(att.retaliations),
+        overseas: num(att.overseas),
+        draws: num(att.draws),
+        escapes: num(att.escapes),
+        losses: num(att.losses),
+        warhits: num(att.war),
+        bonuses: num(att.bonuses),
+      });
+    }
+
+    for (const uid of nonAttackersArr || []) {
+      rows.push({
+        userID: num(uid),
+        level: null,
+        factionID: factionID || null,
+
+        attacks: 0,
+        respect: 0,
+        avg: 0,
+        besthit: 0,
+
+        leave: 0,
+        mug: 0,
+        hospitalize: 0,
+        assists: 0,
+        retaliations: 0,
+        overseas: 0,
+        draws: 0,
+        escapes: 0,
+        losses: 0,
+        warhits: 0,
+        bonuses: 0,
+      });
+    }
+    return rows;
   }
 
   async function openChainDetail(chainId, startTs, endTs) {
@@ -726,7 +749,7 @@
     toast(`loading chain #${chainId}…`);
 
     try {
-      // 1) Chain report (v2-friendly) → stats
+      // 1) Chain report (v2) → stats
       const report = await cachedFetchChainReport(chainId).catch(() => null);
 
       let expectedLen = null;
@@ -735,14 +758,11 @@
       if (report) {
         const stats = getChainStats(report);
 
-        // Respect (2dp if numeric)
         refs.hdResp.textContent = Number.isFinite(stats.respect)
           ? stats.respect.toFixed(2)
           : String(stats.respect ?? "—");
 
         expectedLen = Number(stats.chain) || null;
-
-        // Prefer faction id from report; fall back to resolver
         ourFactionId =
           Number(stats.factionID || STATE.factionIdOverride || 0) || null;
 
@@ -764,13 +784,13 @@
         refs.hdLen.textContent =
           expectedLen != null ? String(expectedLen) : "—";
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-        Per-hit timeline requires a private key with faction attacks access. Showing summary only.
-      </td></tr>`;
+          Per-hit timeline requires a private key with faction attacks access. Showing summary only.
+        </td></tr>`;
         toast(`chain #${chainId} summary ready`);
         return;
       }
 
-      // If faction id still unknown, resolve it now
+      // If faction id still unknown, prefer override; else null (chart will still render if links found)
       if (!ourFactionId) {
         try {
           ourFactionId = await resolveOurFactionId();
@@ -778,8 +798,7 @@
         if (!Number.isFinite(ourFactionId)) ourFactionId = null;
       }
 
-      // 3) Fetch all outgoing successful attacks for this window (v2 paginated helper)
-      //    NOTE: requires fetchAttacksWindow(fromSec, toSec, targetHits, expectedLen)
+      // 3) Fetch outgoing successful attacks for this window (v2)
       const attacks = await fetchAttacksWindow(
         startTs,
         withEndBuffer(endTs, 300),
@@ -787,7 +806,7 @@
         expectedLen
       ).catch(() => []);
 
-      // 4) Build timeline ONLY for hits where attacker_faction == ourFactionId
+      // 4) Build timeline for hits where attacker faction == ourFactionId
       const points = buildChainTimeline(
         attacks,
         startTs,
@@ -800,22 +819,20 @@
         refs.hdLen.textContent =
           expectedLen != null ? String(expectedLen) : "0";
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-        No per-hit data parsed for this chain window (no qualifying attacks for our faction).
-      </td></tr>`;
+          No per-hit data parsed for this chain window (no qualifying attacks for our faction).
+        </td></tr>`;
         toast(`chain #${chainId}: no per-hit data`);
         return;
       }
 
-      // 5) Render chart (your existing function)
+      // 5) Render chart
       refs.chartCanvas.parentElement.style.display = "";
       renderChart(points);
 
-      // Final len shown: prefer expectedLen if known, else use last y
       const finalLen =
         expectedLen != null ? expectedLen : points[points.length - 1]?.y ?? 0;
       refs.hdLen.textContent = String(finalLen);
 
-      // Thresholds table (keep your existing style/logic)
       const thresholdsForTable = Array.from(
         new Set([...STATE.thresholds, finalLen])
       ).sort((a, b) => a - b);
@@ -823,16 +840,18 @@
       refs.hdThresholdsBody.innerHTML = crossed
         .map(
           (c) => `
-      <tr>
-        <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
-        <td class="tce-mono">${
-          c.ts ? new Date(c.ts).toLocaleString() : "—"
-        }</td>
-        <td class="tce-mono">${
-          c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
-        }</td>
-      </tr>
-    `
+          <tr>
+            <td class="tce-mono">${c.th}${
+            c.th === finalLen ? " (final)" : ""
+          }</td>
+            <td class="tce-mono">${
+              c.ts ? new Date(c.ts).toLocaleString() : "—"
+            }</td>
+            <td class="tce-mono">${
+              c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
+            }</td>
+          </tr>
+        `
         )
         .join("");
 
@@ -843,19 +862,21 @@
     }
   }
 
+  // ---------- Timeline helpers (V2 fields only) ----------
   function getLinkNumber(row, expectedLen = null) {
-    // V2: top-level `chain` = chain counter at attack time
+    // V2: top-level `chain` is the chain counter at the time of the attack
     const v = Number(row.chain);
     if (Number.isFinite(v) && v > 0) {
       const hardCap = 100000;
       if (v > hardCap) return NaN;
       if (!expectedLen || v <= expectedLen * 1.2) return v;
     }
-    return NaN; // Do NOT use modifiers.chain (that's a respect modifier)
+    // Do NOT use modifiers.chain (that is a respect modifier)
+    return NaN;
   }
 
   function getAttackTimestamp(row) {
-    // V2 fields only
+    // Prefer ended; fall back to started (both V2)
     const te = Number(row.ended);
     if (Number.isFinite(te) && te > 0) return te;
     const ts = Number(row.started);
@@ -864,12 +885,10 @@
   }
 
   function getAttackerFactionId(row) {
-    const v = row?.attacker?.faction?.id ?? null;
-    const n = Number(v);
+    const n = Number(row?.attacker?.faction?.id ?? NaN);
     return Number.isFinite(n) ? n : NaN;
   }
 
-  // --- Timeline for OUR faction hits only (attacker_faction == OUR_FACTION_ID) ---
   function buildChainTimeline(
     attacks,
     startTsSec,
@@ -881,17 +900,15 @@
     let maxLink = 0;
 
     for (const a of attacks) {
-      // Only count hits made BY our faction
       if (ourFactionId) {
         const atkFid = getAttackerFactionId(a);
         if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId))
           continue;
       }
-
-      const link = getLinkNumber(a, expectedLen); // >0 only
+      const link = getLinkNumber(a, expectedLen);
       if (!Number.isFinite(link) || link <= 0) continue;
 
-      const ts = getAttackTimestamp(a); // prefer ended, then started
+      const ts = getAttackTimestamp(a);
       if (!Number.isFinite(ts) || ts <= 0) continue;
 
       const ms = ts * 1000;
@@ -913,13 +930,11 @@
 
   function spreadWithinSecond(pts) {
     if (!pts || pts.length < 3) return pts || [];
-
     let i = 1;
     while (i < pts.length) {
       const sec = Math.floor(pts[i].t / 1000);
       let j = i + 1;
       while (j < pts.length && Math.floor(pts[j].t / 1000) === sec) j++;
-
       const count = j - i;
       if (count > 1) {
         const base = Math.max(pts[i - 1].t + 1, sec * 1000);
@@ -997,9 +1012,8 @@
     });
   }
 
-  // ----------------- API helpers & cache -----------------
+  // ----------------- API helpers & cache (V2-only) -----------------
   function apiBase() {
-    // V2 root
     return "https://api.torn.com/v2";
   }
   function isPublicMode() {
@@ -1012,11 +1026,10 @@
     return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
   }
 
-  // V2 URL builders (no legacy selections)
+  // V2 URL builders
   function buildFactionChainUrl() {
     const u = new URL(`${apiBase()}/faction/chain`);
     u.searchParams.set("key", keyParam());
-    // In public mode (and when override is set in private mode), include faction_id
     if (STATE.factionIdOverride)
       u.searchParams.set("faction_id", String(STATE.factionIdOverride));
     return u.href;
@@ -1035,11 +1048,6 @@
     u.searchParams.set("from", String(fromSec));
     u.searchParams.set("to", String(toSec));
     u.searchParams.set("comment", "chaintooldev");
-    return u.href;
-  }
-  function buildUserProfileUrl() {
-    const u = new URL(`${apiBase()}/user/profile`);
-    u.searchParams.set("key", keyParam());
     return u.href;
   }
   function buildChainReportUrl(chainId) {
@@ -1098,77 +1106,58 @@
     });
   }
 
-  let OUR_FACTION_ID = null;
-
-  async function fetchUserProfile() {
-    const j = await httpGetJSON(buildUserProfileUrl());
-    return {
-      player_id: Number(j?.player_id ?? j?.player?.player_id ?? 0),
-      name: String(j?.name ?? j?.player?.name ?? ""),
-      faction_id: Number(j?.faction?.faction_id ?? j?.faction_id ?? 0),
-      faction_name: String(j?.faction?.faction_name ?? j?.faction_name ?? ""),
-    };
+  // Key test (V2-only)
+  async function testKey() {
+    try {
+      if (isPublicMode()) {
+        if (!STATE.factionIdOverride)
+          throw new Error("Public mode: set Faction ID in Settings.");
+        await httpGetJSON(buildFactionChainUrl());
+        await httpGetJSON(buildFactionChainsUrl());
+        alert(
+          `Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`
+        );
+        return;
+      }
+      // Private key: just confirm v2 faction endpoints reachable
+      await httpGetJSON(buildFactionChainUrl());
+      await httpGetJSON(buildFactionChainsUrl());
+      alert("Key OK. v2 faction endpoints reachable.");
+    } catch (e) {
+      alert(`Key test failed: ${e.message || e}`);
+    }
   }
 
-  // Resolve the faction whose chain we care about
+  // Resolve faction id (V2-only: no user/profile). Use override or null.
   async function resolveOurFactionId() {
-    // If user forced a Faction ID, use it
-    if (STATE.factionIdOverride) {
-      OUR_FACTION_ID = Number(STATE.factionIdOverride) || null;
-      return OUR_FACTION_ID;
-    }
-    // Public mode requires an explicit faction id
-    if (isPublicMode()) {
-      OUR_FACTION_ID = Number(STATE.factionIdOverride) || null;
-      return OUR_FACTION_ID;
-    }
-    // Private key mode: infer from the key's user profile
-    if (OUR_FACTION_ID) return OUR_FACTION_ID;
-    const u = await fetchUserProfile().catch(() => null);
-    OUR_FACTION_ID = Number(u?.faction_id) || null;
-    return OUR_FACTION_ID;
+    return STATE.factionIdOverride
+      ? Number(STATE.factionIdOverride) || null
+      : null;
   }
 
   function fetchChain() {
     const url = buildFactionChainUrl();
-    return httpGetJSON(url)
-      .catch((e) => {
-        const msg = String(e.message || e);
-        if (msg.startsWith("7:"))
-          throw new Error(
-            "7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings."
-          );
-        throw e;
-      })
-      .then((json) => {
-        // V2 returns either { chain:{current,timeout} } or { current, timeout }
-        let chainCurrent = undefined,
-          timeoutSec = undefined;
-        if (json && json.chain) {
-          chainCurrent = Number(json.chain.current);
-          timeoutSec = Number(json.chain.timeout ?? json.chain.time_left);
-        }
-        if (
-          !Number.isFinite(chainCurrent) &&
-          Number.isFinite(Number(json?.current))
-        )
-          chainCurrent = Number(json.current);
-        if (
-          !Number.isFinite(timeoutSec) &&
-          Number.isFinite(Number(json?.timeout))
-        )
-          timeoutSec = Number(json.timeout);
-
-        if (!Number.isFinite(chainCurrent))
-          throw new Error("Missing chain.current");
-        return {
-          chainCurrent,
-          timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null,
-          raw: json,
-        };
-      });
+    return httpGetJSON(url).then((json) => {
+      // v2 returns either { chain:{current,timeout} } or { current, timeout }
+      let chainCurrent, timeoutSec;
+      if (json && json.chain) {
+        chainCurrent = Number(json.chain.current);
+        timeoutSec = Number(json.chain.timeout ?? json.chain.time_left);
+      } else {
+        chainCurrent = Number(json?.current);
+        timeoutSec = Number(json?.timeout);
+      }
+      if (!Number.isFinite(chainCurrent))
+        throw new Error("Missing chain.current");
+      return {
+        chainCurrent,
+        timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null,
+        raw: json,
+      };
+    });
   }
 
+  // -------------- IndexedDB Cache --------------
   const DB_NAME = "torn_chain_cache";
   const DB_VER = 1;
   let dbp = null;
@@ -1189,31 +1178,13 @@
       req.onerror = () => reject(req.error);
     });
     return dbp;
-    // Drop the entire IndexedDB database (used by 'Clear cache')
-    async function idbDeleteAll() {
-      // Close existing connection so delete can proceed
-      try {
-        const d = await db();
-        d.close();
-      } catch {}
-      dbp = null; // force a fresh open next time
-      await new Promise((resolve) => {
-        const req = indexedDB.deleteDatabase(DB_NAME);
-        req.onsuccess = () => resolve(true);
-        req.onerror = () => resolve(false);
-        req.onblocked = () => resolve(false);
-      });
-    }
   }
-
-  // Drop the entire IndexedDB database (called by cacheClearAll)
   async function idbDeleteAll() {
     try {
       const d = await db();
-      d.close(); // close active connection so delete can succeed
+      d.close();
     } catch {}
-    dbp = null; // force fresh open next time
-
+    dbp = null;
     return new Promise((resolve) => {
       const req = indexedDB.deleteDatabase(DB_NAME);
       req.onsuccess = () => resolve(true);
@@ -1221,7 +1192,6 @@
       req.onblocked = () => resolve(false);
     });
   }
-
   async function idbGet(store, key) {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -1232,7 +1202,6 @@
       r.onerror = () => reject(r.error);
     });
   }
-
   async function idbPut(store, key, value) {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -1243,7 +1212,6 @@
       tx.onerror = () => reject(tx.error);
     });
   }
-
   async function idbClear(store) {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -1254,7 +1222,6 @@
       req.onerror = () => reject(req.error);
     });
   }
-
   async function cacheClearAll() {
     try {
       await idbClear("chainsList");
@@ -1303,13 +1270,12 @@
       if (!Number.isFinite(chain_id)) return null;
       return {
         chain_id,
-        start: Number(rec.start) || 0, // seconds
-        end: Number(rec.end) || 0, // seconds
-        chain: Number(rec.chain) || 0, // hits
+        start: Number(rec.start) || 0,
+        end: Number(rec.end) || 0,
+        chain: Number(rec.chain) || 0,
         respect: Number(rec.respect) || 0,
       };
     }
-
     return (async () => {
       const out = [];
       const seen = new Set();
@@ -1322,12 +1288,6 @@
         try {
           json = await httpGetJSON(url);
         } catch (e) {
-          const msg = String(e?.message || e);
-          if (msg.startsWith("7:")) {
-            throw new Error(
-              "7: Incorrect ID-entity relation. In public mode set Faction ID override in Settings, or use a key where you're a member in the faction."
-            );
-          }
           throw e;
         }
 
@@ -1368,36 +1328,6 @@
     );
   }
 
-  async function cachedFetchAttacksForChain(
-    chainId,
-    fromSec,
-    toSec,
-    targetHits = null
-  ) {
-    if (isPublicMode())
-      throw new Error("Public key mode: faction attacks are not available.");
-    const key = String(chainId);
-    const cached = await idbGet("attacks", key);
-
-    if (cached && cached.complete && Array.isArray(cached.rows)) {
-      if (!targetHits || (cached.seenLinks || 0) >= targetHits) {
-        return cached.rows;
-      }
-    }
-
-    const rows = await fetchAttacksWindow(fromSec, toSec, targetHits);
-    const seenLinks = countUniqueLinks(rows);
-    await idbPut("attacks", key, {
-      rows,
-      from: fromSec,
-      to: toSec,
-      ts: Date.now(),
-      complete: true,
-      seenLinks,
-    });
-    return rows;
-  }
-
   function countUniqueLinks(rows) {
     const s = new Set();
     for (const r of rows) {
@@ -1425,6 +1355,7 @@
 
     while (cursor <= toSec && safety++ < STATE.maxAttackPages) {
       const url = buildFactionAttacksUrl(cursor, toSec);
+
       // back-off & retry on 429/rate-limit
       let payload;
       try {
@@ -1446,19 +1377,18 @@
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (!code || byCode.has(code)) continue;
-        // only successful outgoing hits
-        if (!keepResults.has(r.result)) continue;
+        if (!keepResults.has(r.result)) continue; // only successful outgoing hits
 
         byCode.set(code, r);
 
-        const ended = Number(r.ended ?? r.timestamp_ended ?? r.timestamp ?? 0);
+        const ended = Number(r.ended ?? 0);
         if (Number.isFinite(ended) && ended > maxEndedThisPage)
           maxEndedThisPage = ended;
       }
-      // gentle pacing to stay well under Torn’s 100-req/min cap
+      // gentle pacing to stay well under Torn’s caps
       await new Promise((r) => setTimeout(r, 800));
-      // advance cursor; bump +1s to avoid duplicates
       cursor = maxEndedThisPage > cursor ? maxEndedThisPage + 1 : cursor + 1;
+
       // optional early-stop checks
       if (targetHits && byCode.size >= targetHits) break;
       if (expectedLen) {
@@ -1473,10 +1403,15 @@
           break;
       }
     }
+
     // return sorted by ended time
     return Array.from(byCode.values()).sort(
       (a, b) => (a.ended ?? 0) - (b.ended ?? 0)
     );
   }
+
+  // Global faction id cache (used by countUniqueLinks)
+  let OUR_FACTION_ID = null;
+
   startPolling();
 })();
