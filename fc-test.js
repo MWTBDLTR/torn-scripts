@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.10
+// @version      1.0.11
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -328,6 +328,11 @@
   function fmtInt(n) { return Number.isFinite(+n) ? Number(n).toLocaleString() : "—"; }
   function fmtRespect(r){ return Number.isFinite(+r) ? Number(r).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) : "—"; }
   function fmtDur(sec){ if (!Number.isFinite(sec)||sec<0) return "—"; const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60); if(h) return `${h}h ${m}m`; if(m) return `${m}m ${s}s`; return `${s}s`; }
+  
+  function withEndBuffer(sec, buf = 300) { // +5 minutes
+    const n = Number(sec);
+    return Number.isFinite(n) ? (n + buf) : sec;
+  }
 
   function pruneHistory() { const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000; while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift(); }
   function computeRate() {
@@ -481,7 +486,8 @@
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Per-hit timeline requires a private key with faction attacks access. Showing summary only.</td></tr>`;
       } else {
-        const attacks = await cachedFetchAttacksForChain(chainId, startTs, endTs).catch(()=>[]);
+        const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300)).catch(()=>[]);
+
         const pointsRaw = buildChainTimeline(attacks, startTs);
         const points = spreadEqualTimes(pointsRaw); // << distribute same-second hits
         refs.chartCanvas.parentElement.style.display = "";
@@ -504,31 +510,42 @@
     } catch (e) { console.error(e); toast(e.message || "error"); }
   }
 
-  // ----------- NEW: robust timeline from per-hit increments -----------
   function buildChainTimeline(attacks, startTsSec) {
-    // X = attack END time (seconds), Y = cumulative hit #
-    const rows = attacks
-      .map(a => ({
-        tsEnd:  Number(a.timestamp_ended   || a.timestamp || 0),
-        tsAlt:  Number(a.timestamp_started || a.timestamp || 0),
-        // Count a hit if respect > 0 (consistent with chain increments)
-        respect: Number(a.respect || a.respect_gain || (a.modifiers && a.modifiers.respect) || 0)
-      }))
-      .filter(r => (r.tsEnd || r.tsAlt))
-      .sort((a,b) => (a.tsEnd || a.tsAlt) - (b.tsEnd || b.tsAlt));
+    // Use the per-attack chain link number; take the earliest time per link.
+    const startMs = startTsSec * 1000;
+    const earliestByLink = new Map(); // link -> earliest ms
 
-    const pts = [];
-    let cum = 0;
-    for (const r of rows) {
-      if (Number.isFinite(r.respect) && r.respect > 0) {
-        cum += 1;
-        const t = (r.tsEnd || r.tsAlt) * 1000;
-        pts.push({ t, y: cum });
-      }
+    for (const a of attacks) {
+      const link = Number(a.chain ?? a.chain_link ?? (a.modifiers && a.modifiers.chain));
+      if (!Number.isFinite(link) || link <= 0) continue;
+
+      const tEnd = Number(a.timestamp_ended ?? a.timestamp ?? 0);
+      const tStart = Number(a.timestamp_started ?? a.timestamp ?? 0);
+      const t = (tEnd || tStart) * 1000;
+      if (!t) continue;
+
+      const cur = earliestByLink.get(link);
+      if (cur == null || t < cur) earliestByLink.set(link, t);
     }
 
-    const startMs = startTsSec * 1000;
-    if (!pts.length || pts[0].y > 0) pts.unshift({ t: startMs, y: 0 });
+    // Build sorted, monotonic series: (time, hit#)
+    const links = [...earliestByLink.entries()]
+      .map(([y, t]) => ({ y, t }))
+      .sort((a, b) => a.y - b.y);
+
+    // Anchor at start
+    if (!links.length || links[0].y > 0) links.unshift({ t: startMs, y: 0 });
+
+    // Coalesce any equal-time points by keeping max y at that ms
+    const pts = [];
+    for (const p of links) {
+      const last = pts[pts.length - 1];
+      if (last && last.t === p.t) {
+        if (p.y > last.y) last.y = p.y;
+      } else {
+        pts.push(p);
+      }
+    }
     return pts;
   }
 
