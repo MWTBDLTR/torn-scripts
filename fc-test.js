@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Chain Tools: Live ETA + History (Public/Private + Cache + Polished UI)
+// @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.5
-// @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (private mode). Public-key aware. Caches to IndexedDB.
+// @version      1.0.6
+// @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
@@ -119,44 +119,44 @@
    * Styles + DOM
    **********************/
   GM_addStyle(`
-    .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 420px; background:#0f1419; color:#e7edf3; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; border:1px solid #27313a; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
-    .tce-header { cursor:move; padding:10px 12px; font-weight:600; background:#0b1015; border-bottom:1px solid #22303a; display:flex; gap:8px; align-items:center; justify-content:space-between; }
+    .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 420px; background:#0f1419; color:#eaf2ff; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; border:1px solid #2a3641; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
+    .tce-header { cursor:move; padding:10px 12px; font-weight:600; background:#0b1015; border-bottom:1px solid #1e2a34; display:flex; gap:8px; align-items:center; justify-content:space-between; }
     .tce-tabs { display:flex; gap:6px; }
-    .tce-tab { background:#15202b; border:1px solid #27313a; color:#cfe7ff; padding:4px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
+    .tce-tab { background:#15202b; border:1px solid #27313a; color:#d9e7ff; padding:4px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
     .tce-tab.active { background:#1b2733; }
-    .tce-badge { font-size:11px; padding:2px 6px; border-radius:999px; background:#1f2a33; color:#9bd2ff; }
+    .tce-badge { font-size:11px; padding:2px 6px; border-radius:999px; background:#1f2a33; color:#bfe0ff; }
     .tce-body { padding:10px 12px; max-height: 66vh; overflow:auto; }
     .tce-grid { width:100%; border-collapse:collapse; }
-    .tce-grid th, .tce-grid td { padding:6px 6px; text-align:left; border-bottom:1px solid #1c252e; white-space:nowrap; }
-    .tce-grid th { font-size:11px; color:#a9b7c6; text-transform:uppercase; letter-spacing:.04em; }
+    .tce-grid th, .tce-grid td { padding:8px 8px; text-align:left; border-bottom:1px solid #1c252e; white-space:nowrap; color:#eaf2ff; }
+    .tce-grid th { font-size:11px; color:#e1ecff; text-transform:uppercase; letter-spacing:.04em; background:#0e1620; }
     .tce-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .tce-row-dim td { color:#7f8b96; }
-    .tce-small { font-size:11px; color:#9aa8b6; }
+    .tce-row-dim td { color:#b3c5d6; }
+    .tce-small { font-size:11px; color:#c7d6e8; }
     .tce-footer { padding:8px 12px 10px; display:flex; gap:8px; justify-content:space-between; align-items:center; }
-    .tce-btn { background:#16202a; border:1px solid #27313a; color:#cfe7ff; padding:6px 8px; border-radius:8px; cursor:pointer; }
+    .tce-btn { background:#16202a; border:1px solid #27313a; color:#eaf2ff; padding:6px 8px; border-radius:8px; cursor:pointer; }
     .tce-btn:hover { background:#1a2631; }
     .tce-warn { color:#ffd27d; }
-    .tce-good { color:#9cffb3; }
-    .tce-bad  { color:#ff9a9a; }
-    .tce-link { color:#9bd2ff; cursor:pointer; text-decoration:underline; }
-    .tce-chart { width:100%; height: 240px; }
+    .tce-good { color:#baffc8; }
+    .tce-bad  { color:#ffb3b3; }
+    .tce-link { color:#bfe0ff; cursor:pointer; text-decoration:underline; }
+    .tce-chart { width:100%; height: 260px; }
     .tce-hbox { display:flex; gap:8px; flex-wrap: wrap; }
     .tce-hbox > div { flex:1 1 48%; }
-    .tce-muted { color:#8fa2b1; }
+    .tce-muted { color:#c0d2e0; }
 
-    /* History tab polish */
+    /* History tab polish + higher contrast */
     .tce-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 8px; }
-    .tce-toolbar input, .tce-toolbar select, .tce-toolbar button { background:#16202a; border:1px solid #27313a; color:#cfe7ff; padding:6px 8px; border-radius:8px; }
-    .tce-toolbar input::placeholder { color:#8aa2b6; }
+    .tce-toolbar input, .tce-toolbar select, .tce-toolbar button { background:#16202a; border:1px solid #27313a; color:#eaf2ff; padding:6px 8px; border-radius:8px; }
+    .tce-toolbar input::placeholder { color:#b3c5d6; }
     .tce-table-container { max-height:48vh; overflow:auto; border:1px solid #1c252e; border-radius:10px; }
-    .tce-grid thead th { position:sticky; top:0; background:#0b1015; z-index:1; }
-    .tce-grid tr:hover td { background:#131c25; }
-    .tce-grid tr:nth-child(even) td { background:#0f1821; }
+    .tce-grid thead th { position:sticky; top:0; background:#0e1620; z-index:1; }
+    .tce-grid tr:hover td { background:#162334; }
+    .tce-grid tr:nth-child(even) td { background:#101a24; }
     .tce-grid th.num, .tce-grid td.num { text-align:right; }
-    .tce-grid td.dim { color:#7f8b96; }
+    .tce-grid td.dim { color:#a6b6c6; }
     .tce-actions { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
     .tce-pager { display:flex; justify-content:space-between; align-items:center; margin-top:8px; }
-    .tce-pager .info { font-size:11px; color:#9aa8b6; }
+    .tce-pager .info { font-size:11px; color:#c7d6e8; }
   `);
 
   const root = document.createElement("div");
@@ -325,6 +325,19 @@
     chartCanvas: root.querySelector("#chainChart"),
   };
 
+  // Auto-width per tab
+  function adjustPanelWidth(which){
+    if (which === "hist") {
+      const w = Math.min(Math.max(760, Math.floor(window.innerWidth * 0.9)), 1000);
+      root.style.width = `${w}px`;
+    } else {
+      root.style.width = "420px";
+    }
+  }
+  window.addEventListener("resize", () => {
+    if (refs.panelHist.style.display !== "none") adjustPanelWidth("hist");
+  });
+
   // Tabs
   refs.tabLive.addEventListener("click", () => switchTab("live"));
   refs.tabHist.addEventListener("click", () => switchTab("hist"));
@@ -334,6 +347,7 @@
     refs.tabHist.classList.toggle("active", !live);
     refs.panelLive.style.display = live ? "" : "none";
     refs.panelHist.style.display = live ? "none" : "";
+    adjustPanelWidth(live ? "live" : "hist");
     if (!live) loadHistory();
   }
 
@@ -368,10 +382,7 @@
     const mm = d.getMinutes().toString().padStart(2, "0");
     return `${hh}:${mm}`;
   }
-  function fmtTime(ts) { // ts in seconds
-    const d = new Date(ts * 1000);
-    return d.toLocaleString();
-  }
+  function fmtTime(ts) { const d = new Date(ts * 1000); return d.toLocaleString(); }
   function fmtDeltaMin(mins) {
     if (!Number.isFinite(mins)) return "—";
     if (mins < 1) return `${Math.round(mins * 60)}s`;
@@ -475,9 +486,9 @@
     try {
       const list = await cachedFetchChains(forceRefetch);
       HIST_ALL = list.map(row => {
-        const id = Number(row.chain_id || row.id || row.chain);
-        const start = Number(row.start || row.started || 0);
-        const end = Number(row.end || row.ended || 0);
+        const id = Number(row.chain_id || row.id); // normalized in fetchChains()
+        const start = Number(row.start || 0);
+        const end = Number(row.end || 0);
         const len = Number(row.chain || row.length || row.hits || 0);
         const respect = Number(row.respect || 0);
         return { id, start, end, len, respect, dur: end && start ? (end - start) : 0 };
@@ -550,7 +561,6 @@
   }
 
   function exportHistoryCSV(){
-    // export the current filtered result set (not just the current page)
     const rows = [["id","start","end","duration_sec","length","respect"]];
     HIST_VIEW.forEach(r => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
     const csv = rows.map(r => r.map(v => {
@@ -656,7 +666,6 @@
   function renderChart(points) {
     if (!refs.chartCanvas) return;
     if (chart) { chart.destroy(); chart = null; }
-    // Use linear x-scale (timestamps) to avoid needing a date adapter
     const data = points.map(p => ({ x: p.t, y: p.y }));
     chart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
@@ -862,7 +871,6 @@
    * Cached fetchers
    **********************/
   function chainsCacheKey() {
-    // Separate contexts by mode + faction (so public/priv & per-faction lists don’t collide)
     const mode = isPublicMode() ? "pub" : "priv";
     const fid = STATE.factionIdOverride || "implicit";
     return `${mode}:${fid}`;
@@ -892,9 +900,14 @@
       const out = [];
       const src = json?.chains || json;
       if (src && typeof src === "object") {
-        Object.values(src).forEach(rec => {
-          const chain_id = rec?.chain || rec?.id || rec?.chain_id;
-          if (!chain_id) return;
+        // Prefer the object key as the authoritative chain ID
+        for (const [keyId, rec] of Object.entries(src)) {
+          let chain_id = Number(keyId);
+          if (!Number.isFinite(chain_id)) {
+            chain_id = Number(rec?.chain_id || rec?.id || NaN);
+          }
+          if (!Number.isFinite(chain_id)) continue;
+
           out.push({
             chain_id,
             start: rec.start || rec.started || rec.timestamp || 0,
@@ -902,7 +915,7 @@
             chain: rec.chain_count || rec.length || rec.hits || rec.chain || 0,
             respect: rec.respect || 0
           });
-        });
+        }
       }
       out.sort((a,b)=> (b.end||0) - (a.end||0));
       return out.slice(0, 100);
@@ -912,7 +925,7 @@
   async function cachedFetchChainReport(chainId) {
     const key = String(chainId);
     const cached = await idbGet("chainReports", key);
-    if (cached && cached.data) return cached.data; // immutable
+    if (cached && cached.data) return cached.data;
     const data = await fetchChainReport(chainId);
     await idbPut("chainReports", key, { data, ts: Date.now() });
     return data;
@@ -934,7 +947,6 @@
     return rows;
   }
 
-  // All attacks in [fromSec, toSec], paginated
   async function fetchAttacksWindow(fromSec, toSec) {
     const all = [];
     let page = 0;
