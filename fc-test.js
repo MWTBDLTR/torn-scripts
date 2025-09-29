@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.6
+// @version      1.0.7
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -629,37 +629,107 @@
   }
 
   function buildChainTimeline(attacks, startTsSec) {
+    // Build cumulative (one point per counted hit), X = end time
     const rows = attacks
       .map(a => ({
-        ts: (a.timestamp_started || a.timestamp || a.modifiers?.timestamp || 0) * 1000,
-        chain: a.chain || a.chain_link || a.modifiers?.chain || 0
+        tsStart: Number(a.timestamp_started || a.timestamp || 0),
+        tsEnd:   Number(a.timestamp_ended   || a.timestamp || 0),
+        // use any explicit chain indicator if present
+        chainField: Number(a.chain || a.chain_link || (a.modifiers && a.modifiers.chain) || 0),
+        respect: Number(a.respect || a.respect_gain || (a.modifiers && a.modifiers.respect) || 0)
       }))
-      .filter(r => r.ts && r.chain >= 0)
-      .sort((a,b)=>a.ts-b.ts);
+      .filter(r => (r.tsEnd || r.tsStart))
+      .sort((a,b) => (a.tsEnd || a.tsStart) - (b.tsEnd || b.tsStart));
 
-    let maxSeen = -1;
     const pts = [];
+    let cum = 0;
+
     for (const r of rows) {
-      if (r.chain >= maxSeen) {
-        maxSeen = r.chain;
-        pts.push({ t: r.ts, y: r.chain });
+      const t = (r.tsEnd || r.tsStart) * 1000;
+
+      // Decide if this attack incremented the chain:
+      // 1) If Torn provided the exact chain link for this attack, trust it.
+      if (Number.isFinite(r.chainField) && r.chainField > 0) {
+        // Ensure monotonic increase; handle rare gaps by snapping upward.
+        if (r.chainField > cum) {
+          cum = r.chainField;
+          pts.push({ t, y: cum });
+        }
+        continue;
+      }
+
+      // 2) Fallback heuristic: respect > 0 counts as a chain hit.
+      if (Number.isFinite(r.respect) && r.respect > 0) {
+        cum += 1;
+        pts.push({ t, y: cum });
       }
     }
-    if (pts.length === 0 || pts[0].y > 0) {
-      pts.unshift({ t: startTsSec * 1000, y: 0 });
+
+    // Always include the start anchor at 0 to stabilize interpolation/thresholds
+    const startMs = startTsSec * 1000;
+    if (!pts.length || pts[0].y > 0) {
+      pts.unshift({ t: startMs, y: 0 });
+    } else if (pts[0].t > startMs) {
+      // If first hit has y===0 for some reason, force anchor at start
+      if (!(pts[0].y === 0 && pts[0].t === startMs)) pts.unshift({ t: startMs, y: 0 });
     }
-    return pts;
+
+    // Coalesce any accidental duplicates/same-time points keeping the max y
+    const coalesced = [];
+    for (const p of pts) {
+      const last = coalesced[coalesced.length - 1];
+      if (last && last.t === p.t) {
+        if (p.y > last.y) last.y = p.y;
+      } else {
+        coalesced.push(p);
+      }
+    }
+
+    return coalesced;
   }
 
+  // Replace the entire function
   function computeThresholdMoments(points, thresholds) {
     const out = [];
-    let i = 0;
+    if (!points || points.length === 0) {
+      return thresholds.map(th => ({ th, ts: null }));
+    }
+
+    // Points must be sorted by time and non-decreasing y
+    const pts = points.slice().sort((a,b)=>a.t-b.t);
+
+    let j = 1; // segment index
     for (const th of thresholds) {
       let ts = null;
-      while (i < points.length && points[i].y < th) i++;
-      if (i < points.length && points[i].y >= th) ts = points[i].t;
+
+      // Move forward until current segment's upper y >= th
+      while (j < pts.length && pts[j].y < th) j++;
+
+      if (j >= pts.length) {
+        // Threshold never reached
+        ts = null;
+      } else {
+        const p0 = pts[j-1] || { t: pts[0].t, y: pts[0].y };
+        const p1 = pts[j];
+
+        if (p1.y === th) {
+          // Exact hit
+          ts = p1.t;
+        } else if (p0.y < th && th < p1.y) {
+          // Interpolate in time between p0 and p1 (assume uniform progression within the segment)
+          const frac = (th - p0.y) / (p1.y - p0.y);
+          ts = Math.round(p0.t + frac * (p1.t - p0.t));
+        } else if (p0.y === th) {
+          ts = p0.t;
+        } else if (p1.y > th && p0.y > th) {
+          // Degenerate case (shouldn't happen with non-decreasing y), fallback to p1
+          ts = p1.t;
+        }
+      }
+
       out.push({ th, ts });
     }
+
     return out;
   }
 
@@ -695,7 +765,7 @@
                 const ts = items[0].parsed.x;
                 return new Date(ts).toLocaleString();
               },
-              label: (ctx) => `Chain: ${ctx.parsed.y}`
+              label: (ctx) => `Hit #: ${ctx.parsed.y}`
             }
           }
         },
