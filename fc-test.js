@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.1
+// @version      1.1.2
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -462,7 +462,35 @@
     refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
   }
 
-  async function openChainDetail(chainId, startTs, endTs) {
+  
+  // ---- Normalize chainreport / stats payload into a consistent shape ----
+  function getChainStats(report) {
+    const cr = report && report.chainreport ? report.chainreport : (report || {});
+    const s = (cr && typeof cr.stats === "object") ? cr.stats : cr;
+    const num = v => Number(v ?? 0);
+    return {
+      factionID:    num(s.factionID),
+      chain:        num(s.chain),
+      start:        num(s.start),       // seconds per Torn
+      end:          num(s.end),
+      leave:        num(s.leave),
+      mug:          num(s.mug),
+      hospitalize:  num(s.hospitalize),
+      assists:      num(s.assists),
+      overseas:     num(s.overseas),
+      draws:        num(s.draws),
+      escapes:      num(s.escapes),
+      losses:       num(s.losses),
+      respect:      Number(s.respect ?? 0),
+      targets:      num(s.targets),
+      warhits:      num(s.warhits),
+      besthit:      Number(s.besthit ?? 0),
+      retaliations: num(s.retaliations),
+      members:      cr.members || s.members || null,
+      bonuses:      cr.bonuses || s.bonuses || null,
+    };
+  }
+async function openChainDetail(chainId, startTs, endTs) {
     if (!ensureKey()) return;
     refs.histDetail.style.display = "";
     refs.hdId.textContent = String(chainId);
@@ -474,12 +502,17 @@
 
     try {
       const report = await cachedFetchChainReport(chainId).catch(()=>null);
+      let expectedLen = null;
       if (report) {
-        const resp = report?.chainreport?.stats?.respect || report?.stats?.respect || 0;
-        refs.hdResp.textContent = (Number.isFinite(resp) ? resp.toFixed(2) : String(resp));
+        const stats = getChainStats(report);
+        // Optional sanity-check
+        const sum = (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
+        if (stats.chain && sum !== stats.chain) {
+          console.warn(`Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${stats.chain}`);
+        }
+        refs.hdResp.textContent = Number.isFinite(stats.respect) ? stats.respect.toFixed(2) : String(stats.respect);
+        expectedLen = Number(stats.chain) || null;
       } else { refs.hdResp.textContent = "—"; }
-
-      const expectedLen = Number(report?.chainreport?.stats?.chain || report?.stats?.chain || 0) || null;
 
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
@@ -855,7 +888,7 @@
 
     while (cursor <= toSec && page < STATE.maxAttackPages) {
       page++;
-      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
+      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=5000`);
       const json = await httpGetJSON(url);
       const obj = json?.attacks || json;
       const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
