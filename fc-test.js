@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -398,7 +398,7 @@
   });
 
   // ----------------- Live stats -----------------
-  const HISTORY = []; // {t, chain}
+  const HISTORY = [];
   let pollTimer = null;
 
   function toast(msg) {
@@ -627,7 +627,7 @@
     return Number.isFinite(n) ? n : 0;
   }
 
-  // ---------- Chain detail (V2-only) ----------
+  // ---------- Chain detail ----------
   function getChainStats(report) {
     const cr = report?.chainreport ?? report ?? {};
     const d = cr?.details || {};
@@ -739,7 +739,6 @@
   async function openChainDetail(chainId, startTs, endTs) {
     if (!ensureKey()) return;
 
-    // Prime UI
     refs.histDetail.style.display = "";
     refs.hdId.textContent = String(chainId);
     refs.hdWindow.textContent = `${fmtTime(startTs)} → ${fmtTime(endTs)}`;
@@ -749,7 +748,6 @@
     toast(`loading chain #${chainId}…`);
 
     try {
-      // 1) Chain report (v2) → stats
       const report = await cachedFetchChainReport(chainId).catch(() => null);
 
       let expectedLen = null;
@@ -766,7 +764,6 @@
         ourFactionId =
           Number(stats.factionID || STATE.factionIdOverride || 0) || null;
 
-        // Optional sanity check
         const sum =
           (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
         if (expectedLen && sum !== expectedLen) {
@@ -778,7 +775,6 @@
         refs.hdResp.textContent = "—";
       }
 
-      // 2) Public-key mode: summary only
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdLen.textContent =
@@ -790,7 +786,6 @@
         return;
       }
 
-      // If faction id still unknown, prefer override; else null (chart will still render if links found)
       if (!ourFactionId) {
         try {
           ourFactionId = await resolveOurFactionId();
@@ -798,7 +793,6 @@
         if (!Number.isFinite(ourFactionId)) ourFactionId = null;
       }
 
-      // 3) Fetch outgoing successful attacks for this window (v2)
       const attacks = await fetchAttacksWindow(
         startTs,
         withEndBuffer(endTs, 300),
@@ -806,32 +800,29 @@
         expectedLen
       ).catch(() => []);
 
-      // 4) Build timeline for hits where attacker faction == ourFactionId
       const points = buildChainTimeline(
         attacks,
         startTs,
-        expectedLen || null,
+        expectedLen ?? null,
         ourFactionId
       );
 
+      const seenMax = points.length ? points[points.length - 1].y : 0;
+      const finalLen = expectedLen ?? seenMax;
+
       if (!points || points.length <= 1) {
         refs.chartCanvas.parentElement.style.display = "none";
-        refs.hdLen.textContent =
-          expectedLen != null ? String(expectedLen) : "0";
+        refs.hdLen.textContent = String(finalLen);
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-          No per-hit data parsed for this chain window (no qualifying attacks for our faction).
-        </td></tr>`;
+    No per-hit data parsed for this chain window (no qualifying outgoing attacks with a valid link index).
+  </td></tr>`;
         toast(`chain #${chainId}: no per-hit data`);
         return;
       }
 
-      // 5) Render chart
       refs.chartCanvas.parentElement.style.display = "";
-      renderChart(points);
-
-      const finalLen =
-        expectedLen != null ? expectedLen : points[points.length - 1]?.y ?? 0;
       refs.hdLen.textContent = String(finalLen);
+      renderChart(points);
 
       const thresholdsForTable = Array.from(
         new Set([...STATE.thresholds, finalLen])
@@ -840,18 +831,14 @@
       refs.hdThresholdsBody.innerHTML = crossed
         .map(
           (c) => `
-          <tr>
-            <td class="tce-mono">${c.th}${
-            c.th === finalLen ? " (final)" : ""
-          }</td>
-            <td class="tce-mono">${
-              c.ts ? new Date(c.ts).toLocaleString() : "—"
-            }</td>
-            <td class="tce-mono">${
-              c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
-            }</td>
-          </tr>
-        `
+  <tr>
+    <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
+    <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
+    <td class="tce-mono">${
+      c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
+    }</td>
+  </tr>
+`
         )
         .join("");
 
@@ -862,21 +849,32 @@
     }
   }
 
-  // ---------- Timeline helpers (V2 fields only) ----------
   function getLinkNumber(row, expectedLen = null) {
-    // V2: top-level `chain` is the chain counter at the time of the attack
-    const v = Number(row.chain);
-    if (Number.isFinite(v) && v > 0) {
-      const hardCap = 100000;
-      if (v > hardCap) return NaN;
-      if (!expectedLen || v <= expectedLen * 1.2) return v;
+    const candidates = [
+      row?.chain,
+      row?.chain_link,
+      row?.chainLink,
+      row?.chain_position,
+      row?.chainPosition,
+      row?.chain?.position,
+    ];
+
+    for (const raw of candidates) {
+      const v = Number(raw);
+      if (Number.isInteger(v) && v > 0) {
+        if (!expectedLen || v <= expectedLen * 1.2) return v;
+      }
     }
-    // Do NOT use modifiers.chain (that is a respect modifier)
+
+    const modifierLike = Number(row?.modifiers?.chain);
+    if (Number.isFinite(modifierLike) && !Number.isInteger(modifierLike)) {
+      return NaN;
+    }
+
     return NaN;
   }
 
   function getAttackTimestamp(row) {
-    // Prefer ended; fall back to started (both V2)
     const te = Number(row.ended);
     if (Number.isFinite(te) && te > 0) return te;
     const ts = Number(row.started);
@@ -896,36 +894,39 @@
     ourFactionId = null
   ) {
     const startMs = startTsSec * 1000;
-    const linkMinTs = new Map();
-    let maxLink = 0;
 
+    const byLink = new Map();
     for (const a of attacks) {
       if (ourFactionId) {
         const atkFid = getAttackerFactionId(a);
         if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId))
           continue;
       }
+
       const link = getLinkNumber(a, expectedLen);
       if (!Number.isFinite(link) || link <= 0) continue;
 
-      const ts = getAttackTimestamp(a);
-      if (!Number.isFinite(ts) || ts <= 0) continue;
+      const tsSec = getAttackTimestamp(a);
+      if (!Number.isFinite(tsSec) || tsSec <= 0) continue;
 
-      const ms = ts * 1000;
-      const prev = linkMinTs.get(link);
-      if (prev == null || ms < prev) linkMinTs.set(link, ms);
-      if (link > maxLink) maxLink = link;
+      const tMs = tsSec * 1000;
+      const prev = byLink.get(link);
+      if (prev == null || tMs < prev) byLink.set(link, tMs);
     }
 
-    if (maxLink === 0) return [{ t: startMs, y: 0 }];
-
-    const pts = [{ t: startMs, y: 0 }];
-    for (let l = 1; l <= maxLink; l++) {
-      let t = linkMinTs.get(l);
-      if (!t) t = pts[pts.length - 1].t + 1; // strictly increasing X
-      pts.push({ t, y: l });
+    if (byLink.size === 0) {
+      return [{ t: startMs, y: 0 }];
     }
-    return spreadWithinSecond(pts);
+
+    const points = [{ t: startMs, y: 0 }];
+    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]);
+    for (const [link, t] of sorted) {
+      const prevT = points[points.length - 1].t;
+      const tt = Math.max(prevT + 1, t);
+      points.push({ t: tt, y: link });
+    }
+
+    return spreadWithinSecond(points);
   }
 
   function spreadWithinSecond(pts) {
@@ -987,9 +988,10 @@
             ticks: {
               callback: (v) => {
                 const d = new Date(v);
-                return `${String(d.getHours()).padStart(2, "0")}:${String(
-                  d.getMinutes()
-                ).padStart(2, "0")}`;
+                const pad = (n) => String(n).padStart(2, "0");
+                return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(
+                  d.getSeconds()
+                )}`;
               },
             },
           },
@@ -1012,7 +1014,7 @@
     });
   }
 
-  // ----------------- API helpers & cache (V2-only) -----------------
+  // ----------------- API helpers & cache  -----------------
   function apiBase() {
     return "https://api.torn.com/v2";
   }
@@ -1026,7 +1028,6 @@
     return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
   }
 
-  // V2 URL builders
   function buildFactionChainUrl() {
     const u = new URL(`${apiBase()}/faction/chain`);
     u.searchParams.set("key", keyParam());
@@ -1106,7 +1107,6 @@
     });
   }
 
-  // Key test (V2-only)
   async function testKey() {
     try {
       if (isPublicMode()) {
@@ -1119,7 +1119,6 @@
         );
         return;
       }
-      // Private key: just confirm v2 faction endpoints reachable
       await httpGetJSON(buildFactionChainUrl());
       await httpGetJSON(buildFactionChainsUrl());
       alert("Key OK. v2 faction endpoints reachable.");
@@ -1128,7 +1127,6 @@
     }
   }
 
-  // Resolve faction id (V2-only: no user/profile). Use override or null.
   async function resolveOurFactionId() {
     return STATE.factionIdOverride
       ? Number(STATE.factionIdOverride) || null
@@ -1138,7 +1136,6 @@
   function fetchChain() {
     const url = buildFactionChainUrl();
     return httpGetJSON(url).then((json) => {
-      // v2 returns either { chain:{current,timeout} } or { current, timeout }
       let chainCurrent, timeoutSec;
       if (json && json.chain) {
         chainCurrent = Number(json.chain.current);
@@ -1356,7 +1353,6 @@
     while (cursor <= toSec && safety++ < STATE.maxAttackPages) {
       const url = buildFactionAttacksUrl(cursor, toSec);
 
-      // back-off & retry on 429/rate-limit
       let payload;
       try {
         payload = await httpGetJSON(url);
@@ -1365,7 +1361,7 @@
         if (msg.includes("rate limit") || msg.includes("429")) {
           console.warn("Rate limited; backing off 5s…");
           await new Promise((r) => setTimeout(r, 5000));
-          continue; // retry same cursor
+          continue;
         }
         throw e;
       }
@@ -1377,7 +1373,7 @@
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (!code || byCode.has(code)) continue;
-        if (!keepResults.has(r.result)) continue; // only successful outgoing hits
+        if (!keepResults.has(r.result)) continue;
 
         byCode.set(code, r);
 
@@ -1385,11 +1381,9 @@
         if (Number.isFinite(ended) && ended > maxEndedThisPage)
           maxEndedThisPage = ended;
       }
-      // gentle pacing to stay well under Torn’s caps
       await new Promise((r) => setTimeout(r, 800));
       cursor = maxEndedThisPage > cursor ? maxEndedThisPage + 1 : cursor + 1;
 
-      // optional early-stop checks
       if (targetHits && byCode.size >= targetHits) break;
       if (expectedLen) {
         const links = [...byCode.values()]
@@ -1404,13 +1398,11 @@
       }
     }
 
-    // return sorted by ended time
     return Array.from(byCode.values()).sort(
       (a, b) => (a.ended ?? 0) - (b.ended ?? 0)
     );
   }
 
-  // Global faction id cache (used by countUniqueLinks)
   let OUR_FACTION_ID = null;
 
   startPolling();
