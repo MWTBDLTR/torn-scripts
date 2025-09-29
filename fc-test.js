@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn Chain Tools: Live ETA + History & Graphs (Public/Private + Cache)
+// @name         Torn Chain Tools: Live ETA + History (Public/Private + Cache + Polished UI)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.4
-// @description  Live chain ETAs, history browser, chain report viewer, and (private mode) per-hit timeline chart. Public-key aware. Caches to IndexedDB.
-// @author       you
+// @version      1.0.5
+// @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (private mode). Public-key aware. Caches to IndexedDB.
+// @author       MrChurch
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
 // @grant        GM_xmlhttpRequest
@@ -98,7 +98,6 @@
     try {
       if (isPublicMode()) {
         if (!STATE.factionIdOverride) throw new Error("Public mode: set Faction ID in Settings.");
-        // Try simple endpoints with key=public
         await httpGetJSON(factionUrl("chain"));
         await httpGetJSON(factionUrl("chains"));
         alert(`Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`);
@@ -120,14 +119,14 @@
    * Styles + DOM
    **********************/
   GM_addStyle(`
-    .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 380px; background:#0f1419; color:#e7edf3; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; border:1px solid #27313a; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
+    .tce-wrap { position: fixed; top: 88px; right: 18px; z-index: 99999; width: 420px; background:#0f1419; color:#e7edf3; font:13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; border:1px solid #27313a; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.35); user-select:none; }
     .tce-header { cursor:move; padding:10px 12px; font-weight:600; background:#0b1015; border-bottom:1px solid #22303a; display:flex; gap:8px; align-items:center; justify-content:space-between; }
     .tce-tabs { display:flex; gap:6px; }
     .tce-tab { background:#15202b; border:1px solid #27313a; color:#cfe7ff; padding:4px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
     .tce-tab.active { background:#1b2733; }
     .tce-badge { font-size:11px; padding:2px 6px; border-radius:999px; background:#1f2a33; color:#9bd2ff; }
     .tce-body { padding:10px 12px; max-height: 66vh; overflow:auto; }
-    .tce-grid { width:100%; border-collapse:collapse; margin-top:8px; }
+    .tce-grid { width:100%; border-collapse:collapse; }
     .tce-grid th, .tce-grid td { padding:6px 6px; text-align:left; border-bottom:1px solid #1c252e; white-space:nowrap; }
     .tce-grid th { font-size:11px; color:#a9b7c6; text-transform:uppercase; letter-spacing:.04em; }
     .tce-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -144,6 +143,20 @@
     .tce-hbox { display:flex; gap:8px; flex-wrap: wrap; }
     .tce-hbox > div { flex:1 1 48%; }
     .tce-muted { color:#8fa2b1; }
+
+    /* History tab polish */
+    .tce-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 8px; }
+    .tce-toolbar input, .tce-toolbar select, .tce-toolbar button { background:#16202a; border:1px solid #27313a; color:#cfe7ff; padding:6px 8px; border-radius:8px; }
+    .tce-toolbar input::placeholder { color:#8aa2b6; }
+    .tce-table-container { max-height:48vh; overflow:auto; border:1px solid #1c252e; border-radius:10px; }
+    .tce-grid thead th { position:sticky; top:0; background:#0b1015; z-index:1; }
+    .tce-grid tr:hover td { background:#131c25; }
+    .tce-grid tr:nth-child(even) td { background:#0f1821; }
+    .tce-grid th.num, .tce-grid td.num { text-align:right; }
+    .tce-grid td.dim { color:#7f8b96; }
+    .tce-actions { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
+    .tce-pager { display:flex; justify-content:space-between; align-items:center; margin-top:8px; }
+    .tce-pager .info { font-size:11px; color:#9aa8b6; }
   `);
 
   const root = document.createElement("div");
@@ -178,15 +191,59 @@
           </div>
         </div>
       </div>
+
       <div id="panelHist" style="display:none">
-        <div class="tce-hbox">
-          <div><b>Recent chains</b> <span class="tce-small tce-muted">(click an ID)</span></div>
-          <div style="text-align:right"><button class="tce-btn" id="btnReloadHist">Reload</button></div>
+        <div class="tce-toolbar">
+          <input id="histSearch" type="text" placeholder="Search by chain ID…" style="flex:1 1 160px">
+          <label class="tce-small">Min len <input id="histMinLen" type="number" min="0" value="0" style="width:80px"></label>
+          <label class="tce-small">Sort
+            <select id="histSort">
+              <option value="end">End time</option>
+              <option value="start">Start time</option>
+              <option value="len">Length</option>
+              <option value="respect">Respect</option>
+              <option value="id">ID</option>
+            </select>
+          </label>
+          <select id="histOrder">
+            <option value="desc">Desc</option>
+            <option value="asc">Asc</option>
+          </select>
+          <label class="tce-small">Page
+            <select id="histPageSize">
+              <option>10</option><option selected>20</option><option>50</option><option>100</option>
+            </select>
+          </label>
+          <button class="tce-btn" id="btnReloadHist">Refresh</button>
+          <button class="tce-btn" id="btnExportCSV">Export CSV</button>
+          <button class="tce-btn" id="btnClearCache">Clear cache</button>
         </div>
-        <table class="tce-grid" id="histTable">
-          <thead><tr><th>ID</th><th>Start</th><th>End</th><th>Len</th><th>Respect</th></tr></thead>
-          <tbody></tbody>
-        </table>
+
+        <div class="tce-table-container">
+          <table class="tce-grid" id="histTable">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Start</th>
+                <th>End</th>
+                <th class="num">Duration</th>
+                <th class="num">Len</th>
+                <th class="num">Respect</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="tce-pager">
+          <div class="info" id="histInfo">—</div>
+          <div class="tce-actions">
+            <button class="tce-btn" id="histPrev">‹ Prev</button>
+            <span class="tce-small" id="histPageLabel">Page 1/1</span>
+            <button class="tce-btn" id="histNext">Next ›</button>
+          </div>
+        </div>
+
         <div id="histDetail" style="margin-top:10px; display:none">
           <hr style="border-color:#1c252e; margin:8px 0;">
           <div class="tce-hbox">
@@ -242,9 +299,23 @@
     tableBody: root.querySelector("#tceTable tbody"),
     refresh: root.querySelector("#tceRefresh"),
     cfg: root.querySelector("#tceCfg"),
-    // history
+    tceWin: root.querySelector("#tceWin"),
+    // history toolbar
+    histSearch: root.querySelector("#histSearch"),
+    histMinLen: root.querySelector("#histMinLen"),
+    histSort: root.querySelector("#histSort"),
+    histOrder: root.querySelector("#histOrder"),
+    histPageSize: root.querySelector("#histPageSize"),
     btnReloadHist: root.querySelector("#btnReloadHist"),
+    btnExportCSV: root.querySelector("#btnExportCSV"),
+    btnClearCache: root.querySelector("#btnClearCache"),
+    // history table/pager
     histTableBody: root.querySelector("#histTable tbody"),
+    histInfo: root.querySelector("#histInfo"),
+    histPrev: root.querySelector("#histPrev"),
+    histNext: root.querySelector("#histNext"),
+    histPageLabel: root.querySelector("#histPageLabel"),
+    // detail
     histDetail: root.querySelector("#histDetail"),
     hdId: root.querySelector("#hdId"),
     hdWindow: root.querySelector("#hdWindow"),
@@ -252,7 +323,6 @@
     hdResp: root.querySelector("#hdResp"),
     hdThresholdsBody: root.querySelector("#hdThresholds tbody"),
     chartCanvas: root.querySelector("#chainChart"),
-    tceWin: root.querySelector("#tceWin"),
   };
 
   // Tabs
@@ -271,6 +341,20 @@
   refs.cfg.addEventListener("click", configure);
   refs.btnReloadHist.addEventListener("click", () => loadHistory(true));
 
+  // History controls
+  refs.histSearch.addEventListener("input", applyHistoryFilters);
+  refs.histMinLen.addEventListener("change", applyHistoryFilters);
+  refs.histSort.addEventListener("change", applyHistoryFilters);
+  refs.histOrder.addEventListener("change", applyHistoryFilters);
+  refs.histPageSize.addEventListener("change", () => { histPage = 1; renderHistoryTable(); });
+  refs.histPrev.addEventListener("click", () => { if (histPage > 1){ histPage--; renderHistoryTable(); }});
+  refs.histNext.addEventListener("click", () => {
+    const totalPages = Math.max(1, Math.ceil(HIST_VIEW.length / getPageSize()));
+    if (histPage < totalPages){ histPage++; renderHistoryTable(); }
+  });
+  refs.btnExportCSV.addEventListener("click", exportHistoryCSV);
+  refs.btnClearCache.addEventListener("click", async () => { await cacheClearAll(); toast("Cache cleared."); });
+
   /**********************
    * Live stats logic
    **********************/
@@ -284,7 +368,7 @@
     const mm = d.getMinutes().toString().padStart(2, "0");
     return `${hh}:${mm}`;
   }
-  function fmtTime(ts) {
+  function fmtTime(ts) { // ts in seconds
     const d = new Date(ts * 1000);
     return d.toLocaleString();
   }
@@ -295,6 +379,17 @@
     const m = Math.round(mins % 60);
     return h ? `${h}h ${m}m` : `${m}m`;
   }
+  function fmtInt(n){ return Number.isFinite(+n) ? Number(n).toLocaleString() : "—"; }
+  function fmtRespect(r){ return Number.isFinite(+r) ? Number(r).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) : "—"; }
+  function fmtDur(sec){
+    if (!Number.isFinite(sec) || sec < 0) return "—";
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+    const s = Math.floor(sec%60);
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
   function pruneHistory() {
     const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000;
     while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift();
@@ -365,41 +460,112 @@
   function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
 
   /**********************
-   * History browser (with caching)
+   * History browser (with caching + polished UI)
    **********************/
   let chart = null;
+  let HIST_ALL = [];   // normalized source
+  let HIST_VIEW = [];  // filtered + sorted
+  let histPage = 1;
+
+  function getPageSize(){ return parseInt(refs.histPageSize.value, 10) || 20; }
 
   async function loadHistory(forceRefetch = false) {
     if (!ensureKey()) return;
     toast("loading history…");
     try {
       const list = await cachedFetchChains(forceRefetch);
-      refs.histTableBody.innerHTML = list.map(row => {
-        const len = row.chain || row.length || row.hits || 0;
-        const start = row.start || row.started || 0;
-        const end = row.end || row.ended || 0;
-        const resp = row.respect || 0;
-        return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
-          <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
-          <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
-          <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
-          <td class="tce-mono">${len}</td>
-          <td class="tce-mono">${Number.isFinite(resp) ? Number(resp).toFixed(2) : resp}</td>
-        </tr>`;
-      }).join("");
-      refs.histTableBody.querySelectorAll("tr").forEach(tr => {
-        tr.addEventListener("click", () => {
-          const id = parseInt(tr.getAttribute("data-id"), 10);
-          const start = parseInt(tr.getAttribute("data-start"), 10);
-          const end = parseInt(tr.getAttribute("data-end"), 10);
-          openChainDetail(id, start, end);
-        });
+      HIST_ALL = list.map(row => {
+        const id = Number(row.chain_id || row.id || row.chain);
+        const start = Number(row.start || row.started || 0);
+        const end = Number(row.end || row.ended || 0);
+        const len = Number(row.chain || row.length || row.hits || 0);
+        const respect = Number(row.respect || 0);
+        return { id, start, end, len, respect, dur: end && start ? (end - start) : 0 };
       });
+      applyHistoryFilters();
       toast("history ready");
     } catch (e) {
       console.error(e);
       toast(e.message || "error");
     }
+  }
+
+  function applyHistoryFilters(){
+    const q = (refs.histSearch.value || "").trim().toLowerCase();
+    const minLen = Number(refs.histMinLen.value || 0);
+    const sortKey = refs.histSort.value;   // 'end' | 'start' | 'len' | 'respect' | 'id'
+    const order = refs.histOrder.value;    // 'asc' | 'desc'
+
+    // filter
+    HIST_VIEW = HIST_ALL.filter(r => {
+      if (minLen && r.len < minLen) return false;
+      if (q && !String(r.id).toLowerCase().includes(q)) return false;
+      return true;
+    });
+
+    // sort
+    const dir = order === "asc" ? 1 : -1;
+    HIST_VIEW.sort((a,b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      if (va === vb) return 0;
+      return (va > vb ? 1 : -1) * dir;
+    });
+
+    histPage = 1;
+    renderHistoryTable();
+  }
+
+  function renderHistoryTable(){
+    const pageSize = getPageSize();
+    const total = HIST_VIEW.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    histPage = Math.min(histPage, totalPages);
+
+    const startIdx = (histPage-1)*pageSize;
+    const slice = HIST_VIEW.slice(startIdx, startIdx + pageSize);
+
+    refs.histTableBody.innerHTML = slice.map(r => {
+      return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${r.end}">
+        <td class="tce-mono"><span class="tce-link">${r.id}</span></td>
+        <td class="tce-mono">${r.start ? fmtTime(r.start) : "—"}</td>
+        <td class="tce-mono">${r.end ? fmtTime(r.end) : "—"}</td>
+        <td class="tce-mono num">${fmtDur(r.dur)}</td>
+        <td class="tce-mono num">${fmtInt(r.len)}</td>
+        <td class="tce-mono num">${fmtRespect(r.respect)}</td>
+      </tr>`;
+    }).join("");
+
+    // row click → open detail
+    refs.histTableBody.querySelectorAll("tr").forEach(tr => {
+      tr.addEventListener("click", () => {
+        const id = parseInt(tr.getAttribute("data-id"), 10);
+        const start = parseInt(tr.getAttribute("data-start"), 10);
+        const end = parseInt(tr.getAttribute("data-end"), 10);
+        openChainDetail(id, start, end);
+      });
+    });
+
+    refs.histInfo.textContent = total ? `${total.toLocaleString()} chains` : "No results";
+    refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
+  }
+
+  function exportHistoryCSV(){
+    // export the current filtered result set (not just the current page)
+    const rows = [["id","start","end","duration_sec","length","respect"]];
+    HIST_VIEW.forEach(r => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
+    const csv = rows.map(r => r.map(v => {
+      const s = String(v);
+      return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g,'""')}"` : s;
+    }).join(",")).join("\n");
+    const blob = new Blob([csv], {type:"text/csv"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `torn_chains_${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   async function openChainDetail(chainId, startTs, endTs) {
@@ -490,15 +656,40 @@
   function renderChart(points) {
     if (!refs.chartCanvas) return;
     if (chart) { chart.destroy(); chart = null; }
-    const labels = points.map(p => new Date(p.t));
-    const data = points.map(p => p.y);
+    // Use linear x-scale (timestamps) to avoid needing a date adapter
+    const data = points.map(p => ({ x: p.t, y: p.y }));
     chart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
-      data: { labels, datasets: [{ label: "Cumulative chain", data, fill: false, lineTension: 0.15, pointRadius: 0, borderWidth: 2 }]},
+      data: { datasets: [{ label: "Cumulative chain", data, fill: false, tension: 0.15, pointRadius: 0, borderWidth: 2 }]},
       options: {
         responsive: true, maintainAspectRatio: false, parsing: false,
-        scales: { x: { type: "time", time: { tooltipFormat: "MMM d, HH:mm" } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `Chain: ${ctx.parsed.y}` } } },
+        scales: {
+          x: {
+            type: "linear",
+            ticks: {
+              callback: (v) => {
+                const d = new Date(v);
+                const h = String(d.getHours()).padStart(2,"0");
+                const m = String(d.getMinutes()).padStart(2,"0");
+                return `${h}:${m}`;
+              }
+            }
+          },
+          y: { beginAtZero: true, ticks: { precision: 0 } }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (items) => {
+                if (!items?.length) return "";
+                const ts = items[0].parsed.x;
+                return new Date(ts).toLocaleString();
+              },
+              label: (ctx) => `Chain: ${ctx.parsed.y}`
+            }
+          }
+        },
         animation: false,
       }
     });
@@ -582,7 +773,7 @@
   }
   function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : NaN; }
 
-  // Profile (for private mode diagnostics)
+  // Profile (private mode diagnostics)
   function fetchUserProfile() {
     const url = `${apiBase()}/user/?selections=profile&key=${keyParam()}`;
     return httpGetJSON(url).then(j => ({
@@ -606,7 +797,7 @@
       const req = indexedDB.open(DB_NAME, DB_VER);
       req.onupgradeneeded = () => {
         const d = req.result;
-        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList"); // key: depends on context
+        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList"); // key: context key
         if (!d.objectStoreNames.contains("chainReports")) d.createObjectStore("chainReports"); // key: chainId
         if (!d.objectStoreNames.contains("attacks")) d.createObjectStore("attacks"); // key: chainId
       };
