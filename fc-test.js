@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.5
+// @version      1.2.6
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -29,6 +29,7 @@
     historyMaxMin: 15,
     maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 1000),
     chainsTTLms: GM_getValue("torn_chain_eta_chainsTTLms", 2 * 60 * 1000),
+    attacksTTLms: GM_getValue("torn_chain_eta_attacksTTLms", 10 * 60 * 1000), // 10 min
   };
 
   GM_registerMenuCommand("Torn Chain → Configure…", configure);
@@ -412,6 +413,10 @@
     const n = Number(sec);
     return Number.isFinite(n) ? n + buf : sec;
   }
+  function withStartBuffer(sec, buf = 120) {
+    const n = Number(sec);
+    return Number.isFinite(n) ? Math.max(0, n - buf) : sec;
+  }
   function pruneHistory() {
     const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000;
     while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift();
@@ -706,7 +711,6 @@
       const report = await cachedFetchChainReport(chainId).catch(() => null);
 
       let expectedLen = null;
-      let ourFactionId = null;
 
       if (report) {
         const stats = getChainStats(report);
@@ -716,7 +720,6 @@
           : String(stats.respect ?? "—");
 
         expectedLen = Number(stats.chain) || null;
-        ourFactionId = Number(stats.factionID || STATE.factionIdOverride || 0) || null;
 
         const sum = (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
         if (expectedLen && sum !== expectedLen) {
@@ -736,23 +739,34 @@
         return;
       }
 
-      if (!ourFactionId) {
-        try {
-          ourFactionId = await resolveOurFactionId();
-        } catch {}
-        if (!Number.isFinite(ourFactionId)) ourFactionId = null;
+      // buffered window to avoid edge truncation
+      const winFrom = withStartBuffer(startTs, 120);
+      const winTo = withEndBuffer(endTs, 300);
+
+      // 3a) try cache first
+      let attacks = await cachedGetAttacks(chainId, winFrom, winTo);
+
+      // 3b) fetch if cache miss
+      if (!attacks) {
+        attacks = await fetchAttacksWindowChunked(winFrom, winTo, expectedLen).catch(() => []);
+
+        // write-through cache
+        cachePutAttacks(chainId, winFrom, winTo, attacks);
       }
 
-      const attacks = await fetchAttacksWindowChunked(startTs, withEndBuffer(endTs, 300), expectedLen).catch(() => []);
+      // debug
       console.log(
         "[ChainDetail] chainId:",
         chainId,
         "Fetched attacks:",
         attacks.length,
         "window:",
-        new Date(startTs * 1000).toLocaleString(),
+        new Date(winFrom * 1000).toLocaleString(),
         "→",
-        new Date(endTs * 1000).toLocaleString()
+        new Date(winTo * 1000).toLocaleString(),
+        "(from cache:",
+        !!(await cachedGetAttacks(chainId, winFrom, winTo)),
+        ")"
       );
 
       // Optional deeper info per hit
@@ -770,34 +784,35 @@
         );
       });
 
-      const points = buildChainTimeline(attacks, startTs, expectedLen ?? null, ourFactionId);
-
+      const points = buildChainTimeline(attacks, startTs, expectedLen ?? null);
       const seenMax = points.length ? points[points.length - 1].y : 0;
       const finalLen = expectedLen ?? seenMax;
 
       if (!points || points.length <= 1) {
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdLen.textContent = String(finalLen);
-        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">No per-hit data parsed for this chain window (no qualifying attacks for our faction).</td></tr>`;
+        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
+    No per-hit data parsed for this chain window.
+  </td></tr>`;
         toast(`chain #${chainId}: no per-hit data`);
         return;
       }
 
-      // 5) Render chart and fill UI using finalLen
       refs.chartCanvas.parentElement.style.display = "";
       refs.hdLen.textContent = String(finalLen);
       renderChart(points);
 
       const thresholdsForTable = Array.from(new Set([...STATE.thresholds, finalLen])).sort((a, b) => a - b);
       const crossed = computeThresholdMoments(points, thresholdsForTable);
-
       refs.hdThresholdsBody.innerHTML = crossed
         .map(
-          (c) => `<tr>
-          <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
-          <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
-          <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"}</td>
-        </tr>`
+          (c) => `
+  <tr>
+    <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
+    <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
+    <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"}</td>
+  </tr>
+`
         )
         .join("");
 
@@ -848,15 +863,11 @@
     return Number.isFinite(n) ? n : NaN;
   }
 
-  function buildChainTimeline(attacks, startTsSec, expectedLen = null, ourFactionId = null) {
+  function buildChainTimeline(attacks, startTsSec, expectedLen = null /* faction filter removed */) {
     const startMs = startTsSec * 1000;
     const byLink = new Map(); // link -> earliest ms
 
     for (const a of attacks) {
-      if (ourFactionId) {
-        const atkFid = getAttackerFactionId(a);
-        if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId)) continue;
-      }
       const link = getLinkNumber(a, expectedLen);
       if (!Number.isFinite(link) || link <= 0) continue;
 
@@ -871,7 +882,7 @@
     if (byLink.size === 0) return [{ t: startMs, y: 0 }];
 
     const points = [{ t: startMs, y: 0 }];
-    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]);
+    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]); // by link#
     for (const [link, t] of sorted) {
       const prevT = points[points.length - 1].t;
       points.push({ t: Math.max(prevT + 1, t), y: link });
@@ -902,13 +913,11 @@
   }
 
   function computeThresholdMoments(points, thresholds) {
-    // points: [{t, y}] sorted by time; thresholds: integers ascending/descending ok
     const ths = [...thresholds].sort((a, b) => a - b);
     const out = ths.map((th) => ({ th, ts: null }));
-
     if (!points || points.length === 0) return out;
 
-    let idx = 0; // index into 'out' thresholds
+    let idx = 0;
     for (let i = 0; i < points.length && idx < out.length; i++) {
       const { t, y } = points[i];
       while (idx < out.length && y >= out[idx].th) {
@@ -1066,10 +1075,6 @@
     }
   }
 
-  async function resolveOurFactionId() {
-    return STATE.factionIdOverride ? Number(STATE.factionIdOverride) || null : null;
-  }
-
   function fetchChain() {
     const url = buildFactionChainUrl();
     return httpGetJSON(url).then((json) => {
@@ -1169,6 +1174,29 @@
     const mode = isPublicMode() ? "pub" : "priv";
     const fid = STATE.factionIdOverride || "implicit";
     return `${mode}:${fid}`;
+  }
+  function attacksCacheKey(chainId, fromSec, toSec) {
+    // key includes mode (pub/priv) to avoid cross-mode contamination
+    const mode = isPublicMode() ? "pub" : "priv";
+    return `${mode}:${chainId}:${fromSec}-${toSec}`;
+  }
+
+  async function cachedGetAttacks(chainId, fromSec, toSec) {
+    const key = attacksCacheKey(chainId, fromSec, toSec);
+    const cached = await idbGet("attacks", key).catch(() => null);
+    if (cached && cached.data && Date.now() - (cached.ts || 0) < STATE.attacksTTLms) {
+      return cached.data;
+    }
+    return null;
+  }
+
+  async function cachePutAttacks(chainId, fromSec, toSec, data) {
+    const key = attacksCacheKey(chainId, fromSec, toSec);
+    try {
+      await idbPut("attacks", key, { data, ts: Date.now() });
+    } catch (e) {
+      console.warn("[tce] attacks cache put failed:", e);
+    }
   }
 
   async function cachedFetchChains(force = false) {
