@@ -130,8 +130,8 @@
       if (isPublicMode()) {
         if (!STATE.factionIdOverride)
           throw new Error("Public mode: set Faction ID in Settings.");
-        await httpGetJSON(factionUrl("chain"));
-        await httpGetJSON(factionUrl("chains"));
+        await httpGetJSON(buildFactionChainUrl());
+        await httpGetJSON(buildFactionChainsUrl());
         alert(
           `Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`
         );
@@ -653,177 +653,55 @@
     return Number.isFinite(n) ? n : 0;
   }
 
-  // Works with v2 (details/attackers/non_attackers) and legacy objects
   function getChainStats(report) {
     const cr = report?.chainreport ?? report ?? {};
-    const isV2 =
-      cr &&
-      typeof cr === "object" &&
-      ("details" in cr || Array.isArray(cr.attackers));
+    const d = cr?.details || {};
 
-    if (isV2) {
-      const d = cr.details || {};
-      const factionID = num(cr.faction_id ?? cr.factionID);
-      const start = num(cr.start); // seconds
-      const end = num(cr.end); // seconds
-      const chain = num(d.chain);
-      const respect = toFloat(d.respect);
-      const members = num(d.members);
-      const targets = num(d.targets);
-      const warhits = num(d.war);
-      const besthit = toFloat(d.best);
-      const leave = num(d.leave);
-      const mug = num(d.mug);
-      const hospitalize = num(d.hospitalize);
-      const assists = num(d.assists);
-      const retaliations = num(d.retaliations);
-      const overseas = num(d.overseas);
-      const draws = num(d.draws);
-      const escapes = num(d.escapes);
-      const losses = num(d.losses);
+    const factionID = num(cr.faction_id);
+    const start = num(cr.start);
+    const end = num(cr.end);
+    const chain = num(d.chain);
+    const respect = toFloat(d.respect);
+    const members = num(d.members);
+    const targets = num(d.targets);
+    const warhits = num(d.war);
+    const besthit = toFloat(d.best);
+    const leave = num(d.leave);
+    const mug = num(d.mug);
+    const hospitalize = num(d.hospitalize);
+    const assists = num(d.assists);
+    const retaliations = num(d.retaliations);
+    const overseas = num(d.overseas);
+    const draws = num(d.draws);
+    const escapes = num(d.escapes);
+    const losses = num(d.losses);
 
-      // Flatten attackers[] + non_attackers[] -> unified array for your tables
-      const attackersArr = Array.isArray(cr.attackers) ? cr.attackers : [];
-      const nonAttArr = Array.isArray(cr.non_attackers) ? cr.non_attackers : [];
-      const membersArray = normalizeV2Members(
-        attackersArr,
-        nonAttArr,
-        factionID
-      );
+    const attackersArr = Array.isArray(cr.attackers) ? cr.attackers : [];
+    const nonAttArr = Array.isArray(cr.non_attackers) ? cr.non_attackers : [];
+    const membersArray = normalizeV2Members(attackersArr, nonAttArr, factionID);
 
-      return {
-        factionID,
-        chain,
-        start,
-        end,
-        leave,
-        mug,
-        hospitalize,
-        assists,
-        overseas,
-        draws,
-        escapes,
-        losses,
-        respect,
-        targets,
-        warhits,
-        besthit,
-        retaliations,
-        members, // count reported by the API
-        bonuses: Array.isArray(cr.bonuses) ? cr.bonuses : [],
-        membersArray,
-      };
-    }
-
-    // Legacy fallback
-    const s = cr && typeof cr.stats === "object" ? cr.stats : cr;
     return {
-      factionID: num(s.factionID),
-      chain: num(s.chain),
-      start: num(s.start),
-      end: num(s.end),
-      leave: num(s.leave),
-      mug: num(s.mug),
-      hospitalize: num(s.hospitalize),
-      assists: num(s.assists),
-      overseas: num(s.overseas),
-      draws: num(s.draws),
-      escapes: num(s.escapes),
-      losses: num(s.losses),
-      respect: toFloat(s.respect),
-      targets: num(s.targets),
-      warhits: num(s.warhits ?? s.war),
-      besthit: toFloat(s.besthit ?? s.best),
-      retaliations: num(s.retaliations),
-      bonuses: Array.isArray(cr?.bonuses) ? cr.bonuses : [],
-      membersArray: normalizeMembersLegacy(cr?.members || s?.members || {}),
+      factionID,
+      chain,
+      start,
+      end,
+      leave,
+      mug,
+      hospitalize,
+      assists,
+      overseas,
+      draws,
+      escapes,
+      losses,
+      respect,
+      targets,
+      warhits,
+      besthit,
+      retaliations,
+      members,
+      bonuses: Array.isArray(cr.bonuses) ? cr.bonuses : [],
+      membersArray,
     };
-  }
-
-  function normalizeV2Members(attackersArr, nonAttackersArr, factionID) {
-    const rows = [];
-
-    for (const a of attackersArr) {
-      const att = a?.attacks || {};
-      const rsp = a?.respect || {};
-      rows.push({
-        userID: num(a.id),
-        level: null,
-        factionID: factionID || null,
-
-        attacks: num(att.total),
-        respect: toFloat(rsp.total),
-        avg: toFloat(rsp.average),
-        besthit: toFloat(rsp.best),
-
-        leave: num(att.leave),
-        mug: num(att.mug),
-        hospitalize: num(att.hospitalize),
-        assists: num(att.assists),
-        retaliations: num(att.retaliations),
-        overseas: num(att.overseas),
-        draws: num(att.draws),
-        escapes: num(att.escapes),
-        losses: num(att.losses),
-        warhits: num(att.war),
-        bonuses: num(att.bonuses),
-      });
-    }
-
-    for (const uid of nonAttackersArr || []) {
-      rows.push({
-        userID: num(uid),
-        level: null,
-        factionID: factionID || null,
-
-        attacks: 0,
-        respect: 0,
-        avg: 0,
-        besthit: 0,
-
-        leave: 0,
-        mug: 0,
-        hospitalize: 0,
-        assists: 0,
-        retaliations: 0,
-        overseas: 0,
-        draws: 0,
-        escapes: 0,
-        losses: 0,
-        warhits: 0,
-        bonuses: 0,
-      });
-    }
-    return rows;
-  }
-
-  function normalizeMembersLegacy(membersObj) {
-    const arr = [];
-    for (const m of Object.values(membersObj || {})) {
-      arr.push({
-        userID: num(m.userID ?? m.id),
-        level: num(m.level),
-        factionID: num(m.factionID),
-
-        attacks: num(m.attacks),
-        respect: toFloat(m.respect),
-        avg: toFloat(m.avg ?? m.average ?? 0),
-        besthit: toFloat(m.best ?? m.besthit ?? 0),
-
-        leave: num(m.leave),
-        mug: num(m.mug),
-        hospitalize: num(m.hosp ?? m.hospitalize),
-        assists: num(m.assist ?? m.assists),
-        retaliations: num(m.retal ?? m.retaliations),
-        overseas: num(m.overseas),
-        draws: num(m.draw ?? m.draws),
-        escapes: num(m.escape ?? m.escapes),
-        losses: num(m.loss ?? m.losses),
-        warhits: num(m.war ?? m.warhits),
-        bonuses: num(m.bonus ?? m.bonuses),
-      });
-    }
-    return arr;
   }
 
   function num(v) {
@@ -966,48 +844,27 @@
   }
 
   function getLinkNumber(row, expectedLen = null) {
-    // Prefer explicit field if present (legacy)
-    const v1 = Number(row.chain_link);
-    if (Number.isFinite(v1) && v1 > 0) return v1;
-
-    // top-level `chain` = chain counter at attack time
-    const v2 = Number(row.chain);
-    if (Number.isFinite(v2) && v2 > 0) {
+    // V2: top-level `chain` = chain counter at attack time
+    const v = Number(row.chain);
+    if (Number.isFinite(v) && v > 0) {
       const hardCap = 100000;
-      if (v2 > hardCap) return NaN;
-      if (!expectedLen || v2 <= expectedLen * 1.2) return v2;
+      if (v > hardCap) return NaN;
+      if (!expectedLen || v <= expectedLen * 1.2) return v;
     }
-
-    // Do NOT read modifiers.chain (that is a *respect* modifier).
-    return NaN;
+    return NaN; // Do NOT use modifiers.chain (that's a respect modifier)
   }
 
   function getAttackTimestamp(row) {
-    // Prefer when the attack actually ended; fall back to started.
-    const te =
-      Number(row.ended) ??
-      Number(row.timestamp_ended) ??
-      Number(row.timestamp) ??
-      NaN;
+    // V2 fields only
+    const te = Number(row.ended);
     if (Number.isFinite(te) && te > 0) return te;
-
-    const ts =
-      Number(row.started) ??
-      Number(row.timestamp_started) ??
-      Number(row.timestamp) ??
-      NaN;
+    const ts = Number(row.started);
     if (Number.isFinite(ts) && ts > 0) return ts;
-
     return NaN;
   }
 
   function getAttackerFactionId(row) {
-    // attacker.faction.id ; legacy may flatten as attacker_faction or attacker_faction_id
-    const v =
-      row?.attacker?.faction?.id ??
-      row.attacker_faction ??
-      row.attacker_faction_id ??
-      null;
+    const v = row?.attacker?.faction?.id ?? null;
     const n = Number(v);
     return Number.isFinite(n) ? n : NaN;
   }
@@ -1142,7 +999,8 @@
 
   // ----------------- API helpers & cache -----------------
   function apiBase() {
-    return "https://api.torn.com";
+    // V2 root
+    return "https://api.torn.com/v2";
   }
   function isPublicMode() {
     return (
@@ -1150,27 +1008,46 @@
       (STATE.apiKey && STATE.apiKey.toLowerCase() === "public")
     );
   }
-
   function keyParam() {
     return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
   }
 
-  function factionUrl(selection, extra = "") {
-    const base = apiBase();
-    if (isPublicMode()) {
-      if (!STATE.factionIdOverride)
-        throw new Error(
-          "Public key mode: Faction ID is required. Open Settings and set Faction ID."
-        );
-      return `${base}/faction/${encodeURIComponent(
-        STATE.factionIdOverride
-      )}?selections=${selection}&key=${keyParam()}${extra}`;
-    }
+  // V2 URL builders (no legacy selections)
+  function buildFactionChainUrl() {
+    const u = new URL(`${apiBase()}/faction/chain`);
+    u.searchParams.set("key", keyParam());
+    // In public mode (and when override is set in private mode), include faction_id
     if (STATE.factionIdOverride)
-      return `${base}/faction/${encodeURIComponent(
-        STATE.factionIdOverride
-      )}?selections=${selection}&key=${keyParam()}${extra}`;
-    return `${base}/faction/?selections=${selection}&key=${keyParam()}${extra}`;
+      u.searchParams.set("faction_id", String(STATE.factionIdOverride));
+    return u.href;
+  }
+  function buildFactionChainsUrl() {
+    const u = new URL(`${apiBase()}/faction/chains`);
+    u.searchParams.set("key", keyParam());
+    if (STATE.factionIdOverride)
+      u.searchParams.set("faction_id", String(STATE.factionIdOverride));
+    return u.href;
+  }
+  function buildFactionAttacksUrl(fromSec, toSec) {
+    const u = new URL(`${apiBase()}/faction/attacks`);
+    u.searchParams.set("key", keyParam());
+    u.searchParams.set("filters", "outgoing");
+    u.searchParams.set("from", String(fromSec));
+    u.searchParams.set("to", String(toSec));
+    u.searchParams.set("comment", "chaintooldev");
+    return u.href;
+  }
+  function buildUserProfileUrl() {
+    const u = new URL(`${apiBase()}/user/profile`);
+    u.searchParams.set("key", keyParam());
+    return u.href;
+  }
+  function buildChainReportUrl(chainId) {
+    const u = new URL(
+      `${apiBase()}/faction/${encodeURIComponent(chainId)}/chainreport`
+    );
+    u.searchParams.set("key", keyParam());
+    return u.href;
   }
 
   function ensureKey() {
@@ -1221,14 +1098,10 @@
     });
   }
 
-  // === OUR FACTION RESOLUTION ===
   let OUR_FACTION_ID = null;
 
-  // Minimal user profile fetch (needed if not already present)
   async function fetchUserProfile() {
-    const url = `${apiBase()}/user/?selections=profile&key=${keyParam()}`;
-    const j = await httpGetJSON(url);
-    // Torn "user/profile" normally returns these fields at top-level
+    const j = await httpGetJSON(buildUserProfileUrl());
     return {
       player_id: Number(j?.player_id ?? j?.player?.player_id ?? 0),
       name: String(j?.name ?? j?.player?.name ?? ""),
@@ -1257,7 +1130,7 @@
   }
 
   function fetchChain() {
-    const url = factionUrl("chain");
+    const url = buildFactionChainUrl();
     return httpGetJSON(url)
       .catch((e) => {
         const msg = String(e.message || e);
@@ -1268,6 +1141,7 @@
         throw e;
       })
       .then((json) => {
+        // V2 returns either { chain:{current,timeout} } or { current, timeout }
         let chainCurrent = undefined,
           timeoutSec = undefined;
         if (json && json.chain) {
@@ -1276,14 +1150,15 @@
         }
         if (
           !Number.isFinite(chainCurrent) &&
-          Number.isFinite(Number(json.current))
+          Number.isFinite(Number(json?.current))
         )
           chainCurrent = Number(json.current);
         if (
           !Number.isFinite(timeoutSec) &&
-          Number.isFinite(Number(json.timeout))
+          Number.isFinite(Number(json?.timeout))
         )
           timeoutSec = Number(json.timeout);
+
         if (!Number.isFinite(chainCurrent))
           throw new Error("Missing chain.current");
         return {
@@ -1411,16 +1286,38 @@
   }
 
   function fetchChains() {
-    const firstUrl = factionUrl("chains");
+    function resolveNextLink(next, base) {
+      if (!next) return null;
+      try {
+        if (/^https?:\/\//i.test(next)) return next;
+        const b = new URL(base);
+        return next.startsWith("/")
+          ? `${b.origin}${next}`
+          : new URL(next, b).href;
+      } catch {
+        return null;
+      }
+    }
+    function normalize(rec) {
+      const chain_id = Number(rec?.id ?? NaN);
+      if (!Number.isFinite(chain_id)) return null;
+      return {
+        chain_id,
+        start: Number(rec.start) || 0, // seconds
+        end: Number(rec.end) || 0, // seconds
+        chain: Number(rec.chain) || 0, // hits
+        respect: Number(rec.respect) || 0,
+      };
+    }
+
     return (async () => {
       const out = [];
       const seen = new Set();
-      let url = firstUrl;
+      let url = buildFactionChainsUrl();
       let safety = 0;
 
       while (url && safety < 100) {
         safety += 1;
-
         let json;
         try {
           json = await httpGetJSON(url);
@@ -1434,52 +1331,22 @@
           throw e;
         }
 
-        const src = Array.isArray(json?.chains)
-          ? json.chains
-          : json?.chains && typeof json.chains === "object"
-          ? Object.values(json.chains)
-          : json && typeof json === "object"
-          ? Object.values(json)
-          : [];
-
-        for (const rec of src) {
-          // Normalize fields (id → chain_id)
-          let chain_id = Number(rec?.chain_id ?? rec?.id ?? NaN);
-          if (!Number.isFinite(chain_id)) continue;
-
-          const start = rec.start ?? rec.started ?? rec.timestamp ?? 0;
-          const end = rec.end ?? rec.ended ?? rec.timestamp_end ?? 0;
-          const chain =
-            rec.chain_count ?? rec.length ?? rec.hits ?? rec.chain ?? 0;
-          const respect = rec.respect != null ? Number(rec.respect) : 0;
-
-          // De-dupe defensively across pages
-          const key = `${chain_id}|${start}|${end}|${chain}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            out.push({ chain_id, start, end, chain, respect });
+        const rows = Array.isArray(json?.chains) ? json.chains : [];
+        for (const rec of rows) {
+          const n = normalize(rec);
+          if (!n) continue;
+          const k = `${n.chain_id}|${n.start}|${n.end}|${n.chain}`;
+          if (!seen.has(k)) {
+            seen.add(k);
+            out.push(n);
           }
         }
 
-        // Follow pagination via _metadata.links.next (absolute or relative)
-        const next = json?._metadata?.links?.next;
-        if (!next) break;
-        try {
-          if (/^https?:\/\//i.test(next)) {
-            url = next;
-          } else {
-            const base = new URL(url);
-            url = next.startsWith("/")
-              ? `${base.origin}${next}`
-              : new URL(next, base).href;
-          }
-        } catch {
-          // Stop if the next link is malformed
-          break;
-        }
+        const next = resolveNextLink(json?._metadata?.links?.next, url);
+        if (!next || next === url) break;
+        url = next;
       }
 
-      // Keep your original ordering & cap
       out.sort((a, b) => (b.end || 0) - (a.end || 0));
       return out.slice(0, 100);
     })();
@@ -1495,10 +1362,7 @@
   }
 
   function fetchChainReport(chainId) {
-    // v2: /v2/faction/{chainId}/chainreport
-    const url = `${apiBase()}/v2/faction/${encodeURIComponent(
-      chainId
-    )}/chainreport?key=${keyParam()}`;
+    const url = buildChainReportUrl(chainId);
     return httpGetJSON(url).then((j) =>
       j?.chainreport ? { chainreport: j.chainreport } : j
     );
@@ -1560,9 +1424,7 @@
     let safety = 0;
 
     while (cursor <= toSec && safety++ < STATE.maxAttackPages) {
-      const url =
-        `${apiBase()}/v2/faction/attacks?filters=outgoing` +
-        `&from=${cursor}&to=${toSec}&comment=chaintooldev&key=${keyParam()}`;
+      const url = buildFactionAttacksUrl(cursor, toSec);
       // back-off & retry on 429/rate-limit
       let payload;
       try {
