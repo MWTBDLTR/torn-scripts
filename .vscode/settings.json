@@ -1,0 +1,4 @@
+{
+    "prettier.experimentalTernaries": true,
+    "prettier.printWidth": 120
+}

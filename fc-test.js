@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.3
+// @version      1.2.5
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -43,29 +43,20 @@
   });
 
   function configure() {
-    const k = prompt(
-      'Enter your Torn API key (type "public" to use public mode):',
-      STATE.apiKey || ""
-    );
+    const k = prompt('Enter your Torn API key (type "public" to use public mode):', STATE.apiKey || "");
     if (k === null) return;
     STATE.apiKey = (k || "").trim();
     GM_setValue("torn_chain_eta_apiKey", STATE.apiKey);
     STATE.usePublicKey = STATE.apiKey.toLowerCase() === "public";
     GM_setValue("torn_chain_eta_usePublicKey", STATE.usePublicKey);
 
-    const fid = prompt(
-      "Faction ID (REQUIRED in public mode; optional otherwise):",
-      STATE.factionIdOverride || ""
-    );
+    const fid = prompt("Faction ID (REQUIRED in public mode; optional otherwise):", STATE.factionIdOverride || "");
     if (fid !== null) {
       STATE.factionIdOverride = (fid || "").trim();
       GM_setValue("torn_chain_eta_factionIdOverride", STATE.factionIdOverride);
     }
 
-    const t = prompt(
-      `Comma-separated thresholds:`,
-      STATE.thresholds.join(", ")
-    );
+    const t = prompt(`Comma-separated thresholds:`, STATE.thresholds.join(", "));
     if (t !== null) {
       const arr = (t || "")
         .split(",")
@@ -84,17 +75,9 @@
       GM_setValue("torn_chain_eta_pollSec", STATE.pollSec);
     }
 
-    const w = prompt(
-      `Rate window (1–${STATE.historyMaxMin} minutes):`,
-      String(STATE.rateWindowMin)
-    );
+    const w = prompt(`Rate window (1–${STATE.historyMaxMin} minutes):`, String(STATE.rateWindowMin));
     if (w !== null) {
-      STATE.rateWindowMin = clampInt(
-        parseInt(w, 10),
-        1,
-        STATE.historyMaxMin,
-        STATE.rateWindowMin
-      );
+      STATE.rateWindowMin = clampInt(parseInt(w, 10), 1, STATE.historyMaxMin, STATE.rateWindowMin);
       GM_setValue("torn_chain_eta_rateWindowMin", STATE.rateWindowMin);
     }
 
@@ -103,19 +86,11 @@
       String(STATE.maxAttackPages)
     );
     if (mp !== null) {
-      STATE.maxAttackPages = clampInt(
-        parseInt(mp, 10),
-        50,
-        5000,
-        STATE.maxAttackPages
-      );
+      STATE.maxAttackPages = clampInt(parseInt(mp, 10), 50, 5000, STATE.maxAttackPages);
       GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages);
     }
 
-    const ct = prompt(
-      `Chains list cache TTL in minutes (default 2):`,
-      String(STATE.chainsTTLms / 60000)
-    );
+    const ct = prompt(`Chains list cache TTL in minutes (default 2):`, String(STATE.chainsTTLms / 60000));
     if (ct !== null) {
       const min = clampInt(parseInt(ct, 10), 1, 15, STATE.chainsTTLms / 60000);
       STATE.chainsTTLms = min * 60000;
@@ -313,17 +288,13 @@
 
   function tctExportHistoryCSV() {
     const rows = [["id", "start", "end", "duration_sec", "length", "respect"]];
-    (window.HIST_VIEW || HIST_VIEW || []).forEach((r) =>
-      rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect])
-    );
+    (window.HIST_VIEW || HIST_VIEW || []).forEach((r) => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
     const csv = rows
       .map((r) =>
         r
           .map((v) => {
             const s = String(v);
-            return s.includes(",") || s.includes('"')
-              ? `"${s.replace(/"/g, '""')}"`
-              : s;
+            return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
           })
           .join(",")
       )
@@ -341,10 +312,7 @@
 
   function adjustPanelWidth(which) {
     if (which === "hist") {
-      const w = Math.min(
-        Math.max(760, Math.floor(window.innerWidth * 0.9)),
-        1000
-      );
+      const w = Math.min(Math.max(760, Math.floor(window.innerWidth * 0.9)), 1000);
       root.style.width = `${w}px`;
     } else {
       root.style.width = "420px";
@@ -478,16 +446,11 @@
     refs.timeout.textContent = timeoutSec ? `${timeoutSec}s` : "—";
     refs.tceWin.textContent = String(STATE.rateWindowMin);
     const interHitSec = rateHPM > 0 ? 60 / rateHPM : Infinity;
-    refs.interHit.textContent = Number.isFinite(interHitSec)
-      ? `${Math.round(interHitSec)}s`
-      : "—";
+    refs.interHit.textContent = Number.isFinite(interHitSec) ? `${Math.round(interHitSec)}s` : "—";
     refs.risk.textContent = "";
     refs.risk.className = "tce-small";
     if (timeoutSec && Number.isFinite(interHitSec)) {
-      refs.risk.textContent =
-        interHitSec > timeoutSec
-          ? " • ⚠ avg inter-hit > timeout (risk)"
-          : " • ok";
+      refs.risk.textContent = interHitSec > timeoutSec ? " • ⚠ avg inter-hit > timeout (risk)" : " • ok";
     }
     const rows = estimateRows(chainCurrent, rateHPM, STATE.thresholds);
     refs.tableBody.innerHTML = rows
@@ -497,9 +460,7 @@
           <td class="tce-mono">${r.th}</td>
           <td class="tce-mono">${r.delta <= 0 ? "—" : r.delta}</td>
           <td class="tce-mono">${r.clock}${
-          Number.isFinite(r.etaMin) && r.etaMin > 0
-            ? ` (${fmtDeltaMin(r.etaMin)})`
-            : ""
+          Number.isFinite(r.etaMin) && r.etaMin > 0 ? ` (${fmtDeltaMin(r.etaMin)})` : ""
         }</td>
         </tr>`;
       })
@@ -576,9 +537,7 @@
       return true;
     });
     const dir = order === "asc" ? 1 : -1;
-    HIST_VIEW.sort((a, b) =>
-      a[sortKey] === b[sortKey] ? 0 : (a[sortKey] > b[sortKey] ? 1 : -1) * dir
-    );
+    HIST_VIEW.sort((a, b) => (a[sortKey] === b[sortKey] ? 0 : (a[sortKey] > b[sortKey] ? 1 : -1) * dir));
     histPage = 1;
     renderHistoryTable();
   }
@@ -592,9 +551,7 @@
     const slice = HIST_VIEW.slice(startIdx, startIdx + pageSize);
     refs.histTableBody.innerHTML = slice
       .map((r) => {
-        return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${
-          r.end
-        }">
+        return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${r.end}">
           <td class="tce-mono"><span class="tce-link">${r.id}</span></td>
           <td class="tce-mono">${r.start ? fmtTime(r.start) : "—"}</td>
           <td class="tce-mono">${r.end ? fmtTime(r.end) : "—"}</td>
@@ -612,9 +569,7 @@
         openChainDetail(id, start, end);
       });
     });
-    refs.histInfo.textContent = total
-      ? `${total.toLocaleString()} chains`
-      : "No results";
+    refs.histInfo.textContent = total ? `${total.toLocaleString()} chains` : "No results";
     refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
   }
 
@@ -761,15 +716,11 @@
           : String(stats.respect ?? "—");
 
         expectedLen = Number(stats.chain) || null;
-        ourFactionId =
-          Number(stats.factionID || STATE.factionIdOverride || 0) || null;
+        ourFactionId = Number(stats.factionID || STATE.factionIdOverride || 0) || null;
 
-        const sum =
-          (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
+        const sum = (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
         if (expectedLen && sum !== expectedLen) {
-          console.warn(
-            `Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${expectedLen}`
-          );
+          console.warn(`Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${expectedLen}`);
         }
       } else {
         refs.hdResp.textContent = "—";
@@ -777,8 +728,7 @@
 
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
-        refs.hdLen.textContent =
-          expectedLen != null ? String(expectedLen) : "—";
+        refs.hdLen.textContent = expectedLen != null ? String(expectedLen) : "—";
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
           Per-hit timeline requires a private key with faction attacks access. Showing summary only.
         </td></tr>`;
@@ -793,29 +743,42 @@
         if (!Number.isFinite(ourFactionId)) ourFactionId = null;
       }
 
-      const attacks = await fetchAttacksWindowChunked(
-        startTs,
-        withEndBuffer(endTs, 300),
-        expectedLen
-      ).catch(() => []);
-
-      const points = buildChainTimeline(
-        attacks,
-        startTs,
-        expectedLen ?? null,
-        ourFactionId
+      const attacks = await fetchAttacksWindowChunked(startTs, withEndBuffer(endTs, 300), expectedLen).catch(() => []);
+      console.log(
+        "[ChainDetail] chainId:",
+        chainId,
+        "Fetched attacks:",
+        attacks.length,
+        "window:",
+        new Date(startTs * 1000).toLocaleString(),
+        "→",
+        new Date(endTs * 1000).toLocaleString()
       );
 
-      // prefer report length if present; otherwise use max observed
+      // Optional deeper info per hit
+      attacks.forEach((a) => {
+        console.log(
+          `[ChainDetail] ${chainId} attack`,
+          "id:",
+          a.id || a.attack_id || a.code,
+          "result:",
+          a.result,
+          "ended:",
+          a.ended,
+          "chain link:",
+          a.chain
+        );
+      });
+
+      const points = buildChainTimeline(attacks, startTs, expectedLen ?? null, ourFactionId);
+
       const seenMax = points.length ? points[points.length - 1].y : 0;
-      const finalLen = expectedLen ?? seenMax; // <— unified length
+      const finalLen = expectedLen ?? seenMax;
 
       if (!points || points.length <= 1) {
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdLen.textContent = String(finalLen);
-        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-    No per-hit data parsed for this chain window (no qualifying attacks for our faction).
-  </td></tr>`;
+        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">No per-hit data parsed for this chain window (no qualifying attacks for our faction).</td></tr>`;
         toast(`chain #${chainId}: no per-hit data`);
         return;
       }
@@ -825,21 +788,16 @@
       refs.hdLen.textContent = String(finalLen);
       renderChart(points);
 
-      const thresholdsForTable = Array.from(
-        new Set([...STATE.thresholds, finalLen])
-      ).sort((a, b) => a - b);
+      const thresholdsForTable = Array.from(new Set([...STATE.thresholds, finalLen])).sort((a, b) => a - b);
       const crossed = computeThresholdMoments(points, thresholdsForTable);
+
       refs.hdThresholdsBody.innerHTML = crossed
         .map(
-          (c) => `
-  <tr>
-    <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
-    <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
-    <td class="tce-mono">${
-      c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
-    }</td>
-  </tr>
-`
+          (c) => `<tr>
+          <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
+          <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
+          <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"}</td>
+        </tr>`
         )
         .join("");
 
@@ -890,22 +848,15 @@
     return Number.isFinite(n) ? n : NaN;
   }
 
-  function buildChainTimeline(
-    attacks,
-    startTsSec,
-    expectedLen = null,
-    ourFactionId = null
-  ) {
+  function buildChainTimeline(attacks, startTsSec, expectedLen = null, ourFactionId = null) {
     const startMs = startTsSec * 1000;
     const byLink = new Map(); // link -> earliest ms
 
     for (const a of attacks) {
       if (ourFactionId) {
         const atkFid = getAttackerFactionId(a);
-        if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId))
-          continue;
+        if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId)) continue;
       }
-
       const link = getLinkNumber(a, expectedLen);
       if (!Number.isFinite(link) || link <= 0) continue;
 
@@ -920,12 +871,11 @@
     if (byLink.size === 0) return [{ t: startMs, y: 0 }];
 
     const points = [{ t: startMs, y: 0 }];
-    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]); // by link#
+    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]);
     for (const [link, t] of sorted) {
       const prevT = points[points.length - 1].t;
       points.push({ t: Math.max(prevT + 1, t), y: link });
     }
-
     return spreadWithinSecond(points);
   }
 
@@ -943,8 +893,7 @@
         const step = Math.max(1, Math.floor((end - base) / count));
         for (let k = 0; k < count; k++) {
           pts[i + k].t = base + k * step;
-          if (pts[i + k].t <= pts[i + k - 1]?.t)
-            pts[i + k].t = pts[i + k - 1].t + 1;
+          if (pts[i + k].t <= pts[i + k - 1]?.t) pts[i + k].t = pts[i + k - 1].t + 1;
         }
       }
       i = j;
@@ -953,8 +902,21 @@
   }
 
   function computeThresholdMoments(points, thresholds) {
-    const tsByHit = new Map(points.map((p) => [p.y, p.t]));
-    return thresholds.map((th) => ({ th, ts: tsByHit.get(th) ?? null }));
+    // points: [{t, y}] sorted by time; thresholds: integers ascending/descending ok
+    const ths = [...thresholds].sort((a, b) => a - b);
+    const out = ths.map((th) => ({ th, ts: null }));
+
+    if (!points || points.length === 0) return out;
+
+    let idx = 0; // index into 'out' thresholds
+    for (let i = 0; i < points.length && idx < out.length; i++) {
+      const { t, y } = points[i];
+      while (idx < out.length && y >= out[idx].th) {
+        if (out[idx].ts == null) out[idx].ts = t;
+        idx++;
+      }
+    }
+    return out;
   }
 
   function renderChart(points) {
@@ -968,17 +930,7 @@
       type: "line",
       data: {
         datasets: [
-          {
-            label: "Hit #",
-            data,
-            fill: false,
-            tension: 0.15,
-            borderWidth: 2,
-            // show visible points
-            pointRadius: 3,
-            pointHoverRadius: 5,
-            // keep defaults for colors or set your own if you like
-          },
+          { label: "Hit #", data, fill: false, tension: 0.15, borderWidth: 2, pointRadius: 3, pointHoverRadius: 5 },
         ],
       },
       options: {
@@ -992,9 +944,7 @@
               callback: (v) => {
                 const d = new Date(v);
                 const pad = (n) => String(n).padStart(2, "0");
-                return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(
-                  d.getSeconds()
-                )}`;
+                return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
               },
             },
           },
@@ -1004,10 +954,7 @@
           legend: { display: false },
           tooltip: {
             callbacks: {
-              title: (items) =>
-                items?.length
-                  ? new Date(items[0].parsed.x).toLocaleString()
-                  : "",
+              title: (items) => (items?.length ? new Date(items[0].parsed.x).toLocaleString() : ""),
               label: (ctx) => `Hit #: ${ctx.parsed.y}`,
             },
           },
@@ -1022,10 +969,7 @@
     return "https://api.torn.com/v2";
   }
   function isPublicMode() {
-    return (
-      STATE.usePublicKey ||
-      (STATE.apiKey && STATE.apiKey.toLowerCase() === "public")
-    );
+    return STATE.usePublicKey || (STATE.apiKey && STATE.apiKey.toLowerCase() === "public");
   }
   function keyParam() {
     return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
@@ -1034,15 +978,13 @@
   function buildFactionChainUrl() {
     const u = new URL(`${apiBase()}/faction/chain`);
     u.searchParams.set("key", keyParam());
-    if (STATE.factionIdOverride)
-      u.searchParams.set("faction_id", String(STATE.factionIdOverride));
+    if (STATE.factionIdOverride) u.searchParams.set("faction_id", String(STATE.factionIdOverride));
     return u.href;
   }
   function buildFactionChainsUrl() {
     const u = new URL(`${apiBase()}/faction/chains`);
     u.searchParams.set("key", keyParam());
-    if (STATE.factionIdOverride)
-      u.searchParams.set("faction_id", String(STATE.factionIdOverride));
+    if (STATE.factionIdOverride) u.searchParams.set("faction_id", String(STATE.factionIdOverride));
     return u.href;
   }
   function buildFactionAttacksUrl(fromSec, toSec) {
@@ -1056,9 +998,7 @@
     return u.href;
   }
   function buildChainReportUrl(chainId) {
-    const u = new URL(
-      `${apiBase()}/faction/${encodeURIComponent(chainId)}/chainreport`
-    );
+    const u = new URL(`${apiBase()}/faction/${encodeURIComponent(chainId)}/chainreport`);
     u.searchParams.set("key", keyParam());
     return u.href;
   }
@@ -1087,11 +1027,7 @@
         onload: (res) => {
           try {
             if (res.status < 200 || res.status >= 300) {
-              reject(
-                new Error(
-                  `HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`
-                )
-              );
+              reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`));
               return;
             }
             const j = JSON.parse(res.responseText || "{}");
@@ -1114,8 +1050,7 @@
   async function testKey() {
     try {
       if (isPublicMode()) {
-        if (!STATE.factionIdOverride)
-          throw new Error("Public mode: set Faction ID in Settings.");
+        if (!STATE.factionIdOverride) throw new Error("Public mode: set Faction ID in Settings.");
         await httpGetJSON(buildFactionChainUrl());
         await httpGetJSON(buildFactionChainsUrl());
         alert(
@@ -1132,9 +1067,7 @@
   }
 
   async function resolveOurFactionId() {
-    return STATE.factionIdOverride
-      ? Number(STATE.factionIdOverride) || null
-      : null;
+    return STATE.factionIdOverride ? Number(STATE.factionIdOverride) || null : null;
   }
 
   function fetchChain() {
@@ -1148,8 +1081,7 @@
         chainCurrent = Number(json?.current);
         timeoutSec = Number(json?.timeout);
       }
-      if (!Number.isFinite(chainCurrent))
-        throw new Error("Missing chain.current");
+      if (!Number.isFinite(chainCurrent)) throw new Error("Missing chain.current");
       return {
         chainCurrent,
         timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null,
@@ -1168,12 +1100,9 @@
       const req = indexedDB.open(DB_NAME, DB_VER);
       req.onupgradeneeded = () => {
         const d = req.result;
-        if (!d.objectStoreNames.contains("chainsList"))
-          d.createObjectStore("chainsList");
-        if (!d.objectStoreNames.contains("chainReports"))
-          d.createObjectStore("chainReports");
-        if (!d.objectStoreNames.contains("attacks"))
-          d.createObjectStore("attacks");
+        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList");
+        if (!d.objectStoreNames.contains("chainReports")) d.createObjectStore("chainReports");
+        if (!d.objectStoreNames.contains("attacks")) d.createObjectStore("attacks");
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -1246,8 +1175,7 @@
     const key = chainsCacheKey();
     const cached = await idbGet("chainsList", key);
     const now = Date.now();
-    if (!force && cached && now - (cached.ts || 0) < STATE.chainsTTLms)
-      return cached.data;
+    if (!force && cached && now - (cached.ts || 0) < STATE.chainsTTLms) return cached.data;
     const fresh = await fetchChains();
     await idbPut("chainsList", key, { data: fresh, ts: now });
     return fresh;
@@ -1259,9 +1187,7 @@
       try {
         if (/^https?:\/\//i.test(next)) return next;
         const b = new URL(base);
-        return next.startsWith("/")
-          ? `${b.origin}${next}`
-          : new URL(next, b).href;
+        return next.startsWith("/") ? `${b.origin}${next}` : new URL(next, b).href;
       } catch {
         return null;
       }
@@ -1324,9 +1250,7 @@
 
   function fetchChainReport(chainId) {
     const url = buildChainReportUrl(chainId);
-    return httpGetJSON(url).then((j) =>
-      j?.chainreport ? { chainreport: j.chainreport } : j
-    );
+    return httpGetJSON(url).then((j) => (j?.chainreport ? { chainreport: j.chainreport } : j));
   }
 
   function countUniqueLinks(rows) {
@@ -1334,8 +1258,7 @@
     for (const r of rows) {
       if (OUR_FACTION_ID) {
         const atkFid = getAttackerFactionId(r);
-        if (!Number.isFinite(atkFid) || atkFid !== Number(OUR_FACTION_ID))
-          continue;
+        if (!Number.isFinite(atkFid) || atkFid !== Number(OUR_FACTION_ID)) continue;
       }
       const l = getLinkNumber(r, null);
       if (Number.isFinite(l) && l > 0) s.add(l);
@@ -1343,14 +1266,9 @@
     return s.size;
   }
 
-  async function fetchAttacksWindow(
-    fromSec,
-    toSec,
-    targetHits = null,
-    expectedLen = null
-  ) {
+  async function fetchAttacksWindow(fromSec, toSec, targetHits = null, expectedLen = null) {
     const byCode = new Map();
-    const keepResults = new Set(["Leave", "Mugged", "Hospitalized"]);
+    const keepResults = new Set(["leave", "mugged", "hospitalized"]);
     let cursor = fromSec;
     let safety = 0;
 
@@ -1379,7 +1297,8 @@
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (!code || byCode.has(code)) continue;
-        if (!keepResults.has(r.result)) continue;
+        const res = String(r.result || "").toLowerCase();
+        if (!keepResults.has(res)) continue;
 
         byCode.set(code, r);
 
@@ -1397,21 +1316,12 @@
 
       if (targetHits && byCode.size >= targetHits) break;
       if (expectedLen) {
-        const links = [...byCode.values()]
-          .map((x) => Number(x.chain ?? 0))
-          .filter((n) => n > 0);
-        if (
-          links.length &&
-          Math.min(...links) === 1 &&
-          Math.max(...links) >= expectedLen
-        )
-          break;
+        const links = [...byCode.values()].map((x) => Number(x.chain ?? 0)).filter((n) => n > 0);
+        if (links.length && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) break;
       }
     }
 
-    return Array.from(byCode.values()).sort(
-      (a, b) => (a.ended ?? 0) - (b.ended ?? 0)
-    );
+    return Array.from(byCode.values()).sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
   }
   async function fetchAttacksWindowChunked(fromSec, toSec, expectedLen = null) {
     const CHUNK = 2 * 60 * 60; // 2 hours
@@ -1420,12 +1330,7 @@
 
     while (start <= toSec) {
       const end = Math.min(start + CHUNK - 1, toSec);
-      const batch = await fetchAttacksWindow(
-        start,
-        end,
-        /*targetHits*/ null,
-        expectedLen
-      );
+      const batch = await fetchAttacksWindow(start, end, /*targetHits*/ null, expectedLen);
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (code && !byCode.has(code)) byCode.set(code, r);
