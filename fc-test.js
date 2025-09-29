@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn Chain ETA + History & Graphs (with Cache)
+// @name         Torn Chain Tools: Live ETA + History & Graphs (Public/Private + Cache)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.3
-// @description  Live chain ETAs plus history browser with cached chain reports and attacks; rate-over-time graph per chain.
-// @author       MrChurch
+// @version      1.0.4
+// @description  Live chain ETAs, history browser, chain report viewer, and (private mode) per-hit timeline chart. Public-key aware. Caches to IndexedDB.
+// @author       you
 // @match        https://www.torn.com/*
 // @connect      api.torn.com
 // @grant        GM_xmlhttpRequest
@@ -23,6 +23,8 @@
   const DEF_THRESHOLDS = [10, 50, 100, 250, 1000, 2500, 5000];
   const STATE = {
     apiKey: GM_getValue("torn_chain_eta_apiKey", ""),
+    usePublicKey: GM_getValue("torn_chain_eta_usePublicKey", false),
+    factionIdOverride: GM_getValue("torn_chain_eta_factionIdOverride", ""),
     thresholds: GM_getValue("torn_chain_eta_thresholds", DEF_THRESHOLDS),
     pollSec: GM_getValue("torn_chain_eta_pollSec", 15),
     rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5),
@@ -32,21 +34,27 @@
   };
 
   GM_registerMenuCommand("Torn Chain → Configure…", configure);
+  GM_registerMenuCommand("Torn Chain → Test API / Key", testKey);
   GM_registerMenuCommand("Torn Chain → Reset live rate history", () => { HISTORY.length = 0; toast("Live rate history reset."); });
-  GM_registerMenuCommand("Torn Chain → Clear Chain Cache", async () => {
-    await cacheClearAll();
-    toast("Cache cleared.");
-  });
+  GM_registerMenuCommand("Torn Chain → Clear Chain Cache", async () => { await cacheClearAll(); toast("Cache cleared."); });
   GM_registerMenuCommand("Torn Chain → Cache stats", async () => {
     const s = await cacheStats();
     alert(`Cache objects: chainsList=${s.chainsList}, chainReports=${s.chainReports}, attacks=${s.attacks}\nApprox bytes: ~${s.approxBytes.toLocaleString()}`);
   });
 
   function configure() {
-    const k = prompt("Enter your Torn API key:", STATE.apiKey || "");
+    const k = prompt('Enter your Torn API key (type "public" to use public mode):', STATE.apiKey || "");
     if (k === null) return;
     STATE.apiKey = (k || "").trim();
     GM_setValue("torn_chain_eta_apiKey", STATE.apiKey);
+    STATE.usePublicKey = (STATE.apiKey.toLowerCase() === "public");
+    GM_setValue("torn_chain_eta_usePublicKey", STATE.usePublicKey);
+
+    const fid = prompt("Faction ID (REQUIRED in public mode; optional otherwise):", STATE.factionIdOverride || "");
+    if (fid !== null) {
+      STATE.factionIdOverride = (fid || "").trim();
+      GM_setValue("torn_chain_eta_factionIdOverride", STATE.factionIdOverride);
+    }
 
     const t = prompt(`Comma-separated thresholds:`, STATE.thresholds.join(", "));
     if (t !== null) {
@@ -55,10 +63,7 @@
         .map(s => parseInt(s.trim(), 10))
         .filter(n => Number.isFinite(n) && n > 0)
         .sort((a, b) => a - b);
-      if (arr.length) {
-        STATE.thresholds = arr;
-        GM_setValue("torn_chain_eta_thresholds", STATE.thresholds);
-      }
+      if (arr.length) { STATE.thresholds = arr; GM_setValue("torn_chain_eta_thresholds", STATE.thresholds); }
     }
 
     const p = prompt(`API poll interval (5–60s):`, String(STATE.pollSec));
@@ -87,6 +92,23 @@
     }
 
     toast("Settings saved.");
+  }
+
+  async function testKey() {
+    try {
+      if (isPublicMode()) {
+        if (!STATE.factionIdOverride) throw new Error("Public mode: set Faction ID in Settings.");
+        // Try simple endpoints with key=public
+        await httpGetJSON(factionUrl("chain"));
+        await httpGetJSON(factionUrl("chains"));
+        alert(`Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`);
+        return;
+      }
+      const u = await fetchUserProfile();
+      alert(`Key OK.\nPlayer: ${u.name} [${u.player_id}]\nFaction: ${u.faction_name || "(none)"} (${u.faction_id || 0})`);
+    } catch (e) {
+      alert(`Key test failed: ${e.message || e}`);
+    }
   }
 
   function clampInt(n, lo, hi, dflt) {
@@ -138,7 +160,7 @@
       <div id="panelLive">
         <div class="tce-hbox">
           <div><b>Current chain:</b> <span class="tce-mono" id="tceCurrent">—</span></div>
-          <div><b>Hits/min (avg ${STATE.rateWindowMin}m):</b> <span class="tce-mono" id="tceRate">—</span></div>
+          <div><b>Hits/min (avg <span id="tceWin">${STATE.rateWindowMin}</span>m):</b> <span class="tce-mono" id="tceRate">—</span></div>
         </div>
         <div class="tce-hbox">
           <div><b>Timeout per hit:</b> <span class="tce-mono" id="tceTimeout">—</span></div>
@@ -230,6 +252,7 @@
     hdResp: root.querySelector("#hdResp"),
     hdThresholdsBody: root.querySelector("#hdThresholds tbody"),
     chartCanvas: root.querySelector("#chainChart"),
+    tceWin: root.querySelector("#tceWin"),
   };
 
   // Tabs
@@ -304,6 +327,7 @@
     refs.current.textContent = String(chainCurrent);
     refs.rate.textContent = rateHPM ? rateHPM.toFixed(2) : "0.00";
     refs.timeout.textContent = timeoutSec ? `${timeoutSec}s` : "—";
+    refs.tceWin.textContent = String(STATE.rateWindowMin);
     const interHitSec = rateHPM > 0 ? (60 / rateHPM) : Infinity;
     refs.interHit.textContent = Number.isFinite(interHitSec) ? `${Math.round(interHitSec)}s` : "—";
     refs.risk.textContent = "";
@@ -336,7 +360,7 @@
       HISTORY.push({ t: Date.now(), chain: chainCurrent });
       const rate = computeRate();
       setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
-    }).catch(err => { console.error(err); toast("error"); });
+    }).catch(err => { console.error(err); toast(err.message || "error"); });
   }
   function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
 
@@ -348,29 +372,34 @@
   async function loadHistory(forceRefetch = false) {
     if (!ensureKey()) return;
     toast("loading history…");
-    const list = await cachedFetchChains(forceRefetch);
-    refs.histTableBody.innerHTML = list.map(row => {
-      const len = row.chain || row.length || row.hits || 0;
-      const start = row.start || row.started || 0;
-      const end = row.end || row.ended || 0;
-      const resp = row.respect || 0;
-      return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
-        <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
-        <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
-        <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
-        <td class="tce-mono">${len}</td>
-        <td class="tce-mono">${Number.isFinite(resp) ? Number(resp).toFixed(2) : resp}</td>
-      </tr>`;
-    }).join("");
-    refs.histTableBody.querySelectorAll("tr").forEach(tr => {
-      tr.addEventListener("click", () => {
-        const id = parseInt(tr.getAttribute("data-id"), 10);
-        const start = parseInt(tr.getAttribute("data-start"), 10);
-        const end = parseInt(tr.getAttribute("data-end"), 10);
-        openChainDetail(id, start, end);
+    try {
+      const list = await cachedFetchChains(forceRefetch);
+      refs.histTableBody.innerHTML = list.map(row => {
+        const len = row.chain || row.length || row.hits || 0;
+        const start = row.start || row.started || 0;
+        const end = row.end || row.ended || 0;
+        const resp = row.respect || 0;
+        return `<tr data-id="${row.chain_id || row.id || row.chain}" data-start="${start}" data-end="${end}" class="tce-row">
+          <td class="tce-mono"><span class="tce-link">${row.chain_id || row.id || row.chain}</span></td>
+          <td class="tce-mono">${start ? fmtTime(start) : "—"}</td>
+          <td class="tce-mono">${end ? fmtTime(end) : "—"}</td>
+          <td class="tce-mono">${len}</td>
+          <td class="tce-mono">${Number.isFinite(resp) ? Number(resp).toFixed(2) : resp}</td>
+        </tr>`;
+      }).join("");
+      refs.histTableBody.querySelectorAll("tr").forEach(tr => {
+        tr.addEventListener("click", () => {
+          const id = parseInt(tr.getAttribute("data-id"), 10);
+          const start = parseInt(tr.getAttribute("data-start"), 10);
+          const end = parseInt(tr.getAttribute("data-end"), 10);
+          openChainDetail(id, start, end);
+        });
       });
-    });
-    toast("history ready");
+      toast("history ready");
+    } catch (e) {
+      console.error(e);
+      toast(e.message || "error");
+    }
   }
 
   async function openChainDetail(chainId, startTs, endTs) {
@@ -383,37 +412,44 @@
     refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Loading…</td></tr>`;
     toast(`loading chain #${chainId}…`);
 
-    const [report, attacks] = await Promise.all([
-      cachedFetchChainReport(chainId).catch(()=>null),
-      cachedFetchAttacksForChain(chainId, startTs, endTs).catch(()=>[])
-    ]);
+    try {
+      const report = await cachedFetchChainReport(chainId).catch(()=>null);
 
-    // report stats
-    if (report) {
-      const len = report?.chainreport?.stats?.chain || report?.stats?.chain || 0;
-      const resp = report?.chainreport?.stats?.respect || report?.stats?.respect || 0;
-      refs.hdLen.textContent = String(len);
-      refs.hdResp.textContent = (Number.isFinite(resp) ? resp.toFixed(2) : String(resp));
-    } else {
-      refs.hdLen.textContent = "—";
-      refs.hdResp.textContent = "—";
+      // report stats
+      if (report) {
+        const len = report?.chainreport?.stats?.chain || report?.stats?.chain || 0;
+        const resp = report?.chainreport?.stats?.respect || report?.stats?.respect || 0;
+        refs.hdLen.textContent = String(len);
+        refs.hdResp.textContent = (Number.isFinite(resp) ? resp.toFixed(2) : String(resp));
+      } else {
+        refs.hdLen.textContent = "—";
+        refs.hdResp.textContent = "—";
+      }
+
+      if (isPublicMode()) {
+        // No per-hit data in public mode
+        refs.chartCanvas.parentElement.style.display = "none";
+        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Per-hit timeline requires a private key with faction attacks access. Showing summary only.</td></tr>`;
+      } else {
+        const attacks = await cachedFetchAttacksForChain(chainId, startTs, endTs).catch(()=>[]);
+        const points = buildChainTimeline(attacks, startTs);
+        refs.chartCanvas.parentElement.style.display = "";
+        renderChart(points);
+        const crossed = computeThresholdMoments(points, STATE.thresholds);
+        refs.hdThresholdsBody.innerHTML = crossed.map(c => {
+          return `<tr>
+            <td class="tce-mono">${c.th}</td>
+            <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
+            <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts - startTs*1000)/60000) : "—"}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      toast(`chain #${chainId} ready`);
+    } catch (e) {
+      console.error(e);
+      toast(e.message || "error");
     }
-
-    // attacks → timeline
-    const points = buildChainTimeline(attacks, startTs);
-    renderChart(points);
-
-    // thresholds table
-    const crossed = computeThresholdMoments(points, STATE.thresholds);
-    refs.hdThresholdsBody.innerHTML = crossed.map(c => {
-      return `<tr>
-        <td class="tce-mono">${c.th}</td>
-        <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
-        <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts - startTs*1000)/60000) : "—"}</td>
-      </tr>`;
-    }).join("");
-
-    toast(`chain #${chainId} ready`);
   }
 
   function buildChainTimeline(attacks, startTsSec) {
@@ -458,42 +494,45 @@
     const data = points.map(p => p.y);
     chart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
-      data: {
-        labels,
-        datasets: [{
-          label: "Cumulative chain",
-          data,
-          fill: false,
-          lineTension: 0.15,
-          pointRadius: 0,
-          borderWidth: 2,
-        }]
-      },
+      data: { labels, datasets: [{ label: "Cumulative chain", data, fill: false, lineTension: 0.15, pointRadius: 0, borderWidth: 2 }]},
       options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        parsing: false,
-        scales: {
-          x: { type: "time", time: { tooltipFormat: "MMM d, HH:mm" } },
-          y: { beginAtZero: true, ticks: { precision: 0 } }
-        },
-        plugins: {
-          legend: { display: false },
-          tooltip: { callbacks: { label: (ctx) => `Chain: ${ctx.parsed.y}` } }
-        },
+        responsive: true, maintainAspectRatio: false, parsing: false,
+        scales: { x: { type: "time", time: { tooltipFormat: "MMM d, HH:mm" } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `Chain: ${ctx.parsed.y}` } } },
         animation: false,
       }
     });
   }
 
   /**********************
-   * API (live)
+   * API helpers
    **********************/
+  function apiBase() { return "https://api.torn.com"; }
+  function isPublicMode() { return STATE.usePublicKey || (STATE.apiKey && STATE.apiKey.toLowerCase() === "public"); }
+  function keyParam() { return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey); }
+
+  function factionUrl(selection, extra="") {
+    const base = apiBase();
+    if (isPublicMode()) {
+      if (!STATE.factionIdOverride) throw new Error("Public key mode: Faction ID is required. Open Settings and set Faction ID.");
+      return `${base}/faction/${encodeURIComponent(STATE.factionIdOverride)}?selections=${selection}&key=${keyParam()}${extra}`;
+    }
+    if (STATE.factionIdOverride) {
+      return `${base}/faction/${encodeURIComponent(STATE.factionIdOverride)}?selections=${selection}&key=${keyParam()}${extra}`;
+    }
+    return `${base}/faction/?selections=${selection}&key=${keyParam()}${extra}`;
+  }
+
   function ensureKey() {
     if (!STATE.apiKey) { configure(); }
     if (!STATE.apiKey) { toast("API key required."); return false; }
+    if (isPublicMode() && !STATE.factionIdOverride) {
+      toast("Public key mode: set Faction ID in Settings.");
+      return false;
+    }
     return true;
   }
+
   function httpGetJSON(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -504,7 +543,12 @@
               reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`));
               return;
             }
-            resolve(JSON.parse(res.responseText || "{}"));
+            const j = JSON.parse(res.responseText || "{}");
+            if (j && j.error) {
+              reject(new Error(`${j.error.code}: ${j.error.error}`));
+              return;
+            }
+            resolve(j);
           } catch (e) { reject(e); }
         },
         onerror: () => reject(new Error("Network error")),
@@ -513,12 +557,17 @@
       });
     });
   }
-  function apiBase() { return "https://api.torn.com"; }
 
+  // Live chain
   function fetchChain() {
-    const url = `${apiBase()}/faction/?selections=chain&key=${encodeURIComponent(STATE.apiKey)}`;
-    return httpGetJSON(url).then(json => {
-      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+    const url = factionUrl("chain");
+    return httpGetJSON(url).catch((e) => {
+      const msg = String(e.message || e);
+      if (msg.startsWith("7:")) {
+        throw new Error("7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings.");
+      }
+      throw e;
+    }).then(json => {
       let chainCurrent = undefined, timeoutSec = undefined;
       if (json && json.chain) {
         chainCurrent = toNum(json.chain.current);
@@ -533,6 +582,17 @@
   }
   function toNum(v) { const n = Number(v); return Number.isFinite(n) ? n : NaN; }
 
+  // Profile (for private mode diagnostics)
+  function fetchUserProfile() {
+    const url = `${apiBase()}/user/?selections=profile&key=${keyParam()}`;
+    return httpGetJSON(url).then(j => ({
+      player_id: j.player_id,
+      name: j.name,
+      faction_id: j.faction?.faction_id || j.faction_id || 0,
+      faction_name: j.faction?.faction_name || j.factionname || null
+    }));
+  }
+
   /**********************
    * Caching layer (IndexedDB)
    **********************/
@@ -544,9 +604,9 @@
     if (dbp) return dbp;
     dbp = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VER);
-      req.onupgradeneeded = (e) => {
+      req.onupgradeneeded = () => {
         const d = req.result;
-        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList"); // key: "singleton"
+        if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList"); // key: depends on context
         if (!d.objectStoreNames.contains("chainReports")) d.createObjectStore("chainReports"); // key: chainId
         if (!d.objectStoreNames.contains("attacks")) d.createObjectStore("attacks"); // key: chainId
       };
@@ -571,16 +631,6 @@
       const tx = d.transaction(store, "readwrite");
       const st = tx.objectStore(store);
       st.put(value, key);
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => reject(tx.error);
-    });
-  }
-  async function idbDelete(store, key) {
-    const d = await db();
-    return new Promise((resolve, reject) => {
-      const tx = d.transaction(store, "readwrite");
-      const st = tx.objectStore(store);
-      st.delete(key);
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
     });
@@ -613,7 +663,6 @@
       });
     }
     const [a,b,c] = await Promise.all([count("chainsList"), count("chainReports"), count("attacks")]);
-    // very rough size: read all keys not necessary; give coarse estimate
     const approxBytes = (a*4 + b*512 + c*4096);
     return { chainsList: a, chainReports: b, attacks: c, approxBytes };
   }
@@ -621,8 +670,15 @@
   /**********************
    * Cached fetchers
    **********************/
+  function chainsCacheKey() {
+    // Separate contexts by mode + faction (so public/priv & per-faction lists don’t collide)
+    const mode = isPublicMode() ? "pub" : "priv";
+    const fid = STATE.factionIdOverride || "implicit";
+    return `${mode}:${fid}`;
+  }
+
   async function cachedFetchChains(force = false) {
-    const key = "singleton";
+    const key = chainsCacheKey();
     const cached = await idbGet("chainsList", key);
     const now = Date.now();
     if (!force && cached && (now - (cached.ts || 0) < STATE.chainsTTLms)) {
@@ -634,9 +690,14 @@
   }
 
   function fetchChains() {
-    const url = `${apiBase()}/faction/?selections=chains&key=${encodeURIComponent(STATE.apiKey)}`;
-    return httpGetJSON(url).then(json => {
-      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+    const url = factionUrl("chains");
+    return httpGetJSON(url).catch((e) => {
+      const msg = String(e.message || e);
+      if (msg.startsWith("7:")) {
+        throw new Error("7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings.");
+      }
+      throw e;
+    }).then(json => {
       const out = [];
       const src = json?.chains || json;
       if (src && typeof src === "object") {
@@ -666,20 +727,17 @@
     return data;
   }
   function fetchChainReport(chainId) {
-    const url = `${apiBase()}/torn/${encodeURIComponent(chainId)}?selections=chainreport&key=${encodeURIComponent(STATE.apiKey)}`;
-    return httpGetJSON(url).then(json => {
-      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
-      return json;
-    });
+    const url = `${apiBase()}/torn/${encodeURIComponent(chainId)}?selections=chainreport&key=${keyParam()}`;
+    return httpGetJSON(url);
   }
 
   async function cachedFetchAttacksForChain(chainId, fromSec, toSec) {
+    if (isPublicMode()) throw new Error("Public key mode: faction attacks are not available.");
     const key = String(chainId);
     const cached = await idbGet("attacks", key);
     if (cached && cached.complete && Array.isArray(cached.rows)) {
       return cached.rows;
     }
-    // Fetch once (complete set), then store
     const rows = await fetchAttacksWindow(fromSec, toSec);
     await idbPut("attacks", key, { rows, from: fromSec, to: toSec, ts: Date.now(), complete: true });
     return rows;
@@ -692,9 +750,12 @@
     let cursor = fromSec;
     while (cursor <= toSec && page < STATE.maxAttackPages) {
       page++;
-      const url = `${apiBase()}/faction/?selections=attacks&key=${encodeURIComponent(STATE.apiKey)}&from=${cursor}&to=${toSec}&limit=1000`;
-      const json = await httpGetJSON(url);
-      if (json && json.error) throw new Error(`${json.error.code}: ${json.error.error}`);
+      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
+      const json = await httpGetJSON(url).catch((e) => {
+        const msg = String(e.message || e);
+        if (msg.startsWith("7:")) throw new Error("7: Incorrect ID-entity relation while loading attacks. Check key/faction.");
+        throw e;
+      });
       const obj = json?.attacks || json;
       const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
       if (!rows.length) break;
