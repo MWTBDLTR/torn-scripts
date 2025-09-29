@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.6
+// @version      1.1.7
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -1434,13 +1434,12 @@
           throw e;
         }
 
-        // Support both the new array payload and legacy object-map payloads
         const src = Array.isArray(json?.chains)
           ? json.chains
           : json?.chains && typeof json.chains === "object"
           ? Object.values(json.chains)
-          : Array.isArray(json)
-          ? json
+          : json && typeof json === "object"
+          ? Object.values(json)
           : [];
 
         for (const rec of src) {
