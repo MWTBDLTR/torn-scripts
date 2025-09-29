@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.14
+// @version      1.0.15
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
-// @match        https://www.torn.com/*
+// @match        https://www.torn.com/war.php*
+// @match        https://www.torn.com/factions.php*
 // @connect      api.torn.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
