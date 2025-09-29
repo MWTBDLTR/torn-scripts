@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.13
+// @version      1.0.14
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -26,7 +26,7 @@
     pollSec: GM_getValue("torn_chain_eta_pollSec", 15),
     rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5),
     historyMaxMin: 15,
-    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 30),
+    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 400),
     chainsTTLms: GM_getValue("torn_chain_eta_chainsTTLms", 2 * 60 * 1000),
   };
 
@@ -482,11 +482,13 @@
         refs.hdResp.textContent = (Number.isFinite(resp) ? resp.toFixed(2) : String(resp));
       } else { refs.hdResp.textContent = "—"; }
 
+      const expectedLen = Number(report?.chainreport?.stats?.chain || report?.stats?.chain || 0) || null;
+
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Per-hit timeline requires a private key with faction attacks access. Showing summary only.</td></tr>`;
       } else {
-        const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300)).catch(()=>[]);
+        const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300), expectedLen).catch(()=>[]);
 
         const points = buildChainTimeline(attacks, startTs);
         refs.chartCanvas.parentElement.style.display = "";
@@ -512,8 +514,6 @@
   // Build strictly incremental timeline: y = hit #1..N, x = earliest timestamp for that link
   function buildChainTimeline(attacks, startTsSec) {
     const startMs = startTsSec * 1000;
-
-    // link -> earliest time (ms)
     const linkMinTs = new Map();
     let maxLink = 0;
 
@@ -530,19 +530,14 @@
       if (link > maxLink) maxLink = link;
     }
 
-    // Nothing? return just the start anchor.
     if (maxLink === 0) return [{ t: startMs, y: 0 }];
 
-    // Points: 0 at start, then 1..maxLink in order.
     const pts = [{ t: startMs, y: 0 }];
     for (let l = 1; l <= maxLink; l++) {
       let t = linkMinTs.get(l);
-      // If a link is missing (rare: pagination edge), nudge 1ms after previous so series stays monotone.
-      if (!t) t = pts[pts.length - 1].t + 1;
+      if (!t) t = pts[pts.length - 1].t + 1;   // fill missing links, monotone X
       pts.push({ t, y: l });
     }
-
-    // Spread clusters where many hits share the exact same second.
     return spreadWithinSecond(pts);
   }
 
@@ -573,11 +568,9 @@
 
   // Find the first time each threshold is reached (no interpolation needed once we have per-hit points; times are unique after spread)
   function computeThresholdMoments(points, thresholds) {
-    // points are 0..N where points[y].t is the time for hit #y (index 0 is anchor)
     const tsByHit = new Map(points.map(p => [p.y, p.t]));
     return thresholds.map(th => ({ th, ts: tsByHit.get(th) ?? null }));
   }
-
 
   // Chart (time on X, chain hit # on Y)
   function renderChart(points) {
@@ -737,64 +730,86 @@
     return httpGetJSON(url);
   }
 
-  async function cachedFetchAttacksForChain(chainId, fromSec, toSec) {
+  async function cachedFetchAttacksForChain(chainId, fromSec, toSec, targetHits = null) {
     if (isPublicMode()) throw new Error("Public key mode: faction attacks are not available.");
     const key = String(chainId);
     const cached = await idbGet("attacks", key);
-    if (cached && cached.complete && Array.isArray(cached.rows)) return cached.rows;
-    const rows = await fetchAttacksWindow(fromSec, toSec);
-    await idbPut("attacks", key, { rows, from: fromSec, to: toSec, ts: Date.now(), complete: true });
+
+    // If we already have enough unique links, reuse.
+    if (cached && cached.complete && Array.isArray(cached.rows)) {
+      if (!targetHits || (cached.seenLinks || 0) >= targetHits) {
+        return cached.rows;
+      }
+    }
+
+    const rows = await fetchAttacksWindow(fromSec, toSec, targetHits);
+    const seenLinks = countUniqueLinks(rows);
+    await idbPut("attacks", key, { rows, from: fromSec, to: toSec, ts: Date.now(), complete: true, seenLinks });
     return rows;
   }
 
-  async function fetchAttacksWindow(fromSec, toSec) {
-  const byId = new Map(); // id -> row
-  let page = 0;
-  let cursor = fromSec;
-  let lastCursor = -1;
-
-  while (cursor <= toSec && page < STATE.maxAttackPages) {
-    page++;
-    const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
-    const json = await httpGetJSON(url);
-    const obj = json?.attacks || json;
-    const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
-    if (!rows.length) break;
-
-    let newCount = 0;
-    let maxTs = 0;
-
+  function countUniqueLinks(rows) {
+    const s = new Set();
     for (const r of rows) {
-      const id = String(r.attack_id ?? r.id ?? r.result_id ?? r.log ?? `${r.timestamp_ended ?? r.timestamp ?? r.timestamp_started}-unk`);
-      if (!byId.has(id)) { byId.set(id, r); newCount++; }
-      const ts = Number(r.timestamp_ended ?? r.timestamp ?? r.timestamp_started ?? 0);
-      if (ts > maxTs) maxTs = ts;
+      const l = Number(r.chain ?? r.chain_link ?? r.modifiers?.chain);
+      if (Number.isFinite(l) && l > 0) s.add(l);
     }
-
-    // Keep cursor at maxTs to catch more hits in the same second; if nothing new, bump by 1s.
-    const nextCursor = maxTs || cursor;
-    if (newCount === 0 || nextCursor === cursor || nextCursor === lastCursor) {
-      cursor = cursor + 1;
-    } else {
-      cursor = nextCursor;
-    }
-    lastCursor = cursor;
-
-    if (cursor > toSec) break;
+    return s.size;
   }
 
-  const all = Array.from(byId.values());
-  all.sort((a,b) => {
-    const ta = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
-    const tb = Number(b.timestamp_ended ?? b.timestamp ?? b.timestamp_started ?? 0);
-    if (ta !== tb) return ta - tb;
-    const ia = String(a.attack_id ?? a.id ?? "");
-    const ib = String(b.attack_id ?? b.id ?? "");
-    return ia.localeCompare(ib);
-  });
-  return all;
-}
+  async function fetchAttacksWindow(fromSec, toSec, targetHits = null) {
+    const byId = new Map();         // attack_id -> row
+    const seenLinks = new Set();    // chain link numbers we’ve seen
+    let page = 0;
+    let cursor = fromSec;
+    let lastMaxTs = -1;
 
+    while (cursor <= toSec && page < STATE.maxAttackPages) {
+      page++;
+      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
+      const json = await httpGetJSON(url);
+      const obj = json?.attacks || json;
+      const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
+      if (!rows.length) break;
+
+      let newRows = 0;
+      let maxTs = 0;
+
+      for (const r of rows) {
+        const id  = String(r.attack_id ?? r.id ?? `${r.timestamp_ended ?? r.timestamp ?? r.timestamp_started}-unk`);
+        if (!byId.has(id)) { byId.set(id, r); newRows++; }
+        const ts  = Number(r.timestamp_ended ?? r.timestamp ?? r.timestamp_started ?? 0);
+        if (ts > maxTs) maxTs = ts;
+
+        const link = Number(r.chain ?? r.chain_link ?? r.modifiers?.chain);
+        if (Number.isFinite(link) && link > 0) seenLinks.add(link);
+      }
+
+      // If we’ve seen all hit numbers we expect, stop early.
+      if (targetHits && seenLinks.size >= targetHits) break;
+
+      // Keep paging at the same second until it’s exhausted; then move forward.
+      if (maxTs <= 0 || maxTs === lastMaxTs || newRows === 0) {
+        cursor = cursor + 1;                // nudge +1s to advance window
+      } else {
+        cursor = maxTs;                     // keep same second to catch more
+        lastMaxTs = maxTs;
+      }
+
+      if (cursor > toSec) break;
+    }
+
+    const all = Array.from(byId.values());
+    all.sort((a,b) => {
+      const ta = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
+      const tb = Number(b.timestamp_ended ?? b.timestamp ?? b.timestamp_started ?? 0);
+      if (ta !== tb) return ta - tb;
+      const ia = String(a.attack_id ?? a.id ?? "");
+      const ib = String(b.attack_id ?? b.id ?? "");
+      return ia.localeCompare(ib);
+    });
+    return all;
+  }
   // Start
   startPolling();
 })();
