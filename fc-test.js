@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.12
+// @version      1.0.13
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -488,8 +488,7 @@
       } else {
         const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300)).catch(()=>[]);
 
-        const pointsRaw = buildChainTimeline(attacks, startTs);
-        const points = spreadEqualTimes(pointsRaw); // << distribute same-second hits
+        const points = buildChainTimeline(attacks, startTs);
         refs.chartCanvas.parentElement.style.display = "";
         renderChart(points);
 
@@ -510,86 +509,75 @@
     } catch (e) { console.error(e); toast(e.message || "error"); }
   }
 
+  // Build strictly incremental timeline: y = hit #1..N, x = earliest timestamp for that link
   function buildChainTimeline(attacks, startTsSec) {
-  const startMs = startTsSec * 1000;
+    const startMs = startTsSec * 1000;
 
-  // Build earliest timestamp per chain link (authoritative when present)
-  const byLink = new Map(); // link -> earliest ms
-  let sawLink = false;
+    // link -> earliest time (ms)
+    const linkMinTs = new Map();
+    let maxLink = 0;
 
-  for (const a of attacks) {
-    const link = Number(a.chain ?? a.chain_link ?? a.modifiers?.chain);
-    const tEnd = Number(a.timestamp_ended ?? a.timestamp ?? 0);
-    const tStart = Number(a.timestamp_started ?? a.timestamp ?? 0);
-    const t = (tEnd || tStart) * 1000;
-    if (Number.isFinite(link) && link > 0 && t) {
-      sawLink = true;
-      const prev = byLink.get(link);
-      if (prev == null || t < prev) byLink.set(link, t);
+    for (const a of attacks) {
+      const link = Number(a.chain ?? a.chain_link ?? a.modifiers?.chain);
+      if (!Number.isFinite(link) || link <= 0) continue;
+
+      const ts = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
+      if (!Number.isFinite(ts) || ts <= 0) continue;
+
+      const ms = ts * 1000;
+      const prev = linkMinTs.get(link);
+      if (prev == null || ms < prev) linkMinTs.set(link, ms);
+      if (link > maxLink) maxLink = link;
     }
+
+    // Nothing? return just the start anchor.
+    if (maxLink === 0) return [{ t: startMs, y: 0 }];
+
+    // Points: 0 at start, then 1..maxLink in order.
+    const pts = [{ t: startMs, y: 0 }];
+    for (let l = 1; l <= maxLink; l++) {
+      let t = linkMinTs.get(l);
+      // If a link is missing (rare: pagination edge), nudge 1ms after previous so series stays monotone.
+      if (!t) t = pts[pts.length - 1].t + 1;
+      pts.push({ t, y: l });
+    }
+
+    // Spread clusters where many hits share the exact same second.
+    return spreadWithinSecond(pts);
   }
 
-  let pts = [];
-  if (sawLink) {
-    // Sort by time first; for ties, sort by link so y is non-decreasing
-    const entries = Array.from(byLink.entries()).map(([y, t]) => ({ y, t }));
-    entries.sort((a, b) => (a.t - b.t) || (a.y - b.y));
-    pts = entries; // one point per hit
-  } else {
-    // Fallback: count hits by respect if link data is missing
-    const rows = attacks
-      .map(a => ({
-        t: (Number(a.timestamp_ended ?? a.timestamp ?? 0) || Number(a.timestamp_started ?? 0)) * 1000,
-        hit: Number(a.respect ?? a.respect_gain ?? a.modifiers?.respect ?? 0) > 0
-      }))
-      .filter(r => r.t && r.hit)
-      .sort((a,b) => a.t - b.t);
-    let cum = 0;
-    pts = rows.map(r => ({ t: r.t, y: ++cum }));
-  }
+  // Distribute hits that share the same *second* across that second so X is strictly increasing.
+  function spreadWithinSecond(pts) {
+    if (!pts || pts.length < 3) return pts || [];
 
-  // Anchor series at start (0 hits)
-  if (!pts.length || pts[0].y > 0) pts.unshift({ t: startMs, y: 0 });
-
-  // Spread same-second hits a few ms apart so the line doesn’t “jump sideways”
-  pts = spreadEqualTimes(pts);
-
-  // Guard: ensure y never decreases (just in case of weird data)
-  for (let i = 1; i < pts.length; i++) if (pts[i].y < pts[i-1].y) pts[i].y = pts[i-1].y;
-
-  return pts;
-}
-
-  // Distribute multiple hits that share the same second across that second
-  function spreadEqualTimes(points) {
-    if (!points || points.length < 2) return points || [];
-    const out = points.slice();
-    let i = 0;
-    while (i < out.length) {
+    let i = 1; // skip anchor at index 0
+    while (i < pts.length) {
+      const sec = Math.floor(pts[i].t / 1000);
       let j = i + 1;
-      while (j < out.length && out[j].t === out[i].t) j++;
-      const span = j - i;
-      if (span > 1) {
-        const base = out[i].t;
-        const step = Math.max(1, Math.floor(1000 / span)); // at least 1ms spacing
-        for (let k = i; k < j; k++) out[k].t = base + (k - i) * step;
+      while (j < pts.length && Math.floor(pts[j].t / 1000) === sec) j++;
+
+      const count = j - i;
+      if (count > 1) {
+        const base = Math.max(pts[i - 1].t + 1, sec * 1000);
+        const end  = sec * 1000 + 999;
+        const step = Math.max(1, Math.floor((end - base) / count));
+        for (let k = 0; k < count; k++) {
+          pts[i + k].t = base + k * step;
+          if (pts[i + k].t <= pts[i + k - 1]?.t) pts[i + k].t = pts[i + k - 1].t + 1; // guard
+        }
       }
       i = j;
     }
-    return out;
+    return pts;
   }
 
   // Find the first time each threshold is reached (no interpolation needed once we have per-hit points; times are unique after spread)
   function computeThresholdMoments(points, thresholds) {
-    const out = [];
-    if (!points || points.length === 0) return thresholds.map(th => ({ th, ts: null }));
-    let idx = 0;
-    for (const th of thresholds) {
-      while (idx < points.length && points[idx].y < th) idx++;
-      out.push({ th, ts: idx < points.length ? points[idx].t : null });
-    }
-    return out;
+    // points are 0..N where points[y].t is the time for hit #y (index 0 is anchor)
+    const tsByHit = new Map(points.map(p => [p.y, p.t]));
+    return thresholds.map(th => ({ th, ts: tsByHit.get(th) ?? null }));
   }
+
 
   // Chart (time on X, chain hit # on Y)
   function renderChart(points) {
