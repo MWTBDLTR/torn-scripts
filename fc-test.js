@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.5
+// @version      1.1.6
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -644,11 +644,79 @@
     refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
   }
 
-  // ---- Normalize chainreport / stats payload into a consistent shape ----
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function toFloat(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // Works with v2 (details/attackers/non_attackers) and legacy objects
   function getChainStats(report) {
-    const cr = report && report.chainreport ? report.chainreport : report || {};
+    const cr = report?.chainreport ?? report ?? {};
+    const isV2 =
+      cr &&
+      typeof cr === "object" &&
+      ("details" in cr || Array.isArray(cr.attackers));
+
+    if (isV2) {
+      const d = cr.details || {};
+      const factionID = num(cr.faction_id ?? cr.factionID);
+      const start = num(cr.start); // seconds
+      const end = num(cr.end); // seconds
+      const chain = num(d.chain);
+      const respect = toFloat(d.respect);
+      const members = num(d.members);
+      const targets = num(d.targets);
+      const warhits = num(d.war);
+      const besthit = toFloat(d.best);
+      const leave = num(d.leave);
+      const mug = num(d.mug);
+      const hospitalize = num(d.hospitalize);
+      const assists = num(d.assists);
+      const retaliations = num(d.retaliations);
+      const overseas = num(d.overseas);
+      const draws = num(d.draws);
+      const escapes = num(d.escapes);
+      const losses = num(d.losses);
+
+      // Flatten attackers[] + non_attackers[] -> unified array for your tables
+      const attackersArr = Array.isArray(cr.attackers) ? cr.attackers : [];
+      const nonAttArr = Array.isArray(cr.non_attackers) ? cr.non_attackers : [];
+      const membersArray = normalizeV2Members(
+        attackersArr,
+        nonAttArr,
+        factionID
+      );
+
+      return {
+        factionID,
+        chain,
+        start,
+        end,
+        leave,
+        mug,
+        hospitalize,
+        assists,
+        overseas,
+        draws,
+        escapes,
+        losses,
+        respect,
+        targets,
+        warhits,
+        besthit,
+        retaliations,
+        members, // count reported by the API
+        bonuses: Array.isArray(cr.bonuses) ? cr.bonuses : [],
+        membersArray,
+      };
+    }
+
+    // Legacy fallback
     const s = cr && typeof cr.stats === "object" ? cr.stats : cr;
-    const num = (v) => Number(v ?? 0);
     return {
       factionID: num(s.factionID),
       chain: num(s.chain),
@@ -662,18 +730,115 @@
       draws: num(s.draws),
       escapes: num(s.escapes),
       losses: num(s.losses),
-      respect: Number(s.respect ?? 0),
+      respect: toFloat(s.respect),
       targets: num(s.targets),
-      warhits: num(s.warhits),
-      besthit: Number(s.besthit ?? 0),
+      warhits: num(s.warhits ?? s.war),
+      besthit: toFloat(s.besthit ?? s.best),
       retaliations: num(s.retaliations),
-      members: cr.members || s.members || null,
-      bonuses: cr.bonuses || s.bonuses || null,
+      bonuses: Array.isArray(cr?.bonuses) ? cr.bonuses : [],
+      membersArray: normalizeMembersLegacy(cr?.members || s?.members || {}),
     };
+  }
+
+  function normalizeV2Members(attackersArr, nonAttackersArr, factionID) {
+    const rows = [];
+
+    for (const a of attackersArr) {
+      const att = a?.attacks || {};
+      const rsp = a?.respect || {};
+      rows.push({
+        userID: num(a.id),
+        level: null,
+        factionID: factionID || null,
+
+        attacks: num(att.total),
+        respect: toFloat(rsp.total),
+        avg: toFloat(rsp.average),
+        besthit: toFloat(rsp.best),
+
+        leave: num(att.leave),
+        mug: num(att.mug),
+        hospitalize: num(att.hospitalize),
+        assists: num(att.assists),
+        retaliations: num(att.retaliations),
+        overseas: num(att.overseas),
+        draws: num(att.draws),
+        escapes: num(att.escapes),
+        losses: num(att.losses),
+        warhits: num(att.war),
+        bonuses: num(att.bonuses),
+      });
+    }
+
+    for (const uid of nonAttackersArr || []) {
+      rows.push({
+        userID: num(uid),
+        level: null,
+        factionID: factionID || null,
+
+        attacks: 0,
+        respect: 0,
+        avg: 0,
+        besthit: 0,
+
+        leave: 0,
+        mug: 0,
+        hospitalize: 0,
+        assists: 0,
+        retaliations: 0,
+        overseas: 0,
+        draws: 0,
+        escapes: 0,
+        losses: 0,
+        warhits: 0,
+        bonuses: 0,
+      });
+    }
+    return rows;
+  }
+
+  function normalizeMembersLegacy(membersObj) {
+    const arr = [];
+    for (const m of Object.values(membersObj || {})) {
+      arr.push({
+        userID: num(m.userID ?? m.id),
+        level: num(m.level),
+        factionID: num(m.factionID),
+
+        attacks: num(m.attacks),
+        respect: toFloat(m.respect),
+        avg: toFloat(m.avg ?? m.average ?? 0),
+        besthit: toFloat(m.best ?? m.besthit ?? 0),
+
+        leave: num(m.leave),
+        mug: num(m.mug),
+        hospitalize: num(m.hosp ?? m.hospitalize),
+        assists: num(m.assist ?? m.assists),
+        retaliations: num(m.retal ?? m.retaliations),
+        overseas: num(m.overseas),
+        draws: num(m.draw ?? m.draws),
+        escapes: num(m.escape ?? m.escapes),
+        losses: num(m.loss ?? m.losses),
+        warhits: num(m.war ?? m.warhits),
+        bonuses: num(m.bonus ?? m.bonuses),
+      });
+    }
+    return arr;
+  }
+
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function toFloat(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   }
 
   async function openChainDetail(chainId, startTs, endTs) {
     if (!ensureKey()) return;
+
+    // Prime UI
     refs.histDetail.style.display = "";
     refs.hdId.textContent = String(chainId);
     refs.hdWindow.textContent = `${fmtTime(startTs)} → ${fmtTime(endTs)}`;
@@ -683,89 +848,116 @@
     toast(`loading chain #${chainId}…`);
 
     try {
+      // 1) Chain report (v2-friendly) → stats
       const report = await cachedFetchChainReport(chainId).catch(() => null);
+
       let expectedLen = null;
+      let ourFactionId = null;
+
       if (report) {
         const stats = getChainStats(report);
-        const sum =
-          (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
-        if (stats.chain && sum !== stats.chain) {
-          console.warn(
-            `Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${stats.chain}`
-          );
-        }
+
+        // Respect (2dp if numeric)
         refs.hdResp.textContent = Number.isFinite(stats.respect)
           ? stats.respect.toFixed(2)
-          : String(stats.respect);
+          : String(stats.respect ?? "—");
+
         expectedLen = Number(stats.chain) || null;
+
+        // Prefer faction id from report; fall back to resolver
+        ourFactionId =
+          Number(stats.factionID || STATE.factionIdOverride || 0) || null;
+
+        // Optional sanity check
+        const sum =
+          (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
+        if (expectedLen && sum !== expectedLen) {
+          console.warn(
+            `Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${expectedLen}`
+          );
+        }
       } else {
         refs.hdResp.textContent = "—";
       }
 
+      // 2) Public-key mode: summary only
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
-        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">Per-hit timeline requires a private key with faction attacks access. Showing summary only.</td></tr>`;
-      } else {
-        // Resolve our faction id (attacker we care about)
-        const ourFactionId = await resolveOurFactionId();
-
-        // Fetch attacks as before
-        const attacks = await cachedFetchAttacksForChain(
-          chainId,
-          startTs,
-          withEndBuffer(endTs, 300),
-          expectedLen
-        ).catch(() => []);
-
-        // (optional) TEMP DEBUG stays here if you want logs
-
-        // Build timeline ONLY from hits where attacker_faction == ourFactionId
-        const points = buildChainTimeline(
-          attacks,
-          startTs,
-          expectedLen || null,
-          ourFactionId
-        );
-
-        if (!points || points.length <= 1) {
-          refs.chartCanvas.parentElement.style.display = "none";
-          refs.hdLen.textContent = "0";
-          refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-            No per-hit data parsed for this chain window (no qualifying attacks for our faction).
-          </td></tr>`;
-          toast(`chain #${chainId}: no per-hit data`);
-          return;
-        }
-
-        refs.chartCanvas.parentElement.style.display = "";
-        renderChart(points);
-
-        const finalLen = points[points.length - 1].y;
-        refs.hdLen.textContent = String(finalLen);
-
-        // thresholds table (still includes final)
-        const thresholdsForTable = Array.from(
-          new Set([...STATE.thresholds, finalLen])
-        ).sort((a, b) => a - b);
-        const crossed = computeThresholdMoments(points, thresholdsForTable);
-        refs.hdThresholdsBody.innerHTML = crossed
-          .map(
-            (c) => `
-          <tr>
-            <td class="tce-mono">${c.th}${
-              c.th === finalLen ? " (final)" : ""
-            }</td>
-            <td class="tce-mono">${
-              c.ts ? new Date(c.ts).toLocaleString() : "—"
-            }</td>
-            <td class="tce-mono">${
-              c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
-            }</td>
-          </tr>
-        `
-          )
-          .join("");
+        refs.hdLen.textContent =
+          expectedLen != null ? String(expectedLen) : "—";
+        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
+        Per-hit timeline requires a private key with faction attacks access. Showing summary only.
+      </td></tr>`;
+        toast(`chain #${chainId} summary ready`);
+        return;
       }
+
+      // If faction id still unknown, resolve it now
+      if (!ourFactionId) {
+        try {
+          ourFactionId = await resolveOurFactionId();
+        } catch {}
+        if (!Number.isFinite(ourFactionId)) ourFactionId = null;
+      }
+
+      // 3) Fetch all outgoing successful attacks for this window (v2 paginated helper)
+      //    NOTE: requires fetchAttacksWindow(fromSec, toSec, targetHits, expectedLen)
+      const attacks = await fetchAttacksWindow(
+        startTs,
+        withEndBuffer(endTs, 300),
+        /*targetHits*/ null,
+        expectedLen
+      ).catch(() => []);
+
+      // 4) Build timeline ONLY for hits where attacker_faction == ourFactionId
+      const points = buildChainTimeline(
+        attacks,
+        startTs,
+        expectedLen || null,
+        ourFactionId
+      );
+
+      if (!points || points.length <= 1) {
+        refs.chartCanvas.parentElement.style.display = "none";
+        refs.hdLen.textContent =
+          expectedLen != null ? String(expectedLen) : "0";
+        refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
+        No per-hit data parsed for this chain window (no qualifying attacks for our faction).
+      </td></tr>`;
+        toast(`chain #${chainId}: no per-hit data`);
+        return;
+      }
+
+      // 5) Render chart (your existing function)
+      refs.chartCanvas.parentElement.style.display = "";
+      renderChart(points);
+
+      // Final len shown: prefer expectedLen if known, else use last y
+      const finalLen =
+        expectedLen != null ? expectedLen : points[points.length - 1]?.y ?? 0;
+      refs.hdLen.textContent = String(finalLen);
+
+      // Thresholds table (keep your existing style/logic)
+      const thresholdsForTable = Array.from(
+        new Set([...STATE.thresholds, finalLen])
+      ).sort((a, b) => a - b);
+      const crossed = computeThresholdMoments(points, thresholdsForTable);
+      refs.hdThresholdsBody.innerHTML = crossed
+        .map(
+          (c) => `
+      <tr>
+        <td class="tce-mono">${c.th}${c.th === finalLen ? " (final)" : ""}</td>
+        <td class="tce-mono">${
+          c.ts ? new Date(c.ts).toLocaleString() : "—"
+        }</td>
+        <td class="tce-mono">${
+          c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
+        }</td>
+      </tr>
+    `
+        )
+        .join("");
+
       toast(`chain #${chainId} ready`);
     } catch (e) {
       console.error(e);
@@ -774,34 +966,50 @@
   }
 
   function getLinkNumber(row, expectedLen = null) {
+    // Prefer explicit field if present (legacy)
     const v1 = Number(row.chain_link);
     if (Number.isFinite(v1) && v1 > 0) return v1;
 
-    const v2 = Number(row.modifiers?.chain);
+    // top-level `chain` = chain counter at attack time
+    const v2 = Number(row.chain);
     if (Number.isFinite(v2) && v2 > 0) {
-      if (!expectedLen || v2 <= expectedLen * 1.2) return v2;
-      return NaN;
-    }
-
-    const v3 = Number(row.chain);
-    if (Number.isFinite(v3) && v3 > 0) {
       const hardCap = 100000;
-      if (v3 > hardCap) return NaN;
-      if (!expectedLen || v3 <= expectedLen * 1.2) return v3;
+      if (v2 > hardCap) return NaN;
+      if (!expectedLen || v2 <= expectedLen * 1.2) return v2;
     }
 
+    // Do NOT read modifiers.chain (that is a *respect* modifier).
     return NaN;
   }
-  // === Timestamp helper ===
-  // Prefer when the attack actually ended; fall back to started.
+
   function getAttackTimestamp(row) {
-    const te = Number(row.timestamp_ended);
+    // Prefer when the attack actually ended; fall back to started.
+    const te =
+      Number(row.ended) ??
+      Number(row.timestamp_ended) ??
+      Number(row.timestamp) ??
+      NaN;
     if (Number.isFinite(te) && te > 0) return te;
 
-    const ts = Number(row.timestamp_started);
+    const ts =
+      Number(row.started) ??
+      Number(row.timestamp_started) ??
+      Number(row.timestamp) ??
+      NaN;
     if (Number.isFinite(ts) && ts > 0) return ts;
 
     return NaN;
+  }
+
+  function getAttackerFactionId(row) {
+    // attacker.faction.id ; legacy may flatten as attacker_faction or attacker_faction_id
+    const v =
+      row?.attacker?.faction?.id ??
+      row.attacker_faction ??
+      row.attacker_faction_id ??
+      null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
   }
 
   // --- Timeline for OUR faction hits only (attacker_faction == OUR_FACTION_ID) ---
@@ -817,7 +1025,11 @@
 
     for (const a of attacks) {
       // Only count hits made BY our faction
-      if (ourFactionId && Number(a.attacker_faction) !== ourFactionId) continue;
+      if (ourFactionId) {
+        const atkFid = getAttackerFactionId(a);
+        if (!Number.isFinite(atkFid) || atkFid !== Number(ourFactionId))
+          continue;
+      }
 
       const link = getLinkNumber(a, expectedLen); // >0 only
       if (!Number.isFinite(link) || link <= 0) continue;
@@ -938,9 +1150,11 @@
       (STATE.apiKey && STATE.apiKey.toLowerCase() === "public")
     );
   }
+
   function keyParam() {
     return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
   }
+
   function factionUrl(selection, extra = "") {
     const base = apiBase();
     if (isPublicMode()) {
@@ -958,6 +1172,7 @@
       )}?selections=${selection}&key=${keyParam()}${extra}`;
     return `${base}/faction/?selections=${selection}&key=${keyParam()}${extra}`;
   }
+
   function ensureKey() {
     if (!STATE.apiKey) {
       configure();
@@ -972,6 +1187,7 @@
     }
     return true;
   }
+
   function httpGetJSON(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -1141,6 +1357,7 @@
       r.onerror = () => reject(r.error);
     });
   }
+
   async function idbPut(store, key, value) {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -1151,6 +1368,7 @@
       tx.onerror = () => reject(tx.error);
     });
   }
+
   async function idbClear(store) {
     const d = await db();
     return new Promise((resolve, reject) => {
@@ -1172,7 +1390,6 @@
     try {
       await idbClear("attacks");
     } catch {}
-    // As a belt-and-suspenders reset, drop the DB entirely:
     await idbDeleteAll();
   }
 
@@ -1181,6 +1398,7 @@
     const fid = STATE.factionIdOverride || "implicit";
     return `${mode}:${fid}`;
   }
+
   async function cachedFetchChains(force = false) {
     const key = chainsCacheKey();
     const cached = await idbGet("chainsList", key);
@@ -1191,39 +1409,81 @@
     await idbPut("chainsList", key, { data: fresh, ts: now });
     return fresh;
   }
+
   function fetchChains() {
-    const url = factionUrl("chains");
-    return httpGetJSON(url)
-      .catch((e) => {
-        const msg = String(e.message || e);
-        if (msg.startsWith("7:"))
-          throw new Error(
-            "7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings."
-          );
-        throw e;
-      })
-      .then((json) => {
-        const out = [];
-        const src = json?.chains || json;
-        if (src && typeof src === "object") {
-          for (const [keyId, rec] of Object.entries(src)) {
-            let chain_id = Number(keyId);
-            if (!Number.isFinite(chain_id))
-              chain_id = Number(rec?.chain_id || rec?.id || NaN);
-            if (!Number.isFinite(chain_id)) continue;
-            out.push({
-              chain_id,
-              start: rec.start || rec.started || rec.timestamp || 0,
-              end: rec.end || rec.ended || rec.timestamp_end || 0,
-              chain:
-                rec.chain_count || rec.length || rec.hits || rec.chain || 0,
-              respect: rec.respect || 0,
-            });
+    const firstUrl = factionUrl("chains");
+    return (async () => {
+      const out = [];
+      const seen = new Set();
+      let url = firstUrl;
+      let safety = 0;
+
+      while (url && safety < 100) {
+        safety += 1;
+
+        let json;
+        try {
+          json = await httpGetJSON(url);
+        } catch (e) {
+          const msg = String(e?.message || e);
+          if (msg.startsWith("7:")) {
+            throw new Error(
+              "7: Incorrect ID-entity relation. In public mode set Faction ID override in Settings, or use a key where you're a member in the faction."
+            );
+          }
+          throw e;
+        }
+
+        // Support both the new array payload and legacy object-map payloads
+        const src = Array.isArray(json?.chains)
+          ? json.chains
+          : json?.chains && typeof json.chains === "object"
+          ? Object.values(json.chains)
+          : Array.isArray(json)
+          ? json
+          : [];
+
+        for (const rec of src) {
+          // Normalize fields (id → chain_id)
+          let chain_id = Number(rec?.chain_id ?? rec?.id ?? NaN);
+          if (!Number.isFinite(chain_id)) continue;
+
+          const start = rec.start ?? rec.started ?? rec.timestamp ?? 0;
+          const end = rec.end ?? rec.ended ?? rec.timestamp_end ?? 0;
+          const chain =
+            rec.chain_count ?? rec.length ?? rec.hits ?? rec.chain ?? 0;
+          const respect = rec.respect != null ? Number(rec.respect) : 0;
+
+          // De-dupe defensively across pages
+          const key = `${chain_id}|${start}|${end}|${chain}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            out.push({ chain_id, start, end, chain, respect });
           }
         }
-        out.sort((a, b) => (b.end || 0) - (a.end || 0));
-        return out.slice(0, 100);
-      });
+
+        // Follow pagination via _metadata.links.next (absolute or relative)
+        const next = json?._metadata?.links?.next;
+        if (!next) break;
+        try {
+          if (/^https?:\/\//i.test(next)) {
+            url = next;
+          } else {
+            const base = new URL(url);
+            url = next.startsWith("/")
+              ? `${base.origin}${next}`
+              : new URL(next, base).href;
+          }
+        } catch {
+          // Stop if the next link is malformed
+          break;
+        }
+      }
+
+      // Keep your original ordering & cap
+      out.sort((a, b) => (b.end || 0) - (a.end || 0));
+      return out.slice(0, 100);
+    })();
   }
 
   async function cachedFetchChainReport(chainId) {
@@ -1234,11 +1494,15 @@
     await idbPut("chainReports", key, { data, ts: Date.now() });
     return data;
   }
+
   function fetchChainReport(chainId) {
-    const url = `${apiBase()}/torn/${encodeURIComponent(
+    // v2: /v2/faction/{chainId}/chainreport
+    const url = `${apiBase()}/v2/faction/${encodeURIComponent(
       chainId
-    )}?selections=chainreport&key=${keyParam()}`;
-    return httpGetJSON(url);
+    )}/chainreport?key=${keyParam()}`;
+    return httpGetJSON(url).then((j) =>
+      j?.chainreport ? { chainreport: j.chainreport } : j
+    );
   }
 
   async function cachedFetchAttacksForChain(
@@ -1274,11 +1538,12 @@
   function countUniqueLinks(rows) {
     const s = new Set();
     for (const r of rows) {
-      // Only attacks where OUR faction is the attacker
-      if (OUR_FACTION_ID && Number(r.attacker_faction) !== OUR_FACTION_ID)
-        continue;
-
-      const l = getLinkNumber(r, null); // chain > 0 only
+      if (OUR_FACTION_ID) {
+        const atkFid = getAttackerFactionId(r);
+        if (!Number.isFinite(atkFid) || atkFid !== Number(OUR_FACTION_ID))
+          continue;
+      }
+      const l = getLinkNumber(r, null);
       if (Number.isFinite(l) && l > 0) s.add(l);
     }
     return s.size;
