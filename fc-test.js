@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.2
+// @version      1.1.3
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -33,43 +33,94 @@
 
   GM_registerMenuCommand("Torn Chain → Configure…", configure);
   GM_registerMenuCommand("Torn Chain → Test API / Key", testKey);
-  GM_registerMenuCommand("Torn Chain → Reset live rate history", () => { HISTORY.length = 0; toast("Live rate history reset."); });
-  GM_registerMenuCommand("Torn Chain → Clear Chain Cache", async () => { await cacheClearAll(); toast("Cache cleared."); });
+  GM_registerMenuCommand("Torn Chain → Reset live rate history", () => {
+    HISTORY.length = 0;
+    toast("Live rate history reset.");
+  });
+  GM_registerMenuCommand("Torn Chain → Clear Chain Cache", async () => {
+    await cacheClearAll();
+    toast("Cache cleared.");
+  });
 
   function configure() {
-    const k = prompt('Enter your Torn API key (type "public" to use public mode):', STATE.apiKey || "");
+    const k = prompt(
+      'Enter your Torn API key (type "public" to use public mode):',
+      STATE.apiKey || ""
+    );
     if (k === null) return;
     STATE.apiKey = (k || "").trim();
     GM_setValue("torn_chain_eta_apiKey", STATE.apiKey);
-    STATE.usePublicKey = (STATE.apiKey.toLowerCase() === "public");
+    STATE.usePublicKey = STATE.apiKey.toLowerCase() === "public";
     GM_setValue("torn_chain_eta_usePublicKey", STATE.usePublicKey);
 
-    const fid = prompt("Faction ID (REQUIRED in public mode; optional otherwise):", STATE.factionIdOverride || "");
+    const fid = prompt(
+      "Faction ID (REQUIRED in public mode; optional otherwise):",
+      STATE.factionIdOverride || ""
+    );
     if (fid !== null) {
       STATE.factionIdOverride = (fid || "").trim();
       GM_setValue("torn_chain_eta_factionIdOverride", STATE.factionIdOverride);
     }
 
-    const t = prompt(`Comma-separated thresholds:`, STATE.thresholds.join(", "));
+    const t = prompt(
+      `Comma-separated thresholds:`,
+      STATE.thresholds.join(", ")
+    );
     if (t !== null) {
       const arr = (t || "")
-        .split(",").map(s => parseInt(s.trim(), 10))
-        .filter(n => Number.isFinite(n) && n > 0)
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => Number.isFinite(n) && n > 0)
         .sort((a, b) => a - b);
-      if (arr.length) { STATE.thresholds = arr; GM_setValue("torn_chain_eta_thresholds", STATE.thresholds); }
+      if (arr.length) {
+        STATE.thresholds = arr;
+        GM_setValue("torn_chain_eta_thresholds", STATE.thresholds);
+      }
     }
 
     const p = prompt(`API poll interval (5–60s):`, String(STATE.pollSec));
-    if (p !== null) { STATE.pollSec = clampInt(parseInt(p, 10), 5, 60, STATE.pollSec); GM_setValue("torn_chain_eta_pollSec", STATE.pollSec); }
+    if (p !== null) {
+      STATE.pollSec = clampInt(parseInt(p, 10), 5, 60, STATE.pollSec);
+      GM_setValue("torn_chain_eta_pollSec", STATE.pollSec);
+    }
 
-    const w = prompt(`Rate window (1–${STATE.historyMaxMin} minutes):`, String(STATE.rateWindowMin));
-    if (w !== null) { STATE.rateWindowMin = clampInt(parseInt(w, 10), 1, STATE.historyMaxMin, STATE.rateWindowMin); GM_setValue("torn_chain_eta_rateWindowMin", STATE.rateWindowMin); }
+    const w = prompt(
+      `Rate window (1–${STATE.historyMaxMin} minutes):`,
+      String(STATE.rateWindowMin)
+    );
+    if (w !== null) {
+      STATE.rateWindowMin = clampInt(
+        parseInt(w, 10),
+        1,
+        STATE.historyMaxMin,
+        STATE.rateWindowMin
+      );
+      GM_setValue("torn_chain_eta_rateWindowMin", STATE.rateWindowMin);
+    }
 
-    const mp = prompt(`Max attacks pages per chain (safety cap, default ${STATE.maxAttackPages}, 10–100):`, String(STATE.maxAttackPages));
-    if (mp !== null) { STATE.maxAttackPages = clampInt(parseInt(mp, 10), 10, 100, STATE.maxAttackPages); GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages); }
+    const mp = prompt(
+      `Max attacks pages per chain (safety cap, default ${STATE.maxAttackPages}, 10–100):`,
+      String(STATE.maxAttackPages)
+    );
+    if (mp !== null) {
+      STATE.maxAttackPages = clampInt(
+        parseInt(mp, 10),
+        10,
+        100,
+        STATE.maxAttackPages
+      );
+      GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages);
+    }
 
-    const ct = prompt(`Chains list cache TTL in minutes (default 2):`, String(STATE.chainsTTLms / 60000));
-    if (ct !== null) { const min = clampInt(parseInt(ct, 10), 1, 15, STATE.chainsTTLms/60000); STATE.chainsTTLms = min * 60000; GM_setValue("torn_chain_eta_chainsTTLms", STATE.chainsTTLms); }
+    const ct = prompt(
+      `Chains list cache TTL in minutes (default 2):`,
+      String(STATE.chainsTTLms / 60000)
+    );
+    if (ct !== null) {
+      const min = clampInt(parseInt(ct, 10), 1, 15, STATE.chainsTTLms / 60000);
+      STATE.chainsTTLms = min * 60000;
+      GM_setValue("torn_chain_eta_chainsTTLms", STATE.chainsTTLms);
+    }
 
     toast("Settings saved.");
   }
@@ -77,18 +128,30 @@
   async function testKey() {
     try {
       if (isPublicMode()) {
-        if (!STATE.factionIdOverride) throw new Error("Public mode: set Faction ID in Settings.");
+        if (!STATE.factionIdOverride)
+          throw new Error("Public mode: set Faction ID in Settings.");
         await httpGetJSON(factionUrl("chain"));
         await httpGetJSON(factionUrl("chains"));
-        alert(`Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`);
+        alert(
+          `Public mode OK.\nFaction ID: ${STATE.factionIdOverride}\nNote: per-hit attacks are not available in public mode (chart will be hidden).`
+        );
         return;
       }
       const u = await fetchUserProfile();
-      alert(`Key OK.\nPlayer: ${u.name} [${u.player_id}]\nFaction: ${u.faction_name || "(none)"} (${u.faction_id || 0})`);
-    } catch (e) { alert(`Key test failed: ${e.message || e}`); }
+      alert(
+        `Key OK.\nPlayer: ${u.name} [${u.player_id}]\nFaction: ${
+          u.faction_name || "(none)"
+        } (${u.faction_id || 0})`
+      );
+    } catch (e) {
+      alert(`Key test failed: ${e.message || e}`);
+    }
   }
 
-  function clampInt(n, lo, hi, dflt) { if (!Number.isFinite(n)) return dflt; return Math.max(lo, Math.min(hi, n)); }
+  function clampInt(n, lo, hi, dflt) {
+    if (!Number.isFinite(n)) return dflt;
+    return Math.max(lo, Math.min(hi, n));
+  }
 
   // ---------- Styles / UI (trimmed to essentials for brevity) ----------
   GM_addStyle(`
@@ -207,16 +270,30 @@
 
   (function makeDraggable(handleId, wrap) {
     const handle = root.querySelector("#" + handleId);
-    let dragging = false, sx=0, sy=0, ox=0, oy=0;
-    handle.addEventListener("mousedown", (e)=>{ dragging=true; sx=e.clientX; sy=e.clientY; const r=wrap.getBoundingClientRect(); ox=r.left; oy=r.top; e.preventDefault(); });
-    window.addEventListener("mousemove",(e)=>{
-      if(!dragging) return;
-      const dx=e.clientX-sx, dy=e.clientY-sy;
-      wrap.style.left = Math.max(0, ox+dx) + "px";
-      wrap.style.top  = Math.max(0, oy+dy) + "px";
-      wrap.style.right = "auto"; wrap.style.position="fixed";
+    let dragging = false,
+      sx = 0,
+      sy = 0,
+      ox = 0,
+      oy = 0;
+    handle.addEventListener("mousedown", (e) => {
+      dragging = true;
+      sx = e.clientX;
+      sy = e.clientY;
+      const r = wrap.getBoundingClientRect();
+      ox = r.left;
+      oy = r.top;
+      e.preventDefault();
     });
-    window.addEventListener("mouseup", ()=> dragging=false);
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - sx,
+        dy = e.clientY - sy;
+      wrap.style.left = Math.max(0, ox + dx) + "px";
+      wrap.style.top = Math.max(0, oy + dy) + "px";
+      wrap.style.right = "auto";
+      wrap.style.position = "fixed";
+    });
+    window.addEventListener("mouseup", () => (dragging = false));
   })("tceDrag", root);
 
   // Refs
@@ -258,13 +335,23 @@
   };
 
   function tctExportHistoryCSV() {
-    const rows = [["id","start","end","duration_sec","length","respect"]];
-    (window.HIST_VIEW || HIST_VIEW || []).forEach(r => rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect]));
-    const csv = rows.map(r => r.map(v => {
-      const s = String(v);
-      return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g,'""')}"` : s;
-    }).join(",")).join("\n");
-    const blob = new Blob([csv], {type:"text/csv"});
+    const rows = [["id", "start", "end", "duration_sec", "length", "respect"]];
+    (window.HIST_VIEW || HIST_VIEW || []).forEach((r) =>
+      rows.push([r.id, r.start, r.end, r.dur, r.len, r.respect])
+    );
+    const csv = rows
+      .map((r) =>
+        r
+          .map((v) => {
+            const s = String(v);
+            return s.includes(",") || s.includes('"')
+              ? `"${s.replace(/"/g, '""')}"`
+              : s;
+          })
+          .join(",")
+      )
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -275,11 +362,16 @@
     URL.revokeObjectURL(url);
   }
 
-  function adjustPanelWidth(which){
+  function adjustPanelWidth(which) {
     if (which === "hist") {
-      const w = Math.min(Math.max(760, Math.floor(window.innerWidth * 0.9)), 1000);
+      const w = Math.min(
+        Math.max(760, Math.floor(window.innerWidth * 0.9)),
+        1000
+      );
       root.style.width = `${w}px`;
-    } else { root.style.width = "420px"; }
+    } else {
+      root.style.width = "420px";
+    }
   }
   window.addEventListener("resize", () => {
     if (refs.panelHist.style.display !== "none") adjustPanelWidth("hist");
@@ -305,48 +397,98 @@
   refs.histMinLen.addEventListener("change", applyHistoryFilters);
   refs.histSort.addEventListener("change", applyHistoryFilters);
   refs.histOrder.addEventListener("change", applyHistoryFilters);
-  refs.histPageSize.addEventListener("change", () => { histPage = 1; renderHistoryTable(); });
-  refs.histPrev.addEventListener("click", () => { if (histPage > 1){ histPage--; renderHistoryTable(); }});
+  refs.histPageSize.addEventListener("change", () => {
+    histPage = 1;
+    renderHistoryTable();
+  });
+  refs.histPrev.addEventListener("click", () => {
+    if (histPage > 1) {
+      histPage--;
+      renderHistoryTable();
+    }
+  });
   refs.histNext.addEventListener("click", () => {
     const totalPages = Math.max(1, Math.ceil(HIST_VIEW.length / getPageSize()));
-    if (histPage < totalPages){ histPage++; renderHistoryTable(); }
+    if (histPage < totalPages) {
+      histPage++;
+      renderHistoryTable();
+    }
   });
   refs.btnExportCSV.addEventListener("click", tctExportHistoryCSV);
-  refs.btnClearCache.addEventListener("click", async () => { await cacheClearAll(); toast("Cache cleared."); });
+  refs.btnClearCache.addEventListener("click", async () => {
+    await cacheClearAll();
+    toast("Cache cleared.");
+  });
 
   // ----------------- Live stats -----------------
   const HISTORY = []; // {t, chain}
   let pollTimer = null;
 
-  function toast(msg) { refs.status.textContent = msg; }
-  function fmtClock(ts) { const d = new Date(ts); const hh=String(d.getHours()).padStart(2,"0"); const mm=String(d.getMinutes()).padStart(2,"0"); return `${hh}:${mm}`; }
-  function fmtTime(sec) { return new Date(sec * 1000).toLocaleString(); }
-  function fmtDeltaMin(mins) { if (!Number.isFinite(mins)) return "—"; if (mins<1) return `${Math.round(mins*60)}s`; const h=Math.floor(mins/60), m=Math.round(mins%60); return h?`${h}h ${m}m`:`${m}m`; }
-  function fmtInt(n) { return Number.isFinite(+n) ? Number(n).toLocaleString() : "—"; }
-  function fmtRespect(r){ return Number.isFinite(+r) ? Number(r).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) : "—"; }
-  function fmtDur(sec){ if (!Number.isFinite(sec)||sec<0) return "—"; const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60); if(h) return `${h}h ${m}m`; if(m) return `${m}m ${s}s`; return `${s}s`; }
-  
-  function withEndBuffer(sec, buf = 300) { // +5 minutes
-    const n = Number(sec);
-    return Number.isFinite(n) ? (n + buf) : sec;
+  function toast(msg) {
+    refs.status.textContent = msg;
+  }
+  function fmtClock(ts) {
+    const d = new Date(ts);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  }
+  function fmtTime(sec) {
+    return new Date(sec * 1000).toLocaleString();
+  }
+  function fmtDeltaMin(mins) {
+    if (!Number.isFinite(mins)) return "—";
+    if (mins < 1) return `${Math.round(mins * 60)}s`;
+    const h = Math.floor(mins / 60),
+      m = Math.round(mins % 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+  }
+  function fmtInt(n) {
+    return Number.isFinite(+n) ? Number(n).toLocaleString() : "—";
+  }
+  function fmtRespect(r) {
+    return Number.isFinite(+r)
+      ? Number(r).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "—";
+  }
+  function fmtDur(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "—";
+    const h = Math.floor(sec / 3600),
+      m = Math.floor((sec % 3600) / 60),
+      s = Math.floor(sec % 60);
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
   }
 
-  function pruneHistory() { const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000; while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift(); }
+  function withEndBuffer(sec, buf = 300) {
+    // +5 minutes
+    const n = Number(sec);
+    return Number.isFinite(n) ? n + buf : sec;
+  }
+
+  function pruneHistory() {
+    const cutoff = Date.now() - STATE.historyMaxMin * 60 * 1000;
+    while (HISTORY.length && HISTORY[0].t < cutoff) HISTORY.shift();
+  }
   function computeRate() {
     pruneHistory();
     const windowMs = STATE.rateWindowMin * 60 * 1000;
     const now = Date.now();
-    const startIdx = HISTORY.findIndex(pt => pt.t >= (now - windowMs));
+    const startIdx = HISTORY.findIndex((pt) => pt.t >= now - windowMs);
     const slice = startIdx === -1 ? HISTORY.slice() : HISTORY.slice(startIdx);
     if (slice.length < 2) return 0;
     const dtMin = (slice[slice.length - 1].t - slice[0].t) / 60000;
-    const dHits = (slice[slice.length - 1].chain - slice[0].chain);
+    const dHits = slice[slice.length - 1].chain - slice[0].chain;
     if (dtMin <= 0 || dHits <= 0) return 0;
     return dHits / dtMin;
   }
   function estimateRows(current, rate, thresholds) {
     const now = Date.now();
-    return thresholds.map(th => {
+    return thresholds.map((th) => {
       const delta = th - current;
       if (delta <= 0) return { th, delta: 0, etaMin: 0, clock: "reached" };
       if (rate > 0) {
@@ -361,35 +503,55 @@
     refs.rate.textContent = rateHPM ? rateHPM.toFixed(2) : "0.00";
     refs.timeout.textContent = timeoutSec ? `${timeoutSec}s` : "—";
     refs.tceWin.textContent = String(STATE.rateWindowMin);
-    const interHitSec = rateHPM > 0 ? (60 / rateHPM) : Infinity;
-    refs.interHit.textContent = Number.isFinite(interHitSec) ? `${Math.round(interHitSec)}s` : "—";
+    const interHitSec = rateHPM > 0 ? 60 / rateHPM : Infinity;
+    refs.interHit.textContent = Number.isFinite(interHitSec)
+      ? `${Math.round(interHitSec)}s`
+      : "—";
     refs.risk.textContent = "";
     refs.risk.className = "tce-small";
     if (timeoutSec && Number.isFinite(interHitSec)) {
-      refs.risk.textContent = interHitSec > timeoutSec ? " • ⚠ avg inter-hit > timeout (risk)" : " • ok";
+      refs.risk.textContent =
+        interHitSec > timeoutSec
+          ? " • ⚠ avg inter-hit > timeout (risk)"
+          : " • ok";
     }
     const rows = estimateRows(chainCurrent, rateHPM, STATE.thresholds);
-    refs.tableBody.innerHTML = rows.map(r => {
-      const dim = r.delta <= 0 ? " tce-row-dim" : "";
-      return `<tr class="${dim}">
+    refs.tableBody.innerHTML = rows
+      .map((r) => {
+        const dim = r.delta <= 0 ? " tce-row-dim" : "";
+        return `<tr class="${dim}">
         <td class="tce-mono">${r.th}</td>
         <td class="tce-mono">${r.delta <= 0 ? "—" : r.delta}</td>
-        <td class="tce-mono">${r.clock}${Number.isFinite(r.etaMin) && r.etaMin>0 ? ` (${fmtDeltaMin(r.etaMin)})` : ""}</td>
+        <td class="tce-mono">${r.clock}${
+          Number.isFinite(r.etaMin) && r.etaMin > 0
+            ? ` (${fmtDeltaMin(r.etaMin)})`
+            : ""
+        }</td>
       </tr>`;
-    }).join("");
+      })
+      .join("");
   }
   function tickNow() {
     if (!ensureKey()) return;
     toast("updating…");
-    fetchChain().then(data => {
-      toast("live");
-      const { chainCurrent, timeoutSec } = data;
-      HISTORY.push({ t: Date.now(), chain: chainCurrent });
-      const rate = computeRate();
-      setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
-    }).catch(err => { console.error(err); toast(err.message || "error"); });
+    fetchChain()
+      .then((data) => {
+        toast("live");
+        const { chainCurrent, timeoutSec } = data;
+        HISTORY.push({ t: Date.now(), chain: chainCurrent });
+        const rate = computeRate();
+        setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
+      })
+      .catch((err) => {
+        console.error(err);
+        toast(err.message || "error");
+      });
   }
-  function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
+  function startPolling() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(tickNow, STATE.pollSec * 1000);
+    tickNow();
+  }
 
   // ----------------- History -----------------
   let tctChart = null;
@@ -397,51 +559,68 @@
   let HIST_VIEW = [];
   let histPage = 1;
 
-  function getPageSize(){ return parseInt(refs.histPageSize.value, 10) || 20; }
+  function getPageSize() {
+    return parseInt(refs.histPageSize.value, 10) || 20;
+  }
 
   async function loadHistory(forceRefetch = false) {
     if (!ensureKey()) return;
     toast("loading history…");
     try {
       const list = await cachedFetchChains(forceRefetch);
-      HIST_ALL = list.map(row => {
+      HIST_ALL = list.map((row) => {
         const id = Number(row.chain_id || row.id);
         const start = Number(row.start || 0);
         const end = Number(row.end || 0);
         const len = Number(row.chain || row.length || row.hits || 0);
         const respect = Number(row.respect || 0);
-        return { id, start, end, len, respect, dur: end && start ? (end - start) : 0 };
+        return {
+          id,
+          start,
+          end,
+          len,
+          respect,
+          dur: end && start ? end - start : 0,
+        };
       });
       applyHistoryFilters();
       toast("history ready");
-    } catch (e) { console.error(e); toast(e.message || "error"); }
+    } catch (e) {
+      console.error(e);
+      toast(e.message || "error");
+    }
   }
 
-  function applyHistoryFilters(){
+  function applyHistoryFilters() {
     const q = (refs.histSearch.value || "").trim().toLowerCase();
     const minLen = Number(refs.histMinLen.value || 0);
     const sortKey = refs.histSort.value;
     const order = refs.histOrder.value;
-    HIST_VIEW = HIST_ALL.filter(r => {
+    HIST_VIEW = HIST_ALL.filter((r) => {
       if (minLen && r.len < minLen) return false;
       if (q && !String(r.id).toLowerCase().includes(q)) return false;
       return true;
     });
     const dir = order === "asc" ? 1 : -1;
-    HIST_VIEW.sort((a,b) => (a[sortKey] === b[sortKey]) ? 0 : (a[sortKey] > b[sortKey] ? 1 : -1) * dir);
+    HIST_VIEW.sort((a, b) =>
+      a[sortKey] === b[sortKey] ? 0 : (a[sortKey] > b[sortKey] ? 1 : -1) * dir
+    );
     histPage = 1;
     renderHistoryTable();
   }
 
-  function renderHistoryTable(){
+  function renderHistoryTable() {
     const pageSize = getPageSize();
     const total = HIST_VIEW.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     histPage = Math.min(histPage, totalPages);
-    const startIdx = (histPage-1)*pageSize;
+    const startIdx = (histPage - 1) * pageSize;
     const slice = HIST_VIEW.slice(startIdx, startIdx + pageSize);
-    refs.histTableBody.innerHTML = slice.map(r => {
-      return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${r.end}">
+    refs.histTableBody.innerHTML = slice
+      .map((r) => {
+        return `<tr data-id="${r.id}" data-start="${r.start}" data-end="${
+          r.end
+        }">
         <td class="tce-mono"><span class="tce-link">${r.id}</span></td>
         <td class="tce-mono">${r.start ? fmtTime(r.start) : "—"}</td>
         <td class="tce-mono">${r.end ? fmtTime(r.end) : "—"}</td>
@@ -449,8 +628,9 @@
         <td class="tce-mono">${fmtInt(r.len)}</td>
         <td class="tce-mono">${fmtRespect(r.respect)}</td>
       </tr>`;
-    }).join("");
-    refs.histTableBody.querySelectorAll("tr").forEach(tr => {
+      })
+      .join("");
+    refs.histTableBody.querySelectorAll("tr").forEach((tr) => {
       tr.addEventListener("click", () => {
         const id = parseInt(tr.getAttribute("data-id"), 10);
         const start = parseInt(tr.getAttribute("data-start"), 10);
@@ -458,39 +638,41 @@
         openChainDetail(id, start, end);
       });
     });
-    refs.histInfo.textContent = total ? `${total.toLocaleString()} chains` : "No results";
+    refs.histInfo.textContent = total
+      ? `${total.toLocaleString()} chains`
+      : "No results";
     refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
   }
 
-  
   // ---- Normalize chainreport / stats payload into a consistent shape ----
   function getChainStats(report) {
-    const cr = report && report.chainreport ? report.chainreport : (report || {});
-    const s = (cr && typeof cr.stats === "object") ? cr.stats : cr;
-    const num = v => Number(v ?? 0);
+    const cr = report && report.chainreport ? report.chainreport : report || {};
+    const s = cr && typeof cr.stats === "object" ? cr.stats : cr;
+    const num = (v) => Number(v ?? 0);
     return {
-      factionID:    num(s.factionID),
-      chain:        num(s.chain),
-      start:        num(s.start),       // seconds per Torn
-      end:          num(s.end),
-      leave:        num(s.leave),
-      mug:          num(s.mug),
-      hospitalize:  num(s.hospitalize),
-      assists:      num(s.assists),
-      overseas:     num(s.overseas),
-      draws:        num(s.draws),
-      escapes:      num(s.escapes),
-      losses:       num(s.losses),
-      respect:      Number(s.respect ?? 0),
-      targets:      num(s.targets),
-      warhits:      num(s.warhits),
-      besthit:      Number(s.besthit ?? 0),
+      factionID: num(s.factionID),
+      chain: num(s.chain),
+      start: num(s.start),
+      end: num(s.end),
+      leave: num(s.leave),
+      mug: num(s.mug),
+      hospitalize: num(s.hospitalize),
+      assists: num(s.assists),
+      overseas: num(s.overseas),
+      draws: num(s.draws),
+      escapes: num(s.escapes),
+      losses: num(s.losses),
+      respect: Number(s.respect ?? 0),
+      targets: num(s.targets),
+      warhits: num(s.warhits),
+      besthit: Number(s.besthit ?? 0),
       retaliations: num(s.retaliations),
-      members:      cr.members || s.members || null,
-      bonuses:      cr.bonuses || s.bonuses || null,
+      members: cr.members || s.members || null,
+      bonuses: cr.bonuses || s.bonuses || null,
     };
   }
-async function openChainDetail(chainId, startTs, endTs) {
+
+  async function openChainDetail(chainId, startTs, endTs) {
     if (!ensureKey()) return;
     refs.histDetail.style.display = "";
     refs.hdId.textContent = String(chainId);
@@ -501,18 +683,24 @@ async function openChainDetail(chainId, startTs, endTs) {
     toast(`loading chain #${chainId}…`);
 
     try {
-      const report = await cachedFetchChainReport(chainId).catch(()=>null);
+      const report = await cachedFetchChainReport(chainId).catch(() => null);
       let expectedLen = null;
       if (report) {
         const stats = getChainStats(report);
-        // Optional sanity-check
-        const sum = (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
+        const sum =
+          (stats.leave || 0) + (stats.mug || 0) + (stats.hospitalize || 0);
         if (stats.chain && sum !== stats.chain) {
-          console.warn(`Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${stats.chain}`);
+          console.warn(
+            `Chain ${chainId} mismatch: leave+mug+hosp=${sum} vs chain=${stats.chain}`
+          );
         }
-        refs.hdResp.textContent = Number.isFinite(stats.respect) ? stats.respect.toFixed(2) : String(stats.respect);
+        refs.hdResp.textContent = Number.isFinite(stats.respect)
+          ? stats.respect.toFixed(2)
+          : String(stats.respect);
         expectedLen = Number(stats.chain) || null;
-      } else { refs.hdResp.textContent = "—"; }
+      } else {
+        refs.hdResp.textContent = "—";
+      }
 
       if (isPublicMode()) {
         refs.chartCanvas.parentElement.style.display = "none";
@@ -527,12 +715,17 @@ async function openChainDetail(chainId, startTs, endTs) {
           startTs,
           withEndBuffer(endTs, 300),
           expectedLen
-        ).catch(()=>[]);
+        ).catch(() => []);
 
         // (optional) TEMP DEBUG stays here if you want logs
 
         // Build timeline ONLY from hits where attacker_faction == ourFactionId
-        const points = buildChainTimeline(attacks, startTs, expectedLen || null, ourFactionId);
+        const points = buildChainTimeline(
+          attacks,
+          startTs,
+          expectedLen || null,
+          ourFactionId
+        );
 
         if (!points || points.length <= 1) {
           refs.chartCanvas.parentElement.style.display = "none";
@@ -551,20 +744,35 @@ async function openChainDetail(chainId, startTs, endTs) {
         refs.hdLen.textContent = String(finalLen);
 
         // thresholds table (still includes final)
-        const thresholdsForTable = Array.from(new Set([...STATE.thresholds, finalLen])).sort((a,b)=>a-b);
+        const thresholdsForTable = Array.from(
+          new Set([...STATE.thresholds, finalLen])
+        ).sort((a, b) => a - b);
         const crossed = computeThresholdMoments(points, thresholdsForTable);
-        refs.hdThresholdsBody.innerHTML = crossed.map(c => `
+        refs.hdThresholdsBody.innerHTML = crossed
+          .map(
+            (c) => `
           <tr>
-            <td class="tce-mono">${c.th}${c.th===finalLen ? " (final)" : ""}</td>
-            <td class="tce-mono">${c.ts ? new Date(c.ts).toLocaleString() : "—"}</td>
-            <td class="tce-mono">${c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"}</td>
+            <td class="tce-mono">${c.th}${
+              c.th === finalLen ? " (final)" : ""
+            }</td>
+            <td class="tce-mono">${
+              c.ts ? new Date(c.ts).toLocaleString() : "—"
+            }</td>
+            <td class="tce-mono">${
+              c.ts ? fmtDeltaMin((c.ts / 1000 - startTs) / 60) : "—"
+            }</td>
           </tr>
-        `).join("");
+        `
+          )
+          .join("");
       }
       toast(`chain #${chainId} ready`);
-    } catch (e) { console.error(e); toast(e.message || "error"); }
+    } catch (e) {
+      console.error(e);
+      toast(e.message || "error");
+    }
   }
-  
+
   function getLinkNumber(row, expectedLen = null) {
     const v1 = Number(row.chain_link);
     if (Number.isFinite(v1) && v1 > 0) return v1;
@@ -595,9 +803,14 @@ async function openChainDetail(chainId, startTs, endTs) {
 
     return NaN;
   }
-  
+
   // --- Timeline for OUR faction hits only (attacker_faction == OUR_FACTION_ID) ---
-  function buildChainTimeline(attacks, startTsSec, expectedLen = null, ourFactionId = null) {
+  function buildChainTimeline(
+    attacks,
+    startTsSec,
+    expectedLen = null,
+    ourFactionId = null
+  ) {
     const startMs = startTsSec * 1000;
     const linkMinTs = new Map();
     let maxLink = 0;
@@ -628,7 +841,7 @@ async function openChainDetail(chainId, startTs, endTs) {
     }
     return spreadWithinSecond(pts);
   }
-  
+
   function spreadWithinSecond(pts) {
     if (!pts || pts.length < 3) return pts || [];
 
@@ -641,11 +854,12 @@ async function openChainDetail(chainId, startTs, endTs) {
       const count = j - i;
       if (count > 1) {
         const base = Math.max(pts[i - 1].t + 1, sec * 1000);
-        const end  = sec * 1000 + 999;
+        const end = sec * 1000 + 999;
         const step = Math.max(1, Math.floor((end - base) / count));
         for (let k = 0; k < count; k++) {
           pts[i + k].t = base + k * step;
-          if (pts[i + k].t <= pts[i + k - 1]?.t) pts[i + k].t = pts[i + k - 1].t + 1;
+          if (pts[i + k].t <= pts[i + k - 1]?.t)
+            pts[i + k].t = pts[i + k - 1].t + 1;
         }
       }
       i = j;
@@ -654,69 +868,135 @@ async function openChainDetail(chainId, startTs, endTs) {
   }
 
   function computeThresholdMoments(points, thresholds) {
-    const tsByHit = new Map(points.map(p => [p.y, p.t]));
-    return thresholds.map(th => ({ th, ts: tsByHit.get(th) ?? null }));
+    const tsByHit = new Map(points.map((p) => [p.y, p.t]));
+    return thresholds.map((th) => ({ th, ts: tsByHit.get(th) ?? null }));
   }
 
   function renderChart(points) {
     if (!refs.chartCanvas) return;
-    if (tctChart) { tctChart.destroy(); tctChart = null; }
-    const data = points.map(p => ({ x: p.t, y: p.y }));
+    if (tctChart) {
+      tctChart.destroy();
+      tctChart = null;
+    }
+    const data = points.map((p) => ({ x: p.t, y: p.y }));
     tctChart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
-      data: { datasets: [{ label: "Hit #", data, fill: false, tension: 0.15, pointRadius: 0, borderWidth: 2 }]},
+      data: {
+        datasets: [
+          {
+            label: "Hit #",
+            data,
+            fill: false,
+            tension: 0.15,
+            pointRadius: 0,
+            borderWidth: 2,
+          },
+        ],
+      },
       options: {
-        responsive: true, maintainAspectRatio: false, parsing: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
         scales: {
-          x: { type: "linear", ticks: { callback: (v) => {
-            const d = new Date(v); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
-          }}},
-          y: { beginAtZero: true, ticks: { precision: 0 } }
+          x: {
+            type: "linear",
+            ticks: {
+              callback: (v) => {
+                const d = new Date(v);
+                return `${String(d.getHours()).padStart(2, "0")}:${String(
+                  d.getMinutes()
+                ).padStart(2, "0")}`;
+              },
+            },
+          },
+          y: { beginAtZero: true, ticks: { precision: 0 } },
         },
         plugins: {
           legend: { display: false },
           tooltip: {
             callbacks: {
-              title: (items) => items?.length ? new Date(items[0].parsed.x).toLocaleString() : "",
-              label: (ctx) => `Hit #: ${ctx.parsed.y}`
-            }
-          }
+              title: (items) =>
+                items?.length
+                  ? new Date(items[0].parsed.x).toLocaleString()
+                  : "",
+              label: (ctx) => `Hit #: ${ctx.parsed.y}`,
+            },
+          },
         },
         animation: false,
-      }
+      },
     });
   }
 
   // ----------------- API helpers & cache -----------------
-  function apiBase() { return "https://api.torn.com"; }
-  function isPublicMode() { return STATE.usePublicKey || (STATE.apiKey && STATE.apiKey.toLowerCase() === "public"); }
-  function keyParam() { return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey); }
-  function factionUrl(selection, extra="") {
+  function apiBase() {
+    return "https://api.torn.com";
+  }
+  function isPublicMode() {
+    return (
+      STATE.usePublicKey ||
+      (STATE.apiKey && STATE.apiKey.toLowerCase() === "public")
+    );
+  }
+  function keyParam() {
+    return isPublicMode() ? "public" : encodeURIComponent(STATE.apiKey);
+  }
+  function factionUrl(selection, extra = "") {
     const base = apiBase();
     if (isPublicMode()) {
-      if (!STATE.factionIdOverride) throw new Error("Public key mode: Faction ID is required. Open Settings and set Faction ID.");
-      return `${base}/faction/${encodeURIComponent(STATE.factionIdOverride)}?selections=${selection}&key=${keyParam()}${extra}`;
+      if (!STATE.factionIdOverride)
+        throw new Error(
+          "Public key mode: Faction ID is required. Open Settings and set Faction ID."
+        );
+      return `${base}/faction/${encodeURIComponent(
+        STATE.factionIdOverride
+      )}?selections=${selection}&key=${keyParam()}${extra}`;
     }
-    if (STATE.factionIdOverride) return `${base}/faction/${encodeURIComponent(STATE.factionIdOverride)}?selections=${selection}&key=${keyParam()}${extra}`;
+    if (STATE.factionIdOverride)
+      return `${base}/faction/${encodeURIComponent(
+        STATE.factionIdOverride
+      )}?selections=${selection}&key=${keyParam()}${extra}`;
     return `${base}/faction/?selections=${selection}&key=${keyParam()}${extra}`;
   }
   function ensureKey() {
-    if (!STATE.apiKey) { configure(); }
-    if (!STATE.apiKey) { toast("API key required."); return false; }
-    if (isPublicMode() && !STATE.factionIdOverride) { toast("Public key mode: set Faction ID in Settings."); return false; }
+    if (!STATE.apiKey) {
+      configure();
+    }
+    if (!STATE.apiKey) {
+      toast("API key required.");
+      return false;
+    }
+    if (isPublicMode() && !STATE.factionIdOverride) {
+      toast("Public key mode: set Faction ID in Settings.");
+      return false;
+    }
     return true;
   }
   function httpGetJSON(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        url, method: "GET", headers: { "Accept": "application/json" },
+        url,
+        method: "GET",
+        headers: { Accept: "application/json" },
         onload: (res) => {
           try {
-            if (res.status < 200 || res.status >= 300) { reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`)); return; }
+            if (res.status < 200 || res.status >= 300) {
+              reject(
+                new Error(
+                  `HTTP ${res.status}: ${res.responseText?.slice(0, 200) || ""}`
+                )
+              );
+              return;
+            }
             const j = JSON.parse(res.responseText || "{}");
-            if (j && j.error) { reject(new Error(`${j.error.code}: ${j.error.error}`)); return; }
+            if (j && j.error) {
+              reject(new Error(`${j.error.code}: ${j.error.error}`));
+              return;
+            }
             resolve(j);
-          } catch (e) { reject(e); }
+          } catch (e) {
+            reject(e);
+          }
         },
         onerror: () => reject(new Error("Network error")),
         ontimeout: () => reject(new Error("Request timed out")),
@@ -724,7 +1004,7 @@ async function openChainDetail(chainId, startTs, endTs) {
       });
     });
   }
-  
+
   // === OUR FACTION RESOLUTION ===
   let OUR_FACTION_ID = null;
 
@@ -762,78 +1042,172 @@ async function openChainDetail(chainId, startTs, endTs) {
 
   function fetchChain() {
     const url = factionUrl("chain");
-    return httpGetJSON(url).catch((e) => {
-      const msg = String(e.message || e);
-      if (msg.startsWith("7:")) throw new Error("7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings.");
-      throw e;
-    }).then(json => {
-      let chainCurrent = undefined, timeoutSec = undefined;
-      if (json && json.chain) {
-        chainCurrent = Number(json.chain.current);
-        timeoutSec   = Number(json.chain.timeout ?? json.chain.time_left);
-      }
-      if (!Number.isFinite(chainCurrent) && Number.isFinite(Number(json.current))) chainCurrent = Number(json.current);
-      if (!Number.isFinite(timeoutSec)   && Number.isFinite(Number(json.timeout))) timeoutSec   = Number(json.timeout);
-      if (!Number.isFinite(chainCurrent)) throw new Error("Missing chain.current");
-      return { chainCurrent, timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null, raw: json };
+    return httpGetJSON(url)
+      .catch((e) => {
+        const msg = String(e.message || e);
+        if (msg.startsWith("7:"))
+          throw new Error(
+            "7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings."
+          );
+        throw e;
+      })
+      .then((json) => {
+        let chainCurrent = undefined,
+          timeoutSec = undefined;
+        if (json && json.chain) {
+          chainCurrent = Number(json.chain.current);
+          timeoutSec = Number(json.chain.timeout ?? json.chain.time_left);
+        }
+        if (
+          !Number.isFinite(chainCurrent) &&
+          Number.isFinite(Number(json.current))
+        )
+          chainCurrent = Number(json.current);
+        if (
+          !Number.isFinite(timeoutSec) &&
+          Number.isFinite(Number(json.timeout))
+        )
+          timeoutSec = Number(json.timeout);
+        if (!Number.isFinite(chainCurrent))
+          throw new Error("Missing chain.current");
+        return {
+          chainCurrent,
+          timeoutSec: Number.isFinite(timeoutSec) ? timeoutSec : null,
+          raw: json,
+        };
+      });
+  }
+
+  const DB_NAME = "torn_chain_cache";
+  const DB_VER = 1;
+  let dbp = null;
+  function db() {
+    if (dbp) return dbp;
+    dbp = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VER);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains("chainsList"))
+          d.createObjectStore("chainsList");
+        if (!d.objectStoreNames.contains("chainReports"))
+          d.createObjectStore("chainReports");
+        if (!d.objectStoreNames.contains("attacks"))
+          d.createObjectStore("attacks");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbp;
+    // Drop the entire IndexedDB database (used by 'Clear cache')
+    async function idbDeleteAll() {
+      // Close existing connection so delete can proceed
+      try {
+        const d = await db();
+        d.close();
+      } catch {}
+      dbp = null; // force a fresh open next time
+      await new Promise((resolve) => {
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => resolve(false);
+        req.onblocked = () => resolve(false);
+      });
+    }
+  }
+
+  async function idbGet(store, key) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readonly");
+      const st = tx.objectStore(store);
+      const r = st.get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbPut(store, key, value) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readwrite");
+      const st = tx.objectStore(store);
+      st.put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async function idbClear(store) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const tx = d.transaction(store, "readwrite");
+      const st = tx.objectStore(store);
+      const req = st.clear();
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error);
     });
   }
 
-  const DB_NAME = "torn_chain_cache"; const DB_VER = 1; let dbp = null;
-  function db() { if (dbp) return dbp; dbp = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VER);
-    req.onupgradeneeded = () => { const d = req.result;
-      if (!d.objectStoreNames.contains("chainsList")) d.createObjectStore("chainsList");
-      if (!d.objectStoreNames.contains("chainReports")) d.createObjectStore("chainReports");
-      if (!d.objectStoreNames.contains("attacks")) d.createObjectStore("attacks");
-    };
-    req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
-  }); return dbp; }
-  async function idbGet(store, key){ const d = await db(); return new Promise((resolve,reject)=>{ const tx=d.transaction(store,"readonly"); const st=tx.objectStore(store); const r=st.get(key); r.onsuccess=()=>resolve(r.result||null); r.onerror=()=>reject(r.error); }); }
-  async function idbPut(store, key, value){ const d = await db(); return new Promise((resolve,reject)=>{ const tx=d.transaction(store,"readwrite"); const st=tx.objectStore(store); st.put(value,key); tx.oncomplete=()=>resolve(true); tx.onerror=()=>reject(tx.error); }); }
-  async function idbClear(store){ const d = await db(); return new Promise((resolve,reject)=>{ const tx=d.transaction(store,"readwrite"); const st=tx.objectStore(store); st.clear(); tx.oncomplete=()=>resolve(true); tx.onerror=()=>reject(tx.error); }); }
-  async function cacheClearAll(){ await idbClear("chainsList"); await idbClear("chainReports"); await idbClear("attacks"); }
+  async function cacheClearAll() {
+    try {
+      await idbClear("chainsList");
+    } catch {}
+    try {
+      await idbClear("chainReports");
+    } catch {}
+    try {
+      await idbClear("attacks");
+    } catch {}
+    // As a belt-and-suspenders reset, drop the DB entirely:
+    await idbDeleteAll();
+  }
 
   function chainsCacheKey() {
     const mode = isPublicMode() ? "pub" : "priv";
     const fid = STATE.factionIdOverride || "implicit";
     return `${mode}:${fid}`;
   }
-  async function cachedFetchChains(force=false){
+  async function cachedFetchChains(force = false) {
     const key = chainsCacheKey();
     const cached = await idbGet("chainsList", key);
     const now = Date.now();
-    if (!force && cached && (now - (cached.ts || 0) < STATE.chainsTTLms)) return cached.data;
+    if (!force && cached && now - (cached.ts || 0) < STATE.chainsTTLms)
+      return cached.data;
     const fresh = await fetchChains();
     await idbPut("chainsList", key, { data: fresh, ts: now });
     return fresh;
   }
   function fetchChains() {
     const url = factionUrl("chains");
-    return httpGetJSON(url).catch((e) => {
-      const msg = String(e.message || e);
-      if (msg.startsWith("7:")) throw new Error("7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings.");
-      throw e;
-    }).then(json => {
-      const out = [];
-      const src = json?.chains || json;
-      if (src && typeof src === "object") {
-        for (const [keyId, rec] of Object.entries(src)) {
-          let chain_id = Number(keyId);
-          if (!Number.isFinite(chain_id)) chain_id = Number(rec?.chain_id || rec?.id || NaN);
-          if (!Number.isFinite(chain_id)) continue;
-          out.push({
-            chain_id,
-            start: rec.start || rec.started || rec.timestamp || 0,
-            end: rec.end || rec.ended || rec.timestamp_end || 0,
-            chain: rec.chain_count || rec.length || rec.hits || rec.chain || 0,
-            respect: rec.respect || 0
-          });
+    return httpGetJSON(url)
+      .catch((e) => {
+        const msg = String(e.message || e);
+        if (msg.startsWith("7:"))
+          throw new Error(
+            "7: Incorrect ID-entity relation. In public mode set a Faction ID. In private mode, ensure the key belongs to a member in the faction or set Faction ID override in Settings."
+          );
+        throw e;
+      })
+      .then((json) => {
+        const out = [];
+        const src = json?.chains || json;
+        if (src && typeof src === "object") {
+          for (const [keyId, rec] of Object.entries(src)) {
+            let chain_id = Number(keyId);
+            if (!Number.isFinite(chain_id))
+              chain_id = Number(rec?.chain_id || rec?.id || NaN);
+            if (!Number.isFinite(chain_id)) continue;
+            out.push({
+              chain_id,
+              start: rec.start || rec.started || rec.timestamp || 0,
+              end: rec.end || rec.ended || rec.timestamp_end || 0,
+              chain:
+                rec.chain_count || rec.length || rec.hits || rec.chain || 0,
+              respect: rec.respect || 0,
+            });
+          }
         }
-      }
-      out.sort((a,b)=> (b.end||0) - (a.end||0));
-      return out.slice(0, 100);
-    });
+        out.sort((a, b) => (b.end || 0) - (a.end || 0));
+        return out.slice(0, 100);
+      });
   }
 
   async function cachedFetchChainReport(chainId) {
@@ -845,12 +1219,20 @@ async function openChainDetail(chainId, startTs, endTs) {
     return data;
   }
   function fetchChainReport(chainId) {
-    const url = `${apiBase()}/torn/${encodeURIComponent(chainId)}?selections=chainreport&key=${keyParam()}`;
+    const url = `${apiBase()}/torn/${encodeURIComponent(
+      chainId
+    )}?selections=chainreport&key=${keyParam()}`;
     return httpGetJSON(url);
   }
 
-  async function cachedFetchAttacksForChain(chainId, fromSec, toSec, targetHits = null) {
-    if (isPublicMode()) throw new Error("Public key mode: faction attacks are not available.");
+  async function cachedFetchAttacksForChain(
+    chainId,
+    fromSec,
+    toSec,
+    targetHits = null
+  ) {
+    if (isPublicMode())
+      throw new Error("Public key mode: faction attacks are not available.");
     const key = String(chainId);
     const cached = await idbGet("attacks", key);
 
@@ -862,7 +1244,14 @@ async function openChainDetail(chainId, startTs, endTs) {
 
     const rows = await fetchAttacksWindow(fromSec, toSec, targetHits);
     const seenLinks = countUniqueLinks(rows);
-    await idbPut("attacks", key, { rows, from: fromSec, to: toSec, ts: Date.now(), complete: true, seenLinks });
+    await idbPut("attacks", key, {
+      rows,
+      from: fromSec,
+      to: toSec,
+      ts: Date.now(),
+      complete: true,
+      seenLinks,
+    });
     return rows;
   }
 
@@ -870,7 +1259,8 @@ async function openChainDetail(chainId, startTs, endTs) {
     const s = new Set();
     for (const r of rows) {
       // Only attacks where OUR faction is the attacker
-      if (OUR_FACTION_ID && Number(r.attacker_faction) !== OUR_FACTION_ID) continue;
+      if (OUR_FACTION_ID && Number(r.attacker_faction) !== OUR_FACTION_ID)
+        continue;
 
       const l = getLinkNumber(r, null); // chain > 0 only
       if (Number.isFinite(l) && l > 0) s.add(l);
@@ -878,58 +1268,73 @@ async function openChainDetail(chainId, startTs, endTs) {
     return s.size;
   }
 
-
-  async function fetchAttacksWindow(fromSec, toSec, targetHits = null) {
-    const byId = new Map();
-    const seenLinks = new Set();
-    let page = 0;
+  async function fetchAttacksWindow(
+    fromSec,
+    toSec,
+    targetHits = null,
+    expectedLen = null
+  ) {
+    const byCode = new Map();
+    const keepResults = new Set(["Attacked", "Mugged", "Hospitalized"]);
     let cursor = fromSec;
-    let lastMaxTs = -1;
+    let safety = 0;
 
-    while (cursor <= toSec && page < STATE.maxAttackPages) {
-      page++;
-      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=5000`);
-      const json = await httpGetJSON(url);
-      const obj = json?.attacks || json;
-      const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
-      if (!rows.length) break;
-
-      let newRows = 0;
-      let maxTs = 0;
-
-      for (const r of rows) {
-        const id  = String(r.attack_id ?? r.id ?? `${r.timestamp_ended ?? r.timestamp ?? r.timestamp_started}-unk`);
-        if (!byId.has(id)) { byId.set(id, r); newRows++; }
-        const ts  = Number(r.timestamp_ended ?? r.timestamp ?? r.timestamp_started ?? 0);
-        if (ts > maxTs) maxTs = ts;
-
-        const link = Number(r.chain ?? r.chain_link ?? r.modifiers?.chain);
-        if (Number.isFinite(link) && link > 0) seenLinks.add(link);
+    while (cursor <= toSec && safety++ < STATE.maxAttackPages) {
+      const url =
+        `${apiBase()}/v2/faction/attacks?filters=outgoing` +
+        `&from=${cursor}&to=${toSec}&comment=chaintooldev&key=${keyParam()}`;
+      // back-off & retry on 429/rate-limit
+      let payload;
+      try {
+        payload = await httpGetJSON(url);
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (msg.includes("rate limit") || msg.includes("429")) {
+          console.warn("Rate limited; backing off 5s…");
+          await new Promise((r) => setTimeout(r, 5000));
+          continue; // retry same cursor
+        }
+        throw e;
       }
 
-      if (targetHits && seenLinks.size >= targetHits) break;
+      const batch = Array.isArray(payload?.attacks) ? payload.attacks : [];
+      if (!batch.length) break;
 
-      if (maxTs <= 0 || maxTs === lastMaxTs || newRows === 0) {
-        cursor = cursor + 1;
-      } else {
-        cursor = maxTs;
-        lastMaxTs = maxTs;
+      let maxEndedThisPage = 0;
+      for (const r of batch) {
+        const code = String(r.code ?? r.attack_id ?? r.id ?? "");
+        if (!code || byCode.has(code)) continue;
+        // only successful outgoing hits
+        if (!keepResults.has(r.result)) continue;
+
+        byCode.set(code, r);
+
+        const ended = Number(r.ended ?? r.timestamp_ended ?? r.timestamp ?? 0);
+        if (Number.isFinite(ended) && ended > maxEndedThisPage)
+          maxEndedThisPage = ended;
       }
-
-      if (cursor > toSec) break;
+      // gentle pacing to stay well under Torn’s 100-req/min cap
+      await new Promise((r) => setTimeout(r, 800));
+      // advance cursor; bump +1s to avoid duplicates
+      cursor = maxEndedThisPage > cursor ? maxEndedThisPage + 1 : cursor + 1;
+      // optional early-stop checks
+      if (targetHits && byCode.size >= targetHits) break;
+      if (expectedLen) {
+        const links = [...byCode.values()]
+          .map((x) => Number(x.chain ?? 0))
+          .filter((n) => n > 0);
+        if (
+          links.length &&
+          Math.min(...links) === 1 &&
+          Math.max(...links) >= expectedLen
+        )
+          break;
+      }
     }
-
-    const all = Array.from(byId.values());
-    all.sort((a,b) => {
-      const ta = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
-      const tb = Number(b.timestamp_ended ?? b.timestamp ?? b.timestamp_started ?? 0);
-      if (ta !== tb) return ta - tb;
-      const ia = String(a.attack_id ?? a.id ?? "");
-      const ib = String(b.attack_id ?? b.id ?? "");
-      return ia.localeCompare(ib);
-    });
-    return all;
+    // return sorted by ended time
+    return Array.from(byCode.values()).sort(
+      (a, b) => (a.ended ?? 0) - (b.ended ?? 0)
+    );
   }
-  // Start
   startPolling();
 })();
