@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.2
+// @version      1.2.3
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -27,7 +27,7 @@
     pollSec: GM_getValue("torn_chain_eta_pollSec", 15),
     rateWindowMin: GM_getValue("torn_chain_eta_rateWindowMin", 5),
     historyMaxMin: 15,
-    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 400),
+    maxAttackPages: GM_getValue("torn_chain_eta_maxAttackPages", 1000),
     chainsTTLms: GM_getValue("torn_chain_eta_chainsTTLms", 2 * 60 * 1000),
   };
 
@@ -99,14 +99,14 @@
     }
 
     const mp = prompt(
-      `Max attacks pages per chain (safety cap, default ${STATE.maxAttackPages}, 10–100):`,
+      `Max attacks pages per chain (safety cap, default ${STATE.maxAttackPages}, 50–5000):`,
       String(STATE.maxAttackPages)
     );
     if (mp !== null) {
       STATE.maxAttackPages = clampInt(
         parseInt(mp, 10),
-        10,
-        100,
+        50,
+        5000,
         STATE.maxAttackPages
       );
       GM_setValue("torn_chain_eta_maxAttackPages", STATE.maxAttackPages);
@@ -793,10 +793,9 @@
         if (!Number.isFinite(ourFactionId)) ourFactionId = null;
       }
 
-      const attacks = await fetchAttacksWindow(
+      const attacks = await fetchAttacksWindowChunked(
         startTs,
         withEndBuffer(endTs, 300),
-        /*targetHits*/ null,
         expectedLen
       ).catch(() => []);
 
@@ -807,19 +806,21 @@
         ourFactionId
       );
 
+      // prefer report length if present; otherwise use max observed
       const seenMax = points.length ? points[points.length - 1].y : 0;
-      const finalLen = expectedLen ?? seenMax;
+      const finalLen = expectedLen ?? seenMax; // <— unified length
 
       if (!points || points.length <= 1) {
         refs.chartCanvas.parentElement.style.display = "none";
         refs.hdLen.textContent = String(finalLen);
         refs.hdThresholdsBody.innerHTML = `<tr><td colspan="3" class="tce-small">
-    No per-hit data parsed for this chain window (no qualifying outgoing attacks with a valid link index).
+    No per-hit data parsed for this chain window (no qualifying attacks for our faction).
   </td></tr>`;
         toast(`chain #${chainId}: no per-hit data`);
         return;
       }
 
+      // 5) Render chart and fill UI using finalLen
       refs.chartCanvas.parentElement.style.display = "";
       refs.hdLen.textContent = String(finalLen);
       renderChart(points);
@@ -850,6 +851,7 @@
   }
 
   function getLinkNumber(row, expectedLen = null) {
+    // Accept only integer, plausible link indices. Ignore modifier-like values.
     const candidates = [
       row?.chain,
       row?.chain_link,
@@ -866,6 +868,7 @@
       }
     }
 
+    // Explicitly ignore modifier-like fractional values often seen at modifiers.chain
     const modifierLike = Number(row?.modifiers?.chain);
     if (Number.isFinite(modifierLike) && !Number.isInteger(modifierLike)) {
       return NaN;
@@ -894,8 +897,8 @@
     ourFactionId = null
   ) {
     const startMs = startTsSec * 1000;
+    const byLink = new Map(); // link -> earliest ms
 
-    const byLink = new Map();
     for (const a of attacks) {
       if (ourFactionId) {
         const atkFid = getAttackerFactionId(a);
@@ -914,16 +917,13 @@
       if (prev == null || tMs < prev) byLink.set(link, tMs);
     }
 
-    if (byLink.size === 0) {
-      return [{ t: startMs, y: 0 }];
-    }
+    if (byLink.size === 0) return [{ t: startMs, y: 0 }];
 
     const points = [{ t: startMs, y: 0 }];
-    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]);
+    const sorted = [...byLink.entries()].sort((a, b) => a[0] - b[0]); // by link#
     for (const [link, t] of sorted) {
       const prevT = points[points.length - 1].t;
-      const tt = Math.max(prevT + 1, t);
-      points.push({ t: tt, y: link });
+      points.push({ t: Math.max(prevT + 1, t), y: link });
     }
 
     return spreadWithinSecond(points);
@@ -963,7 +963,6 @@
       tctChart.destroy();
       tctChart = null;
     }
-
     const data = points.map((p) => ({ x: p.t, y: p.y }));
     tctChart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
@@ -972,14 +971,13 @@
           {
             label: "Hit #",
             data,
-            borderWidth: 2,
-            tension: 0.15,
-            // ---- show points ----
-            pointRadius: 3, // radius in pixels
-            pointHoverRadius: 5, // larger on hover
-            pointBackgroundColor: "#4fc3f7", // pick a color you like
-            pointBorderColor: "#1e88e5",
             fill: false,
+            tension: 0.15,
+            borderWidth: 2,
+            // show visible points
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            // keep defaults for colors or set your own if you like
           },
         ],
       },
@@ -1053,6 +1051,7 @@
     u.searchParams.set("filters", "outgoing");
     u.searchParams.set("from", String(fromSec));
     u.searchParams.set("to", String(toSec));
+    u.searchParams.set("sort", "ASC"); // ok if ignored
     u.searchParams.set("comment", "chaintooldev");
     return u.href;
   }
@@ -1351,7 +1350,7 @@
     expectedLen = null
   ) {
     const byCode = new Map();
-    const keepResults = new Set(["Attacked", "Mugged", "Hospitalized"]);
+    const keepResults = new Set(["Leave", "Mugged", "Hospitalized"]);
     let cursor = fromSec;
     let safety = 0;
 
@@ -1375,6 +1374,8 @@
       if (!batch.length) break;
 
       let maxEndedThisPage = 0;
+      let maxIdThisPage = "0";
+
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (!code || byCode.has(code)) continue;
@@ -1383,10 +1384,15 @@
         byCode.set(code, r);
 
         const ended = Number(r.ended ?? 0);
-        if (Number.isFinite(ended) && ended > maxEndedThisPage)
-          maxEndedThisPage = ended;
+        if (Number.isFinite(ended) && ended >= maxEndedThisPage) {
+          if (ended > maxEndedThisPage || code > maxIdThisPage) {
+            maxEndedThisPage = ended;
+            maxIdThisPage = code;
+          }
+        }
       }
-      await new Promise((r) => setTimeout(r, 800));
+
+      // advance cursor even when many share the same second
       cursor = maxEndedThisPage > cursor ? maxEndedThisPage + 1 : cursor + 1;
 
       if (targetHits && byCode.size >= targetHits) break;
@@ -1406,6 +1412,28 @@
     return Array.from(byCode.values()).sort(
       (a, b) => (a.ended ?? 0) - (b.ended ?? 0)
     );
+  }
+  async function fetchAttacksWindowChunked(fromSec, toSec, expectedLen = null) {
+    const CHUNK = 2 * 60 * 60; // 2 hours
+    const byCode = new Map();
+    let start = fromSec;
+
+    while (start <= toSec) {
+      const end = Math.min(start + CHUNK - 1, toSec);
+      const batch = await fetchAttacksWindow(
+        start,
+        end,
+        /*targetHits*/ null,
+        expectedLen
+      );
+      for (const r of batch) {
+        const code = String(r.code ?? r.attack_id ?? r.id ?? "");
+        if (code && !byCode.has(code)) byCode.set(code, r);
+      }
+      start = end + 1;
+    }
+
+    return [...byCode.values()].sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
   }
 
   let OUR_FACTION_ID = null;
