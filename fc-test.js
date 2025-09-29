@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.11
+// @version      1.0.12
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -511,43 +511,54 @@
   }
 
   function buildChainTimeline(attacks, startTsSec) {
-    // Use the per-attack chain link number; take the earliest time per link.
-    const startMs = startTsSec * 1000;
-    const earliestByLink = new Map(); // link -> earliest ms
+  const startMs = startTsSec * 1000;
 
-    for (const a of attacks) {
-      const link = Number(a.chain ?? a.chain_link ?? (a.modifiers && a.modifiers.chain));
-      if (!Number.isFinite(link) || link <= 0) continue;
+  // Build earliest timestamp per chain link (authoritative when present)
+  const byLink = new Map(); // link -> earliest ms
+  let sawLink = false;
 
-      const tEnd = Number(a.timestamp_ended ?? a.timestamp ?? 0);
-      const tStart = Number(a.timestamp_started ?? a.timestamp ?? 0);
-      const t = (tEnd || tStart) * 1000;
-      if (!t) continue;
-
-      const cur = earliestByLink.get(link);
-      if (cur == null || t < cur) earliestByLink.set(link, t);
+  for (const a of attacks) {
+    const link = Number(a.chain ?? a.chain_link ?? a.modifiers?.chain);
+    const tEnd = Number(a.timestamp_ended ?? a.timestamp ?? 0);
+    const tStart = Number(a.timestamp_started ?? a.timestamp ?? 0);
+    const t = (tEnd || tStart) * 1000;
+    if (Number.isFinite(link) && link > 0 && t) {
+      sawLink = true;
+      const prev = byLink.get(link);
+      if (prev == null || t < prev) byLink.set(link, t);
     }
-
-    // Build sorted, monotonic series: (time, hit#)
-    const links = [...earliestByLink.entries()]
-      .map(([y, t]) => ({ y, t }))
-      .sort((a, b) => a.y - b.y);
-
-    // Anchor at start
-    if (!links.length || links[0].y > 0) links.unshift({ t: startMs, y: 0 });
-
-    // Coalesce any equal-time points by keeping max y at that ms
-    const pts = [];
-    for (const p of links) {
-      const last = pts[pts.length - 1];
-      if (last && last.t === p.t) {
-        if (p.y > last.y) last.y = p.y;
-      } else {
-        pts.push(p);
-      }
-    }
-    return pts;
   }
+
+  let pts = [];
+  if (sawLink) {
+    // Sort by time first; for ties, sort by link so y is non-decreasing
+    const entries = Array.from(byLink.entries()).map(([y, t]) => ({ y, t }));
+    entries.sort((a, b) => (a.t - b.t) || (a.y - b.y));
+    pts = entries; // one point per hit
+  } else {
+    // Fallback: count hits by respect if link data is missing
+    const rows = attacks
+      .map(a => ({
+        t: (Number(a.timestamp_ended ?? a.timestamp ?? 0) || Number(a.timestamp_started ?? 0)) * 1000,
+        hit: Number(a.respect ?? a.respect_gain ?? a.modifiers?.respect ?? 0) > 0
+      }))
+      .filter(r => r.t && r.hit)
+      .sort((a,b) => a.t - b.t);
+    let cum = 0;
+    pts = rows.map(r => ({ t: r.t, y: ++cum }));
+  }
+
+  // Anchor series at start (0 hits)
+  if (!pts.length || pts[0].y > 0) pts.unshift({ t: startMs, y: 0 });
+
+  // Spread same-second hits a few ms apart so the line doesn’t “jump sideways”
+  pts = spreadEqualTimes(pts);
+
+  // Guard: ensure y never decreases (just in case of weird data)
+  for (let i = 1; i < pts.length; i++) if (pts[i].y < pts[i-1].y) pts[i].y = pts[i-1].y;
+
+  return pts;
+}
 
   // Distribute multiple hits that share the same second across that second
   function spreadEqualTimes(points) {
@@ -749,24 +760,52 @@
   }
 
   async function fetchAttacksWindow(fromSec, toSec) {
-    const all = [];
-    let page = 0, cursor = fromSec;
-    while (cursor <= toSec && page < STATE.maxAttackPages) {
-      page++;
-      const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
-      const json = await httpGetJSON(url);
-      const obj = json?.attacks || json;
-      const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
-      if (!rows.length) break;
-      rows.sort((a,b)=> (a.timestamp_ended||a.timestamp||0) - (b.timestamp_ended||b.timestamp||0));
-      all.push(...rows);
-      const last = rows[rows.length - 1];
-      const lastTs = (last.timestamp_ended || last.timestamp || 0);
-      if (!lastTs || lastTs >= toSec) break;
-      cursor = lastTs + 1; // next second window
+  const byId = new Map(); // id -> row
+  let page = 0;
+  let cursor = fromSec;
+  let lastCursor = -1;
+
+  while (cursor <= toSec && page < STATE.maxAttackPages) {
+    page++;
+    const url = factionUrl("attacks", `&from=${cursor}&to=${toSec}&limit=1000`);
+    const json = await httpGetJSON(url);
+    const obj = json?.attacks || json;
+    const rows = obj && typeof obj === "object" ? Object.values(obj) : [];
+    if (!rows.length) break;
+
+    let newCount = 0;
+    let maxTs = 0;
+
+    for (const r of rows) {
+      const id = String(r.attack_id ?? r.id ?? r.result_id ?? r.log ?? `${r.timestamp_ended ?? r.timestamp ?? r.timestamp_started}-unk`);
+      if (!byId.has(id)) { byId.set(id, r); newCount++; }
+      const ts = Number(r.timestamp_ended ?? r.timestamp ?? r.timestamp_started ?? 0);
+      if (ts > maxTs) maxTs = ts;
     }
-    return all;
+
+    // Keep cursor at maxTs to catch more hits in the same second; if nothing new, bump by 1s.
+    const nextCursor = maxTs || cursor;
+    if (newCount === 0 || nextCursor === cursor || nextCursor === lastCursor) {
+      cursor = cursor + 1;
+    } else {
+      cursor = nextCursor;
+    }
+    lastCursor = cursor;
+
+    if (cursor > toSec) break;
   }
+
+  const all = Array.from(byId.values());
+  all.sort((a,b) => {
+    const ta = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
+    const tb = Number(b.timestamp_ended ?? b.timestamp ?? b.timestamp_started ?? 0);
+    if (ta !== tb) return ta - tb;
+    const ia = String(a.attack_id ?? a.id ?? "");
+    const ib = String(b.attack_id ?? b.id ?? "");
+    return ia.localeCompare(ib);
+  });
+  return all;
+}
 
   // Start
   startPolling();
