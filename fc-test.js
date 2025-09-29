@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.8
+// @version      1.0.9
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/*
@@ -371,7 +371,7 @@
   function startPolling() { clearInterval(pollTimer); pollTimer = setInterval(tickNow, STATE.pollSec * 1000); tickNow(); }
 
   // ----------------- History -----------------
-  let chart = null;
+  let tctChart = null;
   let HIST_ALL = [];
   let HIST_VIEW = [];
   let histPage = 1;
@@ -545,18 +545,19 @@
   }
 
   // Chart (time on X, chain hit # on Y)
-  let chart = null;
   function renderChart(points) {
     if (!refs.chartCanvas) return;
-    if (chart) { chart.destroy(); chart = null; }
+    if (tctChart) { tctChart.destroy(); tctChart = null; }
     const data = points.map(p => ({ x: p.t, y: p.y }));
-    chart = new Chart(refs.chartCanvas.getContext("2d"), {
+    tctChart = new Chart(refs.chartCanvas.getContext("2d"), {
       type: "line",
       data: { datasets: [{ label: "Hit #", data, fill: false, tension: 0.15, pointRadius: 0, borderWidth: 2 }]},
       options: {
         responsive: true, maintainAspectRatio: false, parsing: false,
         scales: {
-          x: { type: "linear", ticks: { callback: (v) => { const d=new Date(v); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }}},
+          x: { type: "linear", ticks: { callback: (v) => {
+            const d = new Date(v); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+          }}},
           y: { beginAtZero: true, ticks: { precision: 0 } }
         },
         plugins: {
