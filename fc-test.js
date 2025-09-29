@@ -16,7 +16,7 @@
 // ==/UserScript==
 
 (function () {
-  "use strict";
+  ("use strict");
 
   const DEF_THRESHOLDS = [10, 50, 100, 250, 1000, 2500, 5000];
   const STATE = {
@@ -1113,6 +1113,22 @@
         req.onblocked = () => resolve(false);
       });
     }
+  }
+
+  // Drop the entire IndexedDB database (called by cacheClearAll)
+  async function idbDeleteAll() {
+    try {
+      const d = await db();
+      d.close(); // close active connection so delete can succeed
+    } catch {}
+    dbp = null; // force fresh open next time
+
+    return new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(false);
+      req.onblocked = () => resolve(false);
+    });
   }
 
   async function idbGet(store, key) {
