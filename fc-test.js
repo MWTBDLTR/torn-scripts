@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.15
+// @version      1.0.16
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api acceess). Caches to IndexedDB.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -491,7 +491,7 @@
       } else {
         const attacks = await cachedFetchAttacksForChain(chainId, startTs, withEndBuffer(endTs, 300), expectedLen).catch(()=>[]);
 
-        const points = buildChainTimeline(attacks, startTs);
+        const points = buildChainTimeline(attacks, startTs, expectedLen || null);
         refs.chartCanvas.parentElement.style.display = "";
         renderChart(points);
 
@@ -524,16 +524,28 @@
       toast(`chain #${chainId} ready`);
     } catch (e) { console.error(e); toast(e.message || "error"); }
   }
+  
+  // --- FIX: safe chain-link extractor ---
+  function getLinkNumber(row) {
+    // prefer the real per-hit link number
+    const v1 = Number(row.chain_link);
+    if (Number.isFinite(v1) && v1 > 0) return v1;
+    // fallback if some API payloads nest it
+    const v2 = Number(row.modifiers?.chain);
+    if (Number.isFinite(v2) && v2 > 0 && v2 < 100000) return v2;
+    return NaN;
+  }
 
-  // Build strictly incremental timeline: y = hit #1..N, x = earliest timestamp for that link
-  function buildChainTimeline(attacks, startTsSec) {
+  // --- FIX: only use true chain_link, guard outliers ---
+  function buildChainTimeline(attacks, startTsSec, expectedLen = null) {
     const startMs = startTsSec * 1000;
     const linkMinTs = new Map();
     let maxLink = 0;
 
     for (const a of attacks) {
-      const link = Number(a.chain ?? a.chain_link ?? a.modifiers?.chain);
+      const link = getLinkNumber(a);
       if (!Number.isFinite(link) || link <= 0) continue;
+      if (expectedLen && link > expectedLen * 1.2) continue; // drop absurd values
 
       const ts = Number(a.timestamp_ended ?? a.timestamp ?? a.timestamp_started ?? 0);
       if (!Number.isFinite(ts) || ts <= 0) continue;
@@ -549,7 +561,7 @@
     const pts = [{ t: startMs, y: 0 }];
     for (let l = 1; l <= maxLink; l++) {
       let t = linkMinTs.get(l);
-      if (!t) t = pts[pts.length - 1].t + 1;   // fill missing links, monotone X
+      if (!t) t = pts[pts.length - 1].t + 1;
       pts.push({ t, y: l });
     }
     return spreadWithinSecond(pts);
@@ -765,7 +777,7 @@
   function countUniqueLinks(rows) {
     const s = new Set();
     for (const r of rows) {
-      const l = Number(r.chain ?? r.chain_link ?? r.modifiers?.chain);
+      const l = getLinkNumber(r);
       if (Number.isFinite(l) && l > 0) s.add(l);
     }
     return s.size;
