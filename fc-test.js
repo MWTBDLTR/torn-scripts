@@ -753,6 +753,22 @@
         // write-through cache
         cachePutAttacks(chainId, winFrom, winTo, attacks);
       }
+      
+      const minLink = attacks.reduce((m, a) => Math.min(m, Number(a.chain || Infinity)), Infinity);
+      const maxLink = attacks.reduce((m, a) => Math.max(m, Number(a.chain || 0)), 0);
+      console.log(
+        "[ChainDetail] chainId:",
+        chainId,
+        "attacks:",
+        attacks.length,
+        "chain min/max:",
+        minLink,
+        maxLink,
+        "window:",
+        new Date(withStartBuffer(startTs, 120) * 1000).toLocaleString(),
+        "→",
+        new Date(withEndBuffer(endTs, 300) * 1000).toLocaleString()
+      );
 
       // debug
       console.log(
@@ -1002,10 +1018,14 @@
     u.searchParams.set("filters", "outgoing");
     u.searchParams.set("from", String(fromSec));
     u.searchParams.set("to", String(toSec));
-    u.searchParams.set("sort", "ASC"); // ok if ignored
+    // If v2 supports it, ask for a larger page; harmless if ignored.
+    u.searchParams.set("limit", "250");
+    // Order doesn’t really matter since we’ll follow 'next', but ASC helps cursor sanity if used.
+    u.searchParams.set("sort", "ASC");
     u.searchParams.set("comment", "chaintooldev");
     return u.href;
   }
+
   function buildChainReportUrl(chainId) {
     const u = new URL(`${apiBase()}/faction/${encodeURIComponent(chainId)}/chainreport`);
     u.searchParams.set("key", keyParam());
@@ -1295,13 +1315,25 @@
   }
 
   async function fetchAttacksWindow(fromSec, toSec, targetHits = null, expectedLen = null) {
+    // Follow _metadata.links.next like fetchChains() does.
+    function resolveNextLink(next, base) {
+      if (!next) return null;
+      try {
+        if (/^https?:\/\//i.test(next)) return next;
+        const b = new URL(base);
+        return next.startsWith("/") ? `${b.origin}${next}` : new URL(next, b).href;
+      } catch {
+        return null;
+      }
+    }
+
     const byCode = new Map();
     const keepResults = new Set(["leave", "mugged", "hospitalized"]);
-    let cursor = fromSec;
-    let safety = 0;
+    let url = buildFactionAttacksUrl(fromSec, toSec);
+    let pages = 0;
 
-    while (cursor <= toSec && safety++ < STATE.maxAttackPages) {
-      const url = buildFactionAttacksUrl(cursor, toSec);
+    while (url && pages < STATE.maxAttackPages) {
+      pages += 1;
 
       let payload;
       try {
@@ -1309,7 +1341,7 @@
       } catch (e) {
         const msg = String(e?.message || e);
         if (msg.includes("rate limit") || msg.includes("429")) {
-          console.warn("Rate limited; backing off 5s…");
+          // back off and retry same URL
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
@@ -1317,40 +1349,37 @@
       }
 
       const batch = Array.isArray(payload?.attacks) ? payload.attacks : [];
-      if (!batch.length) break;
-
-      let maxEndedThisPage = 0;
-      let maxIdThisPage = "0";
-
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (!code || byCode.has(code)) continue;
+
         const res = String(r.result || "").toLowerCase();
-        if (!keepResults.has(res)) continue;
+        if (!keepResults.has(res)) continue; // only chain-crediting outcomes
 
         byCode.set(code, r);
-
-        const ended = Number(r.ended ?? 0);
-        if (Number.isFinite(ended) && ended >= maxEndedThisPage) {
-          if (ended > maxEndedThisPage || code > maxIdThisPage) {
-            maxEndedThisPage = ended;
-            maxIdThisPage = code;
-          }
-        }
       }
 
-      // advance cursor even when many share the same second
-      cursor = maxEndedThisPage > cursor ? maxEndedThisPage + 1 : cursor + 1;
-
+      // optional early-stops
       if (targetHits && byCode.size >= targetHits) break;
       if (expectedLen) {
         const links = [...byCode.values()].map((x) => Number(x.chain ?? 0)).filter((n) => n > 0);
-        if (links.length && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) break;
+        if (links.length && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
+          break;
+        }
       }
+
+      const next = resolveNextLink(payload?._metadata?.links?.next, url);
+      if (!next || next === url) break;
+      url = next;
+
+      // gentle pacing to remain under caps
+      await new Promise((r) => setTimeout(r, 800));
     }
 
+    // Return sorted by 'ended' ascending (helps plotting & threshold calc)
     return Array.from(byCode.values()).sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
   }
+
   async function fetchAttacksWindowChunked(fromSec, toSec, expectedLen = null) {
     const CHUNK = 2 * 60 * 60; // 2 hours
     const byCode = new Map();
