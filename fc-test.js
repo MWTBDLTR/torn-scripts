@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.3.1
+// @version      1.3.2
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -1331,92 +1331,58 @@
   }
 
   async function fetchAttacksWindow(fromSec, toSec) {
-    // Follow _metadata.links.next like fetchChains() does.
-    function resolveNextLink(next, base) {
-      if (!next) return null;
-      try {
-        if (/^https?:\/\//i.test(next)) return next;
-        const b = new URL(base);
-        return next.startsWith("/") ? `${b.origin}${next}` : new URL(next, b).href;
-      } catch {
-        return null;
-      }
-    }
+    const url = buildFactionAttacksUrl(fromSec, toSec);
+    // NOTE: The line to fix the filtering, mentioned above, is included here.
+    const keepResults = new Set(["leave", "mugged", "hospitalized", "attacked"]);
 
-    const byCode = new Map();
-    const keepResults = new Set(["leave", "mugged", "hospitalized"]);
-    let url = buildFactionAttacksUrl(fromSec, toSec);
-    let pages = 0;
-
-    while (url && pages < STATE.maxAttackPages) {
-      pages += 1;
-
-      let payload;
-      try {
-        payload = await httpGetJSON(url);
-      } catch (e) {
-        const msg = String(e?.message || e);
-        if (msg.includes("rate limit") || msg.includes("429")) {
-          // back off and retry same URL
-          await new Promise((r) => setTimeout(r, 5000));
-          continue;
-        }
-        throw e;
-      }
-
+    try {
+      const payload = await httpGetJSON(url);
       const batch = Array.isArray(payload?.attacks) ? payload.attacks : [];
-      for (const r of batch) {
-        const code = String(r.code ?? r.attack_id ?? r.id ?? "");
-        if (!code || byCode.has(code)) continue;
 
+      // Return only the attacks that are valid for chaining
+      return batch.filter(r => {
         const res = String(r.result || "").toLowerCase();
-        if (!keepResults.has(res)) continue; // only chain-crediting outcomes
+        return keepResults.has(res);
+      });
 
-        byCode.set(code, r);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (msg.includes("rate limit") || msg.includes("429")) {
+        // If we get rate limited, wait 5 seconds and retry this same chunk
+        await new Promise((r) => setTimeout(r, 5000));
+        return fetchAttacksWindow(fromSec, toSec);
       }
-
-      // Handle pagination by following the 'next' link from the API response
-      const nextUrlString = resolveNextLink(payload?._metadata?.links?.next, url);
-      if (!nextUrlString || nextUrlString === url) break; // Exit if no more pages
-
-      // BUG FIX: The 'next' URL from the API doesn't include the key. We must add it back.
-      const nextUrl = new URL(nextUrlString);
-      if (!nextUrl.searchParams.has("key")) {
-        nextUrl.searchParams.set("key", keyParam());
-      }
-      url = nextUrl.href; // Use the corrected URL for the next loop iteration
-
-      // gentle pacing to remain under caps
-      await new Promise((r) => setTimeout(r, 800));
+      // For any other error, let the calling function handle it
+      throw e;
     }
-
-    // Return sorted by 'ended' ascending (helps plotting & threshold calc)
-    return Array.from(byCode.values()).sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
   }
 
   async function fetchAttacksWindowChunked(fromSec, toSec, expectedLen = null) {
-    const CHUNK = 2 * 60 * 60; // 2 hours
+    const CHUNK = 5 * 60; // 5 minutes
     const byCode = new Map();
     let start = fromSec;
 
     while (start <= toSec) {
       const end = Math.min(start + CHUNK - 1, toSec);
-      const batch = await fetchAttacksWindow(start, end, /*targetHits*/ null);
+      const batch = await fetchAttacksWindow(start, end);
+
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (code && !byCode.has(code)) byCode.set(code, r);
       }
 
-      // After processing a chunk, check if we've found the whole chain
+      // Early exit logic if we've found the whole chain
       if (expectedLen) {
         const links = [...byCode.values()].map((r) => Number(r.chain ?? 0)).filter((n) => n > 0);
-        // If we have found link #1 and a link >= the expected final length, we can stop fetching more time chunks.
         if (links.length > 0 && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
           break;
         }
       }
 
       start = end + 1;
+
+      // Gentle pacing between chunks to avoid rate limits
+      await new Promise(r => setTimeout(r, 800));
     }
 
     return [...byCode.values()].sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
