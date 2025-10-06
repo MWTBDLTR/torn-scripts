@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.3
+// @version      1.3.1
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -1330,7 +1330,8 @@
     return s.size;
   }
 
-  async function fetchAttacksWindow(fromSec, toSec, targetHits = null) {
+  async function fetchAttacksWindow(fromSec, toSec) {
+    // Follow _metadata.links.next like fetchChains() does.
     function resolveNextLink(next, base) {
       if (!next) return null;
       try {
@@ -1374,12 +1375,16 @@
         byCode.set(code, r);
       }
 
-      // optional early-stops
-      if (targetHits && byCode.size >= targetHits) break;
+      // Handle pagination by following the 'next' link from the API response
+      const nextUrlString = resolveNextLink(payload?._metadata?.links?.next, url);
+      if (!nextUrlString || nextUrlString === url) break; // Exit if no more pages
 
-      const next = resolveNextLink(payload?._metadata?.links?.next, url);
-      if (!next || next === url) break;
-      url = next;
+      // BUG FIX: The 'next' URL from the API doesn't include the key. We must add it back.
+      const nextUrl = new URL(nextUrlString);
+      if (!nextUrl.searchParams.has("key")) {
+        nextUrl.searchParams.set("key", keyParam());
+      }
+      url = nextUrl.href; // Use the corrected URL for the next loop iteration
 
       // gentle pacing to remain under caps
       await new Promise((r) => setTimeout(r, 800));
