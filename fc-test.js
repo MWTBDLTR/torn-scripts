@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.7
+// @version      1.2.8
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -1094,10 +1094,19 @@
         );
         return;
       }
+
+      // Test standard faction endpoints
       await httpGetJSON(buildFactionChainUrl());
       await httpGetJSON(buildFactionChainsUrl());
-      alert("Key OK. v2 faction endpoints reachable.");
+
+      // Add a new, crucial test for the attacks endpoint
+      const now = Math.floor(Date.now() / 1000);
+      const from = now - 60; // Check a 60-second window
+      await httpGetJSON(buildFactionAttacksUrl(from, now));
+
+      alert("Key OK. All required v2 faction endpoints are reachable (including attacks).");
     } catch (e) {
+      // With the new test, this will now correctly show an error if attacks are unreachable.
       alert(`Key test failed: ${e.message || e}`);
     }
   }
