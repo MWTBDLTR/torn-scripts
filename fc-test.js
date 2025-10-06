@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.9
+// @version      1.3
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -1025,11 +1025,10 @@
     u.searchParams.set("filters", "outgoing");
     u.searchParams.set("from", String(fromSec));
     u.searchParams.set("to", String(toSec));
-    // If v2 supports it, ask for a larger page; harmless if ignored.
-    u.searchParams.set("limit", "250");
-    // Order doesn’t really matter since we’ll follow 'next', but ASC helps cursor sanity if used.
+    // Per the API documentation, the maximum limit for this endpoint is 100.
+    u.searchParams.set("limit", "100");
     u.searchParams.set("sort", "ASC");
-    u.searchParams.set("comment", "chaintooldev");
+    u.searchParams.set("comment", "chaintool-debug-fix");
     return u.href;
   }
 
