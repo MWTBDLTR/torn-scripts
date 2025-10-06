@@ -748,10 +748,17 @@
 
       // 3b) fetch if cache miss
       if (!attacks) {
-        attacks = await fetchAttacksWindowChunked(winFrom, winTo, expectedLen).catch(() => []);
-
-        // write-through cache
-        cachePutAttacks(chainId, winFrom, winTo, attacks);
+        try {
+          const fetchedAttacks = await fetchAttacksWindowChunked(winFrom, winTo, expectedLen);
+          attacks = fetchedAttacks;
+          // On success, write to cache. This is a "fire-and-forget" operation.
+          cachePutAttacks(chainId, winFrom, winTo, attacks);
+        } catch (fetchErr) {
+          console.error(`[TCE] Failed to fetch attacks for chain ${chainId}`, fetchErr);
+          toast("Error fetching attack data.");
+          // Use an empty array for the UI, but DO NOT cache the failed result.
+          attacks = [];
+        }
       }
       
       const minLink = attacks.reduce((m, a) => Math.min(m, Number(a.chain || Infinity)), Infinity);
@@ -1314,8 +1321,7 @@
     return s.size;
   }
 
-  async function fetchAttacksWindow(fromSec, toSec, targetHits = null, expectedLen = null) {
-    // Follow _metadata.links.next like fetchChains() does.
+  async function fetchAttacksWindow(fromSec, toSec, targetHits = null) {
     function resolveNextLink(next, base) {
       if (!next) return null;
       try {
@@ -1361,12 +1367,6 @@
 
       // optional early-stops
       if (targetHits && byCode.size >= targetHits) break;
-      if (expectedLen) {
-        const links = [...byCode.values()].map((x) => Number(x.chain ?? 0)).filter((n) => n > 0);
-        if (links.length && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
-          break;
-        }
-      }
 
       const next = resolveNextLink(payload?._metadata?.links?.next, url);
       if (!next || next === url) break;
@@ -1387,11 +1387,21 @@
 
     while (start <= toSec) {
       const end = Math.min(start + CHUNK - 1, toSec);
-      const batch = await fetchAttacksWindow(start, end, /*targetHits*/ null, expectedLen);
+      const batch = await fetchAttacksWindow(start, end, /*targetHits*/ null);
       for (const r of batch) {
         const code = String(r.code ?? r.attack_id ?? r.id ?? "");
         if (code && !byCode.has(code)) byCode.set(code, r);
       }
+
+      // After processing a chunk, check if we've found the whole chain
+      if (expectedLen) {
+        const links = [...byCode.values()].map((r) => Number(r.chain ?? 0)).filter((n) => n > 0);
+        // If we have found link #1 and a link >= the expected final length, we can stop fetching more time chunks.
+        if (links.length > 0 && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
+          break;
+        }
+      }
+
       start = end + 1;
     }
 
