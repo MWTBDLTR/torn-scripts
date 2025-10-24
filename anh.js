@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.3
+// @version      1.1.4
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -56,6 +56,7 @@
             '3': ['Numpad6'],
         },
         continueAction: 'default',
+        fixedTargetID: '3547823',
     };
 
     // load settings or fallback to default
@@ -87,6 +88,7 @@
     // settings helper
     function saveSettings() {
         GMAPI.setValue('settingsV2', JSON.stringify(settings));
+        clearKeyCache(); // Clear cache when settings change
     }
 
     // utility functions for type checks, guards, etc
@@ -98,6 +100,7 @@
                 target.closest('input, textarea, [contenteditable=""], [contenteditable="true"]'))
         );
     }
+
     function clickEl(el) {
         if (el) {
             el.click();
@@ -105,6 +108,7 @@
         }
         return false;
     }
+
     function tryCloseTab() {
         try { window.close(); } catch { }
         try {
@@ -113,12 +117,62 @@
         } catch { }
     }
 
-    let _hospitalReloading = false;
+    /**
+     * Reloads the page once, preventing duplicate reloads
+     * @returns {void}
+     */
+
+    let _reloading = false;
     function reloadOnce() {
-        if (_hospitalReloading) return;
-        _hospitalReloading = true;
+        if (_reloading) return;
+        _reloading = true;
         // Use replace() so Back doesn’t return you to the blocked state
         try { location.replace(location.href); } catch { location.reload(); }
+    }
+
+    /**
+     * Caching system for key mappings to improve performance
+     * Prevents repeated calculations during rapid key presses
+     */
+
+    let _cachedKeyToSlot = null;
+    let _cachedKeyToDialog = null;
+    let _cachedReverseSlot = null;
+    let _cachedReverseDialog = null;
+
+    function clearKeyCache() {
+        _cachedKeyToSlot = null;
+        _cachedKeyToDialog = null;
+        _cachedReverseSlot = null;
+        _cachedReverseDialog = null;
+    }
+
+    function getCachedKeyToWeaponSlot() {
+        if (!_cachedKeyToSlot) {
+            _cachedKeyToSlot = buildKeyToWeaponSlot();
+        }
+        return _cachedKeyToSlot;
+    }
+
+    function getCachedKeyToDialogIndex() {
+        if (!_cachedKeyToDialog) {
+            _cachedKeyToDialog = buildKeyToDialogIndex();
+        }
+        return _cachedKeyToDialog;
+    }
+
+    function getCachedReverseSlot() {
+        if (!_cachedReverseSlot) {
+            _cachedReverseSlot = reverseIndex(getCachedKeyToWeaponSlot());
+        }
+        return _cachedReverseSlot;
+    }
+
+    function getCachedReverseDialog() {
+        if (!_cachedReverseDialog) {
+            _cachedReverseDialog = reverseIndex(getCachedKeyToDialogIndex());
+        }
+        return _cachedReverseDialog;
     }
 
     // handler for "Continue" behavior, 3 options to pick from
@@ -128,7 +182,7 @@
             return true;
         }
         if (settings.continueAction === 'openFixed') {
-            window.location.href = 'https://www.torn.com/loader.php?sid=attack&user2ID=3547823';
+            window.location.href = `https://www.torn.com/loader.php?sid=attack&user2ID=${settings.fixedTargetID}`;
             return true;
         }
         return false;
@@ -163,24 +217,37 @@
 
     // main logic for key handling, hints, menu, and mutation observer
     function findPrimaryButton() {
-        return (
-            document.querySelector('button.torn-btn:nth-child(1)') ||
-            document.querySelector('button[class^="btn___"]:nth-child(1)')
-        );
+        const selectors = [
+            'button.torn-btn:nth-child(1)',
+            'button[class^="btn___"]:nth-child(1)',
+            'button:contains("Continue")',
+            'button:contains("Attack")'
+        ];
+        for (const selector of selectors) {
+            const btn = document.querySelector(selector);
+            if (btn && btn.offsetParent !== null) return btn; // Ensure button is visible
+        }
+        return null;
     }
+    
     function getOverrideButtons() {
-        const b3 =
-            document.querySelector('button.torn-btn:nth-child(3)') ||
-            document.querySelector('button[class^="btn___"]:nth-child(3)');
-        if (!b3) return null;
+        try {
+            const b3 =
+                document.querySelector('button.torn-btn:nth-child(3)') ||
+                document.querySelector('button[class^="btn___"]:nth-child(3)');
+            if (!b3) return null;
 
-        let b2 = b3.previousElementSibling;
-        while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
+            let b2 = b3.previousElementSibling;
+            while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
 
-        let b1 = b2 ? b2.previousElementSibling : null;
-        while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
+            let b1 = b2 ? b2.previousElementSibling : null;
+            while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
 
-        return { b1, b2, b3 };
+            return { b1, b2, b3 };
+        } catch (error) {
+            console.error('[Torn Numpad Helper] Error getting override buttons:', error);
+            return null;
+        }
     }
 
     // map keys to slots and dialog choices
@@ -218,8 +285,7 @@
     const style = document.createElement('style');
     style.textContent = `
     .torn-keyhint { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,.55); color: #fff; border-radius: 4px; padding: 1px 4px; font-size: 10px; line-height: 1.2; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; letter-spacing: .2px; pointer-events: none; z-index: 2147483647; opacity: .9; }
-    .torn-keyhint--multi { opacity: .85; }
-  `;
+    .torn-keyhint--multi { opacity: .85; }`;
     document.head.appendChild(style);
 
     // helpers for add/remove key hints
@@ -260,34 +326,37 @@
 
     // main ui refresh, draw hints, buttons, or slots
     function updateHints() {
-        clearAllHints();
+        try {
+            clearAllHints();
 
-        const ob = getOverrideButtons();
-        if (ob && (ob.b1 || ob.b2 || ob.b3)) {
-            const keyToDlg = buildKeyToDialogIndex();
-            const rev = reverseIndex(keyToDlg);
-            if (ob.b1) ensureHintOnElement(ob.b1, prettyKeys(rev.get(1) || ['4']) || '');
-            if (ob.b2) ensureHintOnElement(ob.b2, prettyKeys(rev.get(2) || ['5']) || '');
-            if (ob.b3) ensureHintOnElement(ob.b3, prettyKeys(rev.get(3) || ['6']) || '');
-            return;
-        }
+            const ob = getOverrideButtons();
+            if (ob && (ob.b1 || ob.b2 || ob.b3)) {
+                const rev = getCachedReverseDialog();
+                if (ob.b1) ensureHintOnElement(ob.b1, prettyKeys(rev.get(1) || ['4']) || '');
+                if (ob.b2) ensureHintOnElement(ob.b2, prettyKeys(rev.get(2) || ['5']) || '');
+                if (ob.b3) ensureHintOnElement(ob.b3, prettyKeys(rev.get(3) || ['6']) || '');
+                return;
+            }
 
-        const primary = findPrimaryButton();
-        if (primary) {
-            const label = hasContinueText(primary)
-                ? (settings.continueAction === 'close' ? 'any → close' : settings.continueAction === 'openFixed' ? 'any → fixed' : 'any')
-                : 'any';
-            ensureHintOnElement(primary, label);
-            return;
-        }
+            const primary = findPrimaryButton();
+            if (primary) {
+                const label = hasContinueText(primary)
+                    ? (settings.continueAction === 'close' ? 'any → close' : settings.continueAction === 'openFixed' ? 'any → fixed' : 'any')
+                    : 'any';
+                ensureHintOnElement(primary, label);
+                return;
+            }
 
-        const keyToSlot = buildKeyToWeaponSlot();
-        const rev = reverseIndex(keyToSlot);
-        for (let slot = 1; slot <= 6; slot++) {
-            const sel = selectorForWeaponSlot(slot);
-            if (sel) ensureHintOnSelector(sel, prettyKeys(rev.get(slot) || []) || '');
+            const rev = getCachedReverseSlot();
+            for (let slot = 1; slot <= 6; slot++) {
+                const sel = selectorForWeaponSlot(slot);
+                if (sel) ensureHintOnSelector(sel, prettyKeys(rev.get(slot) || []) || '');
+            }
+        } catch (error) {
+            console.error('[Torn Numpad Helper] Error in updateHints:', error);
         }
     }
+
     function isAttackUiMissing() {
         // If there’s no primary action button and no weapon/punch/kick cards,
         // we’re effectively blocked. This is resilient to class hash changes.
@@ -300,54 +369,51 @@
         return !hasPrimary && !hasAnyCard;
     }
 
-    let _reloadGuard = false;
-    function reloadOnce() {
-        if (_reloadGuard) return;
-        _reloadGuard = true;
-        try { location.replace(location.href); } catch { location.reload(); }
-    }
-
     // global key handler, ignore in text fields, hospital block, etc
     document.addEventListener(
         'keydown',
         (e) => {
-            if (isTypingInField(e.target)) return;
+            try {
+                if (isTypingInField(e.target)) return;
 
-            const keyToSlot = buildKeyToWeaponSlot();
-            const keyToDlg = buildKeyToDialogIndex();
-            if ((isHospitalBlocked() || isAttackUiMissing()) &&
-                (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
-                e.preventDefault();
-                e.stopPropagation();
-                reloadOnce();
-                console.log('[HospCheck]', /this person is currently in hospital and cannot be attacked/i.test(document.body?.innerText || ''), /this person is currently in hospital and cannot be attacked/i.test(document.body?.textContent || ''));
-                return;
-            }
-
-            const ob = getOverrideButtons();
-            if (ob && (ob.b1 || ob.b2 || ob.b3)) {
-                const idx = buildKeyToDialogIndex().get(e.code);
-                if (!idx) return;
-                const target = idx === 1 ? ob.b1 : idx === 2 ? ob.b2 : ob.b3;
-                if (clickEl(target)) { e.preventDefault(); e.stopPropagation(); }
-                return;
-            }
-
-            const primary = findPrimaryButton();
-            if (primary) {
-                if (!isNumpadKey(e.code)) return;
-                if (hasContinueText(primary) && settings.continueAction !== 'default') {
-                    e.preventDefault(); e.stopPropagation(); if (handleContinue()) return;
+                const keyToSlot = getCachedKeyToWeaponSlot();
+                const keyToDlg = getCachedKeyToDialogIndex();
+                if ((isHospitalBlocked() || isAttackUiMissing()) &&
+                    (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    reloadOnce();
+                    console.log('[HospCheck]', /this person is currently in hospital and cannot be attacked/i.test(document.body?.innerText || ''), /this person is currently in hospital and cannot be attacked/i.test(document.body?.textContent || ''));
+                    return;
                 }
-                if (clickEl(primary)) { e.preventDefault(); e.stopPropagation(); }
-                return;
-            }
 
-            const slot = keyToSlot.get(e.code);
-            if (!slot) return;
-            const selector = selectorForWeaponSlot(slot);
-            const el = selector ? document.querySelector(selector) : null;
-            if (clickEl(el)) { e.preventDefault(); e.stopPropagation(); }
+                const ob = getOverrideButtons();
+                if (ob && (ob.b1 || ob.b2 || ob.b3)) {
+                    const idx = keyToDlg.get(e.code);
+                    if (!idx) return;
+                    const target = idx === 1 ? ob.b1 : idx === 2 ? ob.b2 : idx === 3;
+                    if (clickEl(target)) { e.preventDefault(); e.stopPropagation(); }
+                    return;
+                }
+
+                const primary = findPrimaryButton();
+                if (primary) {
+                    if (!isNumpadKey(e.code)) return;
+                    if (hasContinueText(primary) && settings.continueAction !== 'default') {
+                        e.preventDefault(); e.stopPropagation(); if (handleContinue()) return;
+                    }
+                    if (clickEl(primary)) { e.preventDefault(); e.stopPropagation(); }
+                    return;
+                }
+
+                const slot = keyToSlot.get(e.code);
+                if (!slot) return;
+                const selector = selectorForWeaponSlot(slot);
+                const el = selector ? document.querySelector(selector) : null;
+                if (clickEl(el)) { e.preventDefault(); e.stopPropagation(); }
+            } catch (error) {
+                console.error('[Torn Numpad Helper] Error in keydown handler:', error);
+            }
         },
         true
     );
@@ -384,6 +450,10 @@
         );
         if (input == null) return;
         const parsed = parseKeyList(input);
+        if (parsed.length === 0 && input.trim() !== '') {
+            alert('No valid keys found. Please use numbers 0-9, Enter, Add, Subtract, Multiply, Divide, Decimal (.), or Comma (,).');
+            return;
+        }
         apply(parsed);
         saveSettings();
         scheduleUpdate();
@@ -446,6 +516,20 @@
         });
         menuIds.push(idDec);
 
+        const labelFixedTarget = `Fixed target ID: ${settings.fixedTargetID}`;
+        const idFixedTarget = GM_registerMenuCommand(labelFixedTarget, () => {
+            const newID = prompt(`Enter target ID for "attack fixed" action:\nCurrent: ${settings.fixedTargetID}`, settings.fixedTargetID);
+            if (newID != null && /^\d+$/.test(newID.trim())) {
+                settings.fixedTargetID = newID.trim();
+                saveSettings();
+                registerMenu();
+                console.info('[Torn Numpad Helper] Fixed target ID set to:', settings.fixedTargetID);
+            } else if (newID != null) {
+                alert('Invalid ID. Please enter a numeric user ID.');
+            }
+        });
+        menuIds.push(idFixedTarget);
+
         const labelContinue = `Continue action: ${settings.continueAction === 'close' ? 'Close tab' :
                 settings.continueAction === 'openFixed' ? 'attack bodybagger' :
                     'Default click'
@@ -476,12 +560,15 @@
     // init
     registerMenu();
 
-    // throttle schedule to avoid extra DOM work
+    // throttle schedule to avoid extra DOM work with requestAnimationFrame
     const scheduleUpdate = (() => {
         let t = null;
         return () => {
             if (t) return;
-            t = setTimeout(() => { t = null; updateHints(); }, 50);
+            t = requestAnimationFrame(() => { 
+                t = null; 
+                updateHints(); 
+            });
         };
     })();
 
@@ -495,6 +582,12 @@
         childList: true,
         attributes: true,
         attributeFilter: ['class', 'style'],
+    });
+
+    // cleanup on page unload to prevent memory leaks
+    window.addEventListener('beforeunload', () => {
+        if (observer) observer.disconnect();
+        clearKeyCache();
     });
 
     // refresh on focus (tab switching, etc)
