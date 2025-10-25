@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Attack Helper
+// @name         Attack Helper TEST
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2.1
+// @version      0.0.1
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
-// @author       MrChurch [3654415]
+// @author       MrChurch [3654415] (with optimizations)
 // @license      MIT
 // @match        https://www.torn.com/loader.php*
 // @run-at       document-idle
@@ -113,17 +113,6 @@
         } catch { }
     }
 
-    // duplicate function mayhaps
-    /*
-    let _hospitalReloading = false;
-    function reloadOnce() {
-      if (_hospitalReloading) return;
-      _hospitalReloading = true;
-      // Use replace() so Back doesn’t return you to the blocked state
-      try { location.replace(location.href); } catch { location.reload(); }
-    }
-  */
-
     // handler for "Continue" behavior, 3 options to pick from
     function handleContinue() {
         if (settings.continueAction === 'close') {
@@ -145,43 +134,30 @@
 
     // robust, class-agnostic detection for "target is in hospital" banners
     function isHospitalBlocked() {
-        // 1) Fast path: literal banner you said you see
         const literal = /this person is currently in hospital and cannot be attacked/i;
         const bodyText = (document.body?.innerText || document.body?.textContent || '');
-        if (literal.test(bodyText)) return true;
+        if (literal.test(bodyText))
+            return true;
 
-        // 2) Fallback scan in a likely container, limited length
-        const container = document.querySelector(
-            '#mainContainer, #root, main, [role="main"], .content, [class*="content"]'
-        ) || document.body;
+        const container = document.querySelector('#mainContainer, #root, main, [role="main"], .content, [class*="content"]') || document.body;
 
         const text = (container.innerText || container.textContent || '').toLowerCase().slice(0, 5000);
-
-        // Precompiled, newline-tolerant patterns
         const rxNearby = /\b(is|target|opponent)[\s\S]{0,40}\b(hospital|hospitalized|hospitalised)\b/; // handles breaks
         const rxInHospital = /\b(in|into)\s+the?\s*hospital\b/;
-
         return rxNearby.test(text) || rxInHospital.test(text);
     }
 
-    // main logic for key handling, hints, menu, and mutation observer
     function findPrimaryButton() {
-        return (
-            document.querySelector('button.torn-btn:nth-child(1)') ||
-            document.querySelector('button[class^="btn___"]:nth-child(1)')
-        );
+        return document.querySelector('[data-test="attack-button"]');
     }
+
     function getOverrideButtons() {
-        const b3 =
-            document.querySelector('button.torn-btn:nth-child(3)') ||
-            document.querySelector('button[class^="btn___"]:nth-child(3)');
-        if (!b3) return null;
+        const b1 = document.querySelector('[data-test="attack-dialog-leave"]');
+        const b2 = document.querySelector('[data-test="attack-dialog-mug"]');
+        const b3 = document.querySelector('[data-test="attack-dialog-hospitalize"]');
 
-        let b2 = b3.previousElementSibling;
-        while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
-
-        let b1 = b2 ? b2.previousElementSibling : null;
-        while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
+        // If any button is missing, we're not in the dialog state
+        if (!b1 && !b2 && !b3) return null;
 
         return { b1, b2, b3 };
     }
@@ -210,11 +186,16 @@
         return map;
     }
 
-    // selectors for weapons or melee cards
     function selectorForWeaponSlot(slot) {
-        if (slot >= 1 && slot <= 4) return `div.hoverEnabled___skjqK:nth-child(${slot})`;
-        if (slot === 5 || slot === 6) return `div.hoverEnabled___skjqK:nth-child(${slot})`; // Punch/Kick cards
-        return null;
+        switch (slot) {
+            case 1: return '#weapon_main';
+            case 2: return '#weapon_second';
+            case 3: return '#weapon_melee';
+            case 4: return '#weapon_temp';
+            case 5: return '#weapon_fists';
+            case 6: return '#weapon_kick'; // assumed ID for Kick
+            default: return null;
+        }
     }
 
     // key hint ui
@@ -292,13 +273,11 @@
         }
     }
     function isAttackUiMissing() {
-        // If there’s no primary action button and no weapon/punch/kick cards,
-        // we’re effectively blocked. This is resilient to class hash changes.
         const hasPrimary =
-            document.querySelector('button.torn-btn, button[class^="btn___"]') != null;
+            document.querySelector('[data-test="attack-button"], button.torn-btn, button[class^="btn___"]') != null; // Kept old selectors as fallback
 
         const hasAnyCard =
-            document.querySelector('.hoverEnabled___skjqK, [data-test*="weapon-card"], [data-test*="attack-card"]') != null;
+            document.querySelector('#weapon_main, #weapon_fists, .hoverEnabled___skjqK, [data-test*="weapon-card"], [data-test*="attack-card"]') != null; // Added IDs
 
         return !hasPrimary && !hasAnyCard;
     }
@@ -450,8 +429,8 @@
         menuIds.push(idDec);
 
         const labelContinue = `Continue action: ${settings.continueAction === 'close' ? 'Close tab' :
-            settings.continueAction === 'openFixed' ? 'attack bodybagger' :
-                'Default click'
+                settings.continueAction === 'openFixed' ? 'attack bodybagger' :
+                    'Default click'
             } (cycle)`;
         const idCont = GM_registerMenuCommand(labelContinue, async () => {
             settings.continueAction =
@@ -497,7 +476,7 @@
         subtree: true,
         childList: true,
         attributes: true,
-        attributeFilter: ['class', 'style'],
+        attributeFilter: ['class'], // removed 'style' to reduce noise
     });
 
     // refresh on focus (tab switching, etc)
