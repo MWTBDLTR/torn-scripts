@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper TEST
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      0.0.2
+// @version      0.0.3
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415] (with optimizations)
 // @license      MIT
@@ -157,12 +157,16 @@
     }
 
     function getOverrideButtons() {
-        const b1 = document.querySelector('[data-test="attack-dialog-leave"]');
-        const b2 = document.querySelector('[data-test="attack-dialog-mug"]');
-        const b3 = document.querySelector('[data-test="attack-dialog-hospitalize"]');
+        const b3 =
+            document.querySelector('button.torn-btn:nth-child(3)') ||
+            document.querySelector('button[class^="btn___"]:nth-child(3)');
+        if (!b3) return null;
 
-        // If any button is missing, we're not in the dialog state
-        if (!b1 && !b2 && !b3) return null;
+        let b2 = b3.previousElementSibling;
+        while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
+
+        let b1 = b2 ? b2.previousElementSibling : null;
+        while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
 
         return { b1, b2, b3 };
     }
