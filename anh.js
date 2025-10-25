@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.6
+// @version      1.1.7
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -267,6 +267,12 @@
         }
     }
 
+    function areWeaponSlotsVisible() {
+        // Check if the "fists" container (always present in-fight) is visible
+        const fists = document.querySelector('[data-id="weaponSlotFists"]');
+        return fists && fists.offsetParent !== null;
+    }
+
     // map keys to slots and dialog choices
     function buildKeyToWeaponSlot() {
         const map = new Map();
@@ -354,6 +360,7 @@
         try {
             clearAllHints();
 
+            // 1. Check for Dialogs
             const ob = getOverrideButtons();
             if (ob && (ob.b1 || ob.b2 || ob.b3)) {
                 const rev = getCachedReverseDialog();
@@ -363,6 +370,17 @@
                 return;
             }
 
+            // 2. NEW: Check for Weapon Slots (in-fight)
+            if (areWeaponSlotsVisible()) {
+                const rev = getCachedReverseSlot();
+                for (let slot = 1; slot <= 6; slot++) {
+                    const sel = selectorForWeaponSlot(slot);
+                    if (sel) ensureHintOnSelector(sel, prettyKeys(rev.get(slot) || []) || '');
+                }
+                return; // In-fight, hints drawn, stop.
+            }
+
+            // 3. Check for Primary Button (Attack/Continue)
             const primary = findPrimaryButton();
             if (primary) {
                 const label = hasContinueText(primary)
@@ -370,12 +388,6 @@
                     : 'any';
                 ensureHintOnElement(primary, label);
                 return;
-            }
-
-            const rev = getCachedReverseSlot();
-            for (let slot = 1; slot <= 6; slot++) {
-                const sel = selectorForWeaponSlot(slot);
-                if (sel) ensureHintOnSelector(sel, prettyKeys(rev.get(slot) || []) || '');
             }
         } catch (error) {
             console.error('[Torn Numpad Helper] Error in updateHints:', error);
@@ -412,15 +424,27 @@
                     return;
                 }
 
+                // 1. Check for Dialogs
                 const ob = getOverrideButtons();
                 if (ob && (ob.b1 || ob.b2 || ob.b3)) {
                     const idx = keyToDlg.get(e.code);
                     if (!idx) return;
-                    const target = idx === 1 ? ob.b1 : idx === 2 ? ob.b2 : idx === 3;
+                    const target = idx === 1 ? ob.b1 : idx === 2 ? ob.b2 : ob.b3;
                     if (clickEl(target)) { e.preventDefault(); e.stopPropagation(); }
                     return;
                 }
 
+                // 2. NEW: Check for Weapon Slots (in-fight)
+                if (areWeaponSlotsVisible()) {
+                    const slot = keyToSlot.get(e.code);
+                    if (!slot) return;
+                    const selector = selectorForWeaponSlot(slot);
+                    const el = selector ? document.querySelector(selector) : null;
+                    if (clickEl(el)) { e.preventDefault(); e.stopPropagation(); }
+                    return; // In-fight, key handled, stop.
+                }
+
+                // 3. Check for Primary Button (Attack/Continue)
                 const primary = findPrimaryButton();
                 if (primary) {
                     if (!isNumpadKey(e.code)) return;
@@ -431,11 +455,6 @@
                     return;
                 }
 
-                const slot = keyToSlot.get(e.code);
-                if (!slot) return;
-                const selector = selectorForWeaponSlot(slot);
-                const el = selector ? document.querySelector(selector) : null;
-                if (clickEl(el)) { e.preventDefault(); e.stopPropagation(); }
             } catch (error) {
                 console.error('[Torn Numpad Helper] Error in keydown handler:', error);
             }
