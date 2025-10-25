@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.4
+// @version      1.1.5
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -229,7 +229,7 @@
         }
         return null;
     }
-    
+
     function getOverrideButtons() {
         try {
             const b3 =
@@ -274,11 +274,19 @@
         return map;
     }
 
-    // selectors for weapons or melee cards
     function selectorForWeaponSlot(slot) {
-        if (slot >= 1 && slot <= 4) return `div.hoverEnabled___skjqK:nth-child(${slot})`;
-        if (slot === 5 || slot === 6) return `div.hoverEnabled___skjqK:nth-child(${slot})`; // Punch/Kick cards
-        return null;
+        switch (slot) {
+            case 1: return '[data-id="weaponSlotPrimary"]';
+            case 2: return '[data-id="weaponSlotSecondary"]';
+            case 3: return '[data-id="weaponSlotMelee"]';
+            case 4: return '[data-id="weaponSlotTemporary"]';
+
+            // Punch and Kick are child elements of the "fists" container
+            case 5: return '[data-id="weaponSlotFists"] > div:nth-child(1)'; // Punch
+            case 6: return '[data-id="weaponSlotFists"] > div:nth-child(2)'; // Kick
+
+            default: return null;
+        }
     }
 
     // key hint ui
@@ -531,8 +539,8 @@
         menuIds.push(idFixedTarget);
 
         const labelContinue = `Continue action: ${settings.continueAction === 'close' ? 'Close tab' :
-                settings.continueAction === 'openFixed' ? 'attack bodybagger' :
-                    'Default click'
+            settings.continueAction === 'openFixed' ? 'attack bodybagger' :
+                'Default click'
             } (cycle)`;
         const idCont = GM_registerMenuCommand(labelContinue, async () => {
             settings.continueAction =
@@ -565,9 +573,9 @@
         let t = null;
         return () => {
             if (t) return;
-            t = requestAnimationFrame(() => { 
-                t = null; 
-                updateHints(); 
+            t = requestAnimationFrame(() => {
+                t = null;
+                updateHints();
             });
         };
     })();
