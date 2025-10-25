@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper (Configurable Keys)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.5
+// @version      1.1.6
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -215,35 +215,52 @@
         return rxNearby.test(text) || rxInHospital.test(text);
     }
 
-    // main logic for key handling, hints, menu, and mutation observer
     function findPrimaryButton() {
+        // any primary-looking button
         const selectors = [
-            'button.torn-btn:nth-child(1)',
-            'button[class^="btn___"]:nth-child(1)',
-            'button:contains("Continue")',
-            'button:contains("Attack")'
+            'button.torn-btn',
+            'button[class^="btn___"]',
+            'button[type="submit"]'
         ];
+
         for (const selector of selectors) {
-            const btn = document.querySelector(selector);
-            if (btn && btn.offsetParent !== null) return btn; // Ensure button is visible
+            // buttons matching the selector
+            const buttons = document.querySelectorAll(selector);
+
+            for (const btn of buttons) {
+                if (btn && btn.offsetParent !== null) { // Ensure button is visible
+                    const txt = (btn.textContent || '').toLowerCase();
+                    if (txt.includes('attack') || txt.includes('fight') || txt.includes('continue')) {
+                        return btn; // Found a valid primary button
+                    }
+                }
+            }
         }
+
+        // last resort, try the original :nth-child selector
+        try {
+            const btn = document.querySelector('button.torn-btn:nth-child(1), button[class^="btn___"]:nth-child(1)');
+            if (btn && btn.offsetParent !== null) return btn;
+        } catch (e) { }
+
         return null;
     }
 
     function getOverrideButtons() {
         try {
-            const b3 =
-                document.querySelector('button.torn-btn:nth-child(3)') ||
-                document.querySelector('button[class^="btn___"]:nth-child(3)');
-            if (!b3) return null;
+            // container, which has a hashed class starting with "dialogButtons___"
+            const container = document.querySelector('div[class^="dialogButtons___"]');
+            if (!container) return null;
 
-            let b2 = b3.previousElementSibling;
-            while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
+            // buttons within their div wrappers
+            const b1 = container.querySelector('div:nth-child(1) > button.torn-btn');
+            const b2 = container.querySelector('div:nth-child(2) > button.torn-btn');
+            const b3 = container.querySelector('div:nth-child(3) > button.torn-btn');
 
-            let b1 = b2 ? b2.previousElementSibling : null;
-            while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
-
-            return { b1, b2, b3 };
+            if (b1 || b2 || b3) {
+                return { b1, b2, b3 };
+            }
+            return null;
         } catch (error) {
             console.error('[Torn Numpad Helper] Error getting override buttons:', error);
             return null;
