@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Attack Helper TEST
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      0.0.1
+// @version      0.0.2
 // @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
 // @author       MrChurch [3654415] (with optimizations)
 // @license      MIT
@@ -148,7 +148,12 @@
     }
 
     function findPrimaryButton() {
-        return document.querySelector('[data-test="attack-button"]');
+        const dataTestBtn = document.querySelector('[data-test="attack-button"]');
+        if (dataTestBtn) return dataTestBtn;
+        return (
+            document.querySelector('button.torn-btn:nth-child(1)') ||
+            document.querySelector('button[class^="btn___"]:nth-child(1)')
+        );
     }
 
     function getOverrideButtons() {
@@ -429,8 +434,8 @@
         menuIds.push(idDec);
 
         const labelContinue = `Continue action: ${settings.continueAction === 'close' ? 'Close tab' :
-                settings.continueAction === 'openFixed' ? 'attack bodybagger' :
-                    'Default click'
+            settings.continueAction === 'openFixed' ? 'attack bodybagger' :
+                'Default click'
             } (cycle)`;
         const idCont = GM_registerMenuCommand(labelContinue, async () => {
             settings.continueAction =
