@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Attack Helper TEST
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      0.0.3
-// @description  Numpad shortcuts for Torn attack page with configurable key mappings per weapon slot and dialog choices + configurable Continue behavior + hospital reload check
-// @author       MrChurch [3654415] (with optimizations)
+// @version      0.0.4
+// @description  Numpad shortcuts for Torn attack page with configurable key mappings + hospital reload
+// @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/loader.php*
 // @run-at       document-idle
@@ -283,7 +283,7 @@
     }
     function isAttackUiMissing() {
         const hasPrimary =
-            document.querySelector('[data-test="attack-button"], button.torn-btn, button[class^="btn___"]') != null; // Kept old selectors as fallback
+            document.querySelector('[data-test="attack-button"], button.torn-btn, button[class^="btn___"]') != null;
 
         const hasAnyCard =
             document.querySelector('#weapon_main, #weapon_fists, .hoverEnabled___skjqK, [data-test*="weapon-card"], [data-test*="attack-card"]') != null; // Added IDs
@@ -292,6 +292,8 @@
     }
 
     let _reloadGuard = false;
+    let lastKeyTime = 0;
+    const KEY_COOLDOWN = 100;
     function reloadOnce() {
         if (_reloadGuard) return;
         _reloadGuard = true;
@@ -306,8 +308,21 @@
 
             const keyToSlot = buildKeyToWeaponSlot();
             const keyToDlg = buildKeyToDialogIndex();
-            if ((isHospitalBlocked() || isAttackUiMissing()) &&
-                (keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpadKey(e.code))) {
+            const isNumpad = isNumpadKey(e.code);
+            const isOurKey = keyToSlot.has(e.code) || keyToDlg.has(e.code) || isNumpad;
+
+            if (!isOurKey) return; // not a key we care about
+
+            // check throttle
+            const now = Date.now();
+            if (now - lastKeyTime < KEY_COOLDOWN) {
+                e.preventDefault(); // our key, and on cooldown
+                e.stopPropagation();
+                return;
+            }
+
+            // hospital/missing UI check
+            if (isHospitalBlocked() || isAttackUiMissing()) {
                 e.preventDefault();
                 e.stopPropagation();
                 reloadOnce();
@@ -315,30 +330,48 @@
                 return;
             }
 
+            // dialog buttons
             const ob = getOverrideButtons();
             if (ob && (ob.b1 || ob.b2 || ob.b3)) {
-                const idx = buildKeyToDialogIndex().get(e.code);
-                if (!idx) return;
+                const idx = keyToDlg.get(e.code);
+                if (!idx) return; // is a numpad key, but not mapped to a dialog
                 const target = idx === 1 ? ob.b1 : idx === 2 ? ob.b2 : ob.b3;
-                if (clickEl(target)) { e.preventDefault(); e.stopPropagation(); }
+                if (clickEl(target)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    lastKeyTime = now;
+                }
                 return;
             }
 
+            // primary button
             const primary = findPrimaryButton();
             if (primary) {
-                if (!isNumpadKey(e.code)) return;
+                if (!isNumpad) return; // numpad keys trigger the primary button
                 if (hasContinueText(primary) && settings.continueAction !== 'default') {
-                    e.preventDefault(); e.stopPropagation(); if (handleContinue()) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    lastKeyTime = now;
+                    if (handleContinue()) return;
                 }
-                if (clickEl(primary)) { e.preventDefault(); e.stopPropagation(); }
+                if (clickEl(primary)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    lastKeyTime = now;
+                }
                 return;
             }
 
+            // weapon slot
             const slot = keyToSlot.get(e.code);
-            if (!slot) return;
+            if (!slot) return; // is a numpad key, but not mapped
             const selector = selectorForWeaponSlot(slot);
             const el = selector ? document.querySelector(selector) : null;
-            if (clickEl(el)) { e.preventDefault(); e.stopPropagation(); }
+            if (clickEl(el)) {
+                e.preventDefault();
+                e.stopPropagation();
+                lastKeyTime = now;
+            }
         },
         true
     );
