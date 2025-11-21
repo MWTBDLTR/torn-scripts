@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Attack Helper & Keybinds
+// @name         Torn Attack Helper & Keybinds (Context Aware)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Numpad shortcuts for Torn attacks, customizable weapon slots, hospital reload, and configurable chain targets.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -95,9 +95,7 @@
         async load() {
             const saved = await Storage.get('settings', null);
             if (saved) {
-                // merge to ensure new keys in updates are respected
                 this.data = { ...this.data, ...saved };
-                // ensure nested objects exist
                 if (!saved.weaponSlotKeys) this.data.weaponSlotKeys = { ...Config.data.weaponSlotKeys };
                 if (!saved.dialogKeys) this.data.dialogKeys = { ...Config.data.dialogKeys };
             }
@@ -109,6 +107,16 @@
 
         // maps a KeyboardEvent.code to a logical action
         getKeyMapping(code) {
+            // at the end of a fight prioritize dialog keys (Leave/Mug/Hosp)
+            // over weapons to prevent conflicts
+            const isFightOver = !!document.querySelector(SELECTORS.actionButtons.group3);
+
+            if (isFightOver) {
+                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
+                    if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
+                }
+            }
+
             // check weapons
             for (const [slot, keys] of Object.entries(this.data.weaponSlotKeys)) {
                 if (keys.includes(code)) return { type: 'weapon', slot: Number(slot) };
@@ -125,9 +133,11 @@
                 }
             }
 
-            // check dialogs
-            for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
-                if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
+            // double check dialogs if we weren't at the end of the fight (fallback)
+            if (!isFightOver) {
+                for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
+                    if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
+                }
             }
 
             // numpad fallback for primary action
@@ -184,7 +194,6 @@
             element.appendChild(hint);
         },
 
-        // helper to display keys cleanly (e.g., "Numpad1" -> "1")
         formatKeys(keys) {
             if (!keys || keys.length === 0) return '';
             return keys.map(k => k.replace('Numpad', '').replace('Decimal', '.').replace('Comma', ',')).join('/');
@@ -196,8 +205,6 @@
         lastActionTime: 0,
 
         getOverrideButtons() {
-            // finding Leave, Mug, Hosp buttons that appear in a group
-            // find the 3rd button (Hospitalize) and walk backwards
             const b3 = document.querySelector(SELECTORS.actionButtons.group3);
             if (!b3) return null;
 
@@ -217,15 +224,12 @@
         },
 
         isInHospital() {
-            // explicit banner check
             const bodyText = document.body.innerText || '';
             if (/this person is currently in hospital and cannot be attacked/i.test(bodyText)) return true;
 
-            // contextual check inside main container
             const container = document.querySelector(SELECTORS.mainContainer);
             if (container) {
                 const text = container.innerText.toLowerCase();
-                // regex looking for "User is in hospital" variations
                 return /\b(target|opponent|person).{0,30}\b(hospital)/.test(text);
             }
             return false;
@@ -235,7 +239,7 @@
             const { continueAction, fixedTargetId } = Config.data;
             
             if (continueAction === 'close') {
-                window.close(); // Try to close tab
+                window.close(); 
                 return true;
             }
             if (continueAction === 'openFixed') {
@@ -243,14 +247,12 @@
                 window.location.href = `https://www.torn.com/loader.php?sid=attack&user2ID=${target}`;
                 return true;
             }
-            return false; // default behavior (let the click happen)
+            return false; 
         },
 
-        // main function to draw hints based on current state
         updateVisuals() {
             UI.clearHints();
 
-            // end of fight dialogs (Leave/Mug/Hosp)
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3) {
                 UI.addHint(dialogs.b1, UI.formatKeys(Config.data.dialogKeys['1']));
@@ -259,7 +261,6 @@
                 return;
             }
 
-            // primary Attack/Continue Button
             const primary = document.querySelector(SELECTORS.primaryButton);
             if (primary) {
                 const text = (primary.innerText || '').toLowerCase();
@@ -272,16 +273,13 @@
                 UI.addHint(primary, hintText);
             }
 
-            // weapon slots
             for (let i = 1; i <= 6; i++) {
                 const el = document.querySelector(SELECTORS.slots[i]);
                 if (!el) continue;
 
                 let keys = Config.data.weaponSlotKeys[String(i)] || [];
                 
-                // add decimal logic to visual hint
                 if ((Config.data.decimalTarget === 'kick' && i === 6) || (Config.data.decimalTarget === 'punch' && i === 5)) {
-                    // only add decimal hint if not mapped elsewhere
                     const decimalMappedElsewhere = Object.values(Config.data.weaponSlotKeys).some(k => k.includes('NumpadDecimal'));
                     if (!decimalMappedElsewhere) keys = [...keys, 'Numpad.'];
                 }
@@ -290,17 +288,15 @@
             }
         },
 
-        // Handle Key Presses
         handleInput(e) {
             if (this.isTyping(e.target)) return;
             
             const now = Date.now();
             if (now - this.lastActionTime < CONSTANTS.KEY_COOLDOWN) return;
 
-            const mapping = Config.getKeyMapping(e.code);
-            if (!mapping) return; // not a mapped key
+            let mapping = Config.getKeyMapping(e.code);
+            if (!mapping) return; 
 
-            // check hospital state before acting
             if (this.isInHospital()) {
                 console.log('[AttackHelper] Target in hospital. Reloading...');
                 window.location.reload();
@@ -309,7 +305,7 @@
 
             let actionSuccess = false;
 
-            // dialogs (End Fight)
+            // Handle Dialogs
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3 && mapping.type === 'dialog') {
                 const btn = mapping.index === 1 ? dialogs.b1 : mapping.index === 2 ? dialogs.b2 : dialogs.b3;
@@ -318,21 +314,27 @@
                     actionSuccess = true;
                 }
             }
-            // weapon slots
+            
+            // Handle Weapons
             else if (mapping.type === 'weapon') {
                 const el = document.querySelector(SELECTORS.slots[mapping.slot]);
-                if (el) {
+                
+                // if the weapon slot does not exist or is hidden (Start of fight),
+                // treat this keypress as a "Primary Fallback" to hit the start/continue button
+                if (el && el.offsetParent !== null) {
                     el.click();
                     actionSuccess = true;
+                } else {
+                    mapping.type = 'primary_fallback'; // change type to fall through to next block
                 }
             }
-            // primary / continue Button
-            else if (mapping.type === 'primary_fallback') {
+
+            // Handle Primary / Continue Button (or fallback from missing weapon)
+            if (!actionSuccess && mapping.type === 'primary_fallback') {
                 const primary = document.querySelector(SELECTORS.primaryButton);
                 if (primary) {
                     const text = (primary.innerText || '').toLowerCase();
                     
-                    // handle special logic
                     if (text.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
@@ -363,7 +365,6 @@
             );
             if (str === null) return null;
 
-            // parse input
             return str.split(/[\s,]+/)
                 .map(s => s.trim())
                 .filter(Boolean)
@@ -371,7 +372,6 @@
                     if (s === '.') return 'NumpadDecimal';
                     if (s === ',') return 'NumpadComma';
                     if (s.startsWith('Numpad')) return s;
-                    // convert "1" to "Numpad1"
                     if (/^\d$/.test(s)) return `Numpad${s}`;
                     return null;
                 })
@@ -379,11 +379,9 @@
         },
 
         register() {
-            // clean up old menu items
             this.menuIds.forEach(id => GM_unregisterMenuCommand(id));
             this.menuIds = [];
 
-            // weapon slots
             for (let i = 1; i <= 6; i++) {
                 const id = GM_registerMenuCommand(`Edit Slot ${i} Keys`, async () => {
                     const newKeys = this.promptKey(`Weapon Slot ${i}`, Config.data.weaponSlotKeys[i] || []);
@@ -396,7 +394,6 @@
                 this.menuIds.push(id);
             }
 
-            // dialog Keys
             ['Leave (Left)', 'Mug (Middle)', 'Hosp (Right)'].forEach((label, idx) => {
                 const mapIdx = idx + 1;
                 const id = GM_registerMenuCommand(`Edit ${label} Keys`, async () => {
@@ -410,16 +407,14 @@
                 this.menuIds.push(id);
             });
 
-            // toggle decimal target
             const decLabel = `Decimal Key: ${Config.data.decimalTarget.toUpperCase()} (Click to Swap)`;
             this.menuIds.push(GM_registerMenuCommand(decLabel, async () => {
                 Config.data.decimalTarget = Config.data.decimalTarget === 'punch' ? 'kick' : 'punch';
                 await Config.save();
-                this.register(); // Re-render menu text
+                this.register();
                 AttackController.updateVisuals();
             }));
 
-            // continue action
             const contLabels = { default: 'Default Click', close: 'Close Tab', openFixed: 'Chain Target' };
             const contLabel = `Continue Action: ${contLabels[Config.data.continueAction]} (Cycle)`;
             this.menuIds.push(GM_registerMenuCommand(contLabel, async () => {
@@ -431,7 +426,6 @@
                 AttackController.updateVisuals();
             }));
 
-            // set chain target
             const chainLabel = `Set Chain ID (Current: ${Config.data.fixedTargetId || 'Default'})`;
             this.menuIds.push(GM_registerMenuCommand(chainLabel, async () => {
                 const input = prompt('Enter User ID for chaining (used when Continue Action is "Chain Target"):', Config.data.fixedTargetId);
@@ -446,26 +440,21 @@
 
     // INIT
     async function init() {
-        // validate page (attack pages only)
         const params = new URLSearchParams(location.search);
         if (!(params.get('sid') === 'attack' && params.has('user2ID'))) return;
 
-        // load settings & styles
         await Config.load();
         UI.injectStyles();
         Menu.register();
 
-        // event listeners
         document.addEventListener('keydown', (e) => AttackController.handleInput(e), true);
         
-        // debounced observer for DOM changes (React re-renders)
         let timeout;
         const observer = new MutationObserver(() => {
             if (timeout) clearTimeout(timeout);
             timeout = setTimeout(() => {
                 AttackController.updateVisuals();
                 
-                // reload if hospital banner appears dynamically
                 if (AttackController.isInHospital()) {
                     location.reload();
                 }
@@ -476,12 +465,10 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['class', 'disabled'] // filter to reduce noise
+            attributeFilter: ['class', 'disabled'] 
         });
 
-        // initial render
         AttackController.updateVisuals();
-        
         console.info(`[Torn Attack Helper] v${GM.info.script.version} Loaded.`);
     }
 
