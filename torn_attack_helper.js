@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Attack Helper & Keybinds (State Fixed)
+// @name         Torn Attack Helper & Keybinds
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.0
-// @description  Numpad shortcuts for Torn attacks, customizable weapon slots, hospital reload, and configurable chain targets.
+// @version      1.1.1
+// @description  Customizable numpad shortcuts for attacks and configurable follow-up target (target list functionality is a WIP)
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/loader.php*
@@ -23,7 +23,7 @@
     const CONSTANTS = {
         KEY_COOLDOWN: 150, // ms
         DEBOUNCE_TIME: 75, // ms
-        DEFAULT_CHAIN_TARGET: '3547823', // Default if none set
+        DEFAULT_CHAIN_TARGET: '3547823', // Default NPC if none set
     };
 
     const SELECTORS = {
@@ -35,8 +35,8 @@
             2: '#weapon_second',
             3: '#weapon_melee',
             4: '#weapon_temp',
-            5: '#weapon_fists',
-            6: '#weapon_kick',
+            5: '#weapon_fists', // Punch
+            6: '#weapon_kick',  // Kick
         },
 
         mainContainer: '#mainContainer, #root, main, [role="main"], .content',
@@ -76,8 +76,8 @@
                 '2': ['Numpad2'],
                 '3': ['Numpad3'],
                 '4': ['Numpad0'],
-                '5': ['NumpadDecimal'],
-                '6': ['NumpadPlus'],
+                '5': ['NumpadDecimal', 'NumpadComma'],
+                '6': [],
             },
             decimalTarget: 'punch', // 'punch' (5) or 'kick' (6)
             dialogKeys: {
@@ -117,8 +117,8 @@
                 if (keys.includes(code)) return { type: 'weapon', slot: Number(slot) };
             }
 
-            // Check decimal logic
-            if (['NumpadDecimal', 'NumpadPlus'].includes(code)) {
+            // Check decimal/comma logic
+            if (['NumpadDecimal', 'NumpadComma'].includes(code)) {
                 const isAlreadyMapped = Object.values(this.data.weaponSlotKeys).some(k => k.includes(code));
                 if (!isAlreadyMapped) {
                     return { 
@@ -128,7 +128,7 @@
                 }
             }
 
-            // Fallback check for dialogs (if context check failed but buttons exist)
+            // Fallback check for dialogs
             if (!isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
                     if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
@@ -149,14 +149,20 @@
         injectStyles() {
             const css = `
                 .tah-hint {
-                    position: absolute; top: 2px; right: 2px;
-                    background: rgba(0, 0, 0, 0.75); color: #fff;
-                    border: 1px solid rgba(255,255,255,0.2);
-                    border-radius: 4px; padding: 2px 5px;
-                    font-size: 11px; font-weight: 600;
-                    font-family: 'Segoe UI', Roboto, sans-serif;
-                    pointer-events: none; z-index: 9999;
-                    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+                    position: absolute; 
+                    bottom: 2px; 
+                    right: 2px;
+                    top: auto; /* Overwrite previous defaults */
+                    background: rgba(0, 0, 0, 0.6); 
+                    color: #fff;
+                    border: 1px solid rgba(255,255,255,0.1);
+                    border-radius: 3px; 
+                    padding: 1px 4px;
+                    font-size: 10px; 
+                    font-weight: 400;
+                    font-family: sans-serif;
+                    pointer-events: none; 
+                    z-index: 9999;
                 }
                 .tah-hint-multi { border-color: #ffd700; color: #ffd700; }
             `;
@@ -188,7 +194,7 @@
 
         formatKeys(keys) {
             if (!keys || keys.length === 0) return '';
-            return keys.map(k => k.replace('Numpad', '').replace('Decimal', '.').replace('Plus', '+')).join('/');
+            return keys.map(k => k.replace('Numpad', '').replace('Decimal', '.').replace('Comma', ',')).join('/');
         }
     };
 
@@ -298,7 +304,10 @@
             // DETECT GAME STATE
             const primary = document.querySelector(SELECTORS.primaryButton);
             const primaryText = primary ? (primary.innerText || '').toLowerCase() : '';
-            const isStartStage = primary && (primaryText.includes('start') || primaryText.includes('attack'));
+            
+            // If text is "start" OR "continue", we override everything to click this button
+            // We do NOT override if the text is "attack", so you can still switch weapons during the fight
+            const isPriorityPhase = primary && (primaryText.includes('start') || primaryText.includes('continue'));
 
             let actionSuccess = false;
 
@@ -312,11 +321,17 @@
                 }
             }
 
-            // Start of Fight (Primary Override)
-            // If the fight hasn't started, ALL mapped weapon keys click Start
-            // instead of trying to click the inactive weapon slots
-            else if (isStartStage && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
+            // Phase (Start / Continue) Override
+            // If we are in start or continue phase, mapped key clicks the primary button
+            else if (isPriorityPhase && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
                  if (primary) {
+                     // Handle continue-specific actions (like chain loader)
+                     if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
+                        if (this.handleContinue()) {
+                            e.preventDefault();
+                            return;
+                        }
+                     }
                      primary.click();
                      actionSuccess = true;
                  }
@@ -331,11 +346,10 @@
                 }
             }
 
-            // Fallback (Continue button, etc)
+            // Fallback
             else if (mapping.type === 'primary_fallback') {
                 if (primary) {
-                    const text = (primary.innerText || '').toLowerCase();
-                    if (text.includes('continue') && Config.data.continueAction !== 'default') {
+                    if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
                             return;
