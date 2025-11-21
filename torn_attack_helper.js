@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.3
+// @version      1.1.4
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -27,7 +27,7 @@
 
     const SELECTORS = {
         primaryButton: '[data-test="attack-button"], button.torn-btn:first-child, button[class^="btn___"]:first-child',
-        
+
         slots: {
             1: '#weapon_main',
             2: '#weapon_second',
@@ -38,7 +38,7 @@
         },
 
         mainContainer: '#mainContainer, #root, main, [role="main"], .content',
-        
+
         // End-of-fight buttons (Leave, Mug, Hosp)
         actionButtons: {
             group3: 'button.torn-btn:nth-child(3), button[class^="btn___"]:nth-child(3)'
@@ -105,7 +105,7 @@
             const isFightOver = !!document.querySelector(SELECTORS.actionButtons.group3);
 
             if (isFightOver) {
-                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
+                for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
                     if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
                 }
             }
@@ -119,9 +119,9 @@
             if (['NumpadDecimal', 'NumpadComma'].includes(code)) {
                 const isAlreadyMapped = Object.values(this.data.weaponSlotKeys).some(k => k.includes(code));
                 if (!isAlreadyMapped) {
-                    return { 
-                        type: 'weapon', 
-                        slot: this.data.decimalTarget === 'kick' ? 6 : 5 
+                    return {
+                        type: 'weapon',
+                        slot: this.data.decimalTarget === 'kick' ? 6 : 5
                     };
                 }
             }
@@ -145,14 +145,10 @@
     // UI MANAGER
     const UI = {
         injectStyles() {
-            // this css probably isn't final
             const css = `
                 .tah-hint {
                     position: absolute;
-                    bottom: 33px;
-                    right: 1px;
-                    top: auto;
-                    background: rgba(0, 0, 0, 0.3);
+                    background: rgba(0, 0, 0, 0.5);
                     color: #fff;
                     border: 1px solid rgba(0,0,0,0.5);
                     border-radius: 1px;
@@ -162,7 +158,34 @@
                     font-family: sans-serif;
                     pointer-events: none;
                     z-index: 9999;
+                    line-height: 12px;
                 }
+
+                /* Weapon Slots: Vertically Centered, inside right edge */
+                .tah-pos-slot {
+                    top: 50%;
+                    bottom: auto;
+                    right: 2px;
+                    transform: translateY(-50%);
+                }
+
+                /* Dialogs: Vertically Centered, Outside to the right */
+                .tah-pos-dialog {
+                    top: 50%;
+                    bottom: auto;
+                    left: 100%;
+                    right: auto;
+                    transform: translateY(-50%);
+                    margin-left: 6px;
+                    white-space: nowrap;
+                }
+
+                /* Fallback for standard buttons (like Start) */
+                .tah-pos-default {
+                    bottom: 2px;
+                    right: 2px;
+                }
+
                 .tah-hint-multi { border-color: #ffd700; color: #ffd700; }
             `;
             if (typeof GM_addStyle !== 'undefined') {
@@ -178,7 +201,7 @@
             document.querySelectorAll('.tah-hint').forEach(el => el.remove());
         },
 
-        addHint(element, text, isAlert = false) {
+        addHint(element, text, isAlert = false, type = 'default') {
             if (!element) return;
             if (window.getComputedStyle(element).position === 'static') {
                 element.style.position = 'relative';
@@ -186,7 +209,12 @@
             if (element.querySelector('.tah-hint')) return;
 
             const hint = document.createElement('span');
-            hint.className = `tah-hint ${isAlert ? 'tah-hint-multi' : ''}`;
+
+            let posClass = 'tah-pos-default';
+            if (type === 'slot') posClass = 'tah-pos-slot';
+            if (type === 'dialog') posClass = 'tah-pos-dialog';
+
+            hint.className = `tah-hint ${posClass} ${isAlert ? 'tah-hint-multi' : ''}`;
             hint.textContent = text;
             element.appendChild(hint);
         },
@@ -207,7 +235,7 @@
 
             let b2 = b3.previousElementSibling;
             while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
-            
+
             let b1 = b2 ? b2.previousElementSibling : null;
             while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
 
@@ -234,9 +262,9 @@
 
         handleContinue() {
             const { continueAction, fixedTargetId } = Config.data;
-            
+
             if (continueAction === 'close') {
-                window.close(); 
+                window.close();
                 return true;
             }
             if (continueAction === 'openFixed') {
@@ -244,7 +272,7 @@
                 window.location.href = `https://www.torn.com/loader.php?sid=attack&user2ID=${target}`;
                 return true;
             }
-            return false; 
+            return false;
         },
 
         updateVisuals() {
@@ -252,9 +280,10 @@
 
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3) {
-                UI.addHint(dialogs.b1, UI.formatKeys(Config.data.dialogKeys['1']));
-                UI.addHint(dialogs.b2, UI.formatKeys(Config.data.dialogKeys['2']));
-                UI.addHint(dialogs.b3, UI.formatKeys(Config.data.dialogKeys['3']));
+                // Pass 'dialog' type here
+                UI.addHint(dialogs.b1, UI.formatKeys(Config.data.dialogKeys['1']), false, 'dialog');
+                UI.addHint(dialogs.b2, UI.formatKeys(Config.data.dialogKeys['2']), false, 'dialog');
+                UI.addHint(dialogs.b3, UI.formatKeys(Config.data.dialogKeys['3']), false, 'dialog');
                 return;
             }
 
@@ -262,12 +291,13 @@
             if (primary) {
                 const text = (primary.innerText || '').toLowerCase();
                 let hintText = 'Any';
-                
+
                 if (text.includes('continue')) {
                     if (Config.data.continueAction === 'close') hintText += ' \u2192 Close';
                     else if (Config.data.continueAction === 'openFixed') hintText += ' \u2192 Chain';
                 }
-                UI.addHint(primary, hintText);
+                // Primary usually uses slot styling or default
+                UI.addHint(primary, hintText, false, 'slot');
             }
 
             for (let i = 1; i <= 6; i++) {
@@ -275,24 +305,25 @@
                 if (!el) continue;
 
                 let keys = Config.data.weaponSlotKeys[String(i)] || [];
-                
+
                 if ((Config.data.decimalTarget === 'kick' && i === 6) || (Config.data.decimalTarget === 'punch' && i === 5)) {
                     const decimalMappedElsewhere = Object.values(Config.data.weaponSlotKeys).some(k => k.includes('NumpadDecimal'));
                     if (!decimalMappedElsewhere) keys = [...keys, 'Numpad.'];
                 }
 
-                if (keys.length) UI.addHint(el, UI.formatKeys(keys));
+                // Pass 'slot' type here
+                if (keys.length) UI.addHint(el, UI.formatKeys(keys), false, 'slot');
             }
         },
 
         handleInput(e) {
             if (this.isTyping(e.target)) return;
-            
+
             const now = Date.now();
             if (now - this.lastActionTime < CONSTANTS.KEY_COOLDOWN) return;
 
             let mapping = Config.getKeyMapping(e.code);
-            if (!mapping) return; 
+            if (!mapping) return;
 
             if (this.isInHospital()) {
                 console.log('[AttackHelper] Target in hospital. Reloading...');
@@ -303,7 +334,7 @@
             // DETECT GAME STATE
             const primary = document.querySelector(SELECTORS.primaryButton);
             const primaryText = primary ? (primary.innerText || '').toLowerCase() : '';
-            
+
             // If text is "start" OR "continue", we override everything to click this button
             // We do not override if the text is "attack", so we can still switch weapons during the fight
             const isPriorityPhase = primary && (primaryText.includes('start') || primaryText.includes('continue'));
@@ -322,19 +353,19 @@
 
             // start or end override so any mapped key clicks the primary button
             else if (isPriorityPhase && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
-                 if (primary) {
-                     // handle continue-specific actions (like chain loader)
-                     if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
+                if (primary) {
+                    // handle continue-specific actions (like chain loader)
+                    if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
                             return;
                         }
-                     }
-                     primary.click();
-                     actionSuccess = true;
-                 }
+                    }
+                    primary.click();
+                    actionSuccess = true;
+                }
             }
-            
+
             // mid-fight
             else if (mapping.type === 'weapon') {
                 const el = document.querySelector(SELECTORS.slots[mapping.slot]);
@@ -459,7 +490,7 @@
         Menu.register();
 
         document.addEventListener('keydown', (e) => AttackController.handleInput(e), true);
-        
+
         let timeout;
         const observer = new MutationObserver(() => {
             if (timeout) clearTimeout(timeout);
@@ -475,11 +506,11 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['class', 'disabled'] 
+            attributeFilter: ['class', 'disabled']
         });
 
         AttackController.updateVisuals();
-        console.info(`[Torn Attack Helper] v${GM.info.script.version} Loaded`);
+        console.log(`[Torn Attack Helper] v${GM.log.script.version} Loaded`);
     }
 
     init();
