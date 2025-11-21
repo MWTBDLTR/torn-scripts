@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Attack Helper & Keybinds (Context Aware)
+// @name         Torn Attack Helper & Keybinds (State Fixed)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.2
+// @version      1.1.0
 // @description  Numpad shortcuts for Torn attacks, customizable weapon slots, hospital reload, and configurable chain targets.
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -23,11 +23,10 @@
     const CONSTANTS = {
         KEY_COOLDOWN: 150, // ms
         DEBOUNCE_TIME: 75, // ms
-        DEFAULT_CHAIN_TARGET: '3547823', // Default NPC if none set
+        DEFAULT_CHAIN_TARGET: '3547823', // Default if none set
     };
 
     const SELECTORS = {
-        // use data-attributes over class names because what is maintainability?
         primaryButton: '[data-test="attack-button"], button.torn-btn:first-child, button[class^="btn___"]:first-child',
         
         // Weapon Slots
@@ -36,15 +35,13 @@
             2: '#weapon_second',
             3: '#weapon_melee',
             4: '#weapon_temp',
-            5: '#weapon_fists', // Punch
-            6: '#weapon_kick',  // Kick
+            5: '#weapon_fists',
+            6: '#weapon_kick',
         },
 
-        // container used to detect hospital text
         mainContainer: '#mainContainer, #root, main, [role="main"], .content',
         
-        // id the end-of-fight buttons (Leave, Mug, Hosp)
-        // look for the 3rd button in the group to confirm presence
+        // End-of-fight buttons (Leave, Mug, Hosp)
         actionButtons: {
             group3: 'button.torn-btn:nth-child(3), button[class^="btn___"]:nth-child(3)'
         }
@@ -79,14 +76,14 @@
                 '2': ['Numpad2'],
                 '3': ['Numpad3'],
                 '4': ['Numpad0'],
-                '5': ['NumpadDecimal', 'NumpadComma'],
-                '6': [],
+                '5': ['NumpadDecimal'],
+                '6': ['NumpadPlus'],
             },
             decimalTarget: 'punch', // 'punch' (5) or 'kick' (6)
             dialogKeys: {
-                '1': ['Numpad4'], // Leave
-                '2': ['Numpad5'], // Mug
-                '3': ['Numpad6'], // Hosp
+                '1': ['Numpad1'], // Leave
+                '2': ['Numpad2'], // Mug
+                '3': ['Numpad3'], // Hosp
             },
             continueAction: 'default', // 'default', 'close', 'openFixed'
             fixedTargetId: CONSTANTS.DEFAULT_CHAIN_TARGET
@@ -105,10 +102,8 @@
             await Storage.set('settings', this.data);
         },
 
-        // maps a KeyboardEvent.code to a logical action
         getKeyMapping(code) {
-            // at the end of a fight prioritize dialog keys (Leave/Mug/Hosp)
-            // over weapons to prevent conflicts
+            // Context check: End of fight
             const isFightOver = !!document.querySelector(SELECTORS.actionButtons.group3);
 
             if (isFightOver) {
@@ -117,13 +112,13 @@
                 }
             }
 
-            // check weapons
+            // Check weapons
             for (const [slot, keys] of Object.entries(this.data.weaponSlotKeys)) {
                 if (keys.includes(code)) return { type: 'weapon', slot: Number(slot) };
             }
 
-            // check special decimal logic (if not explicitly mapped above)
-            if (['NumpadDecimal', 'NumpadComma'].includes(code)) {
+            // Check decimal logic
+            if (['NumpadDecimal', 'NumpadPlus'].includes(code)) {
                 const isAlreadyMapped = Object.values(this.data.weaponSlotKeys).some(k => k.includes(code));
                 if (!isAlreadyMapped) {
                     return { 
@@ -133,14 +128,14 @@
                 }
             }
 
-            // double check dialogs if we weren't at the end of the fight (fallback)
+            // Fallback check for dialogs (if context check failed but buttons exist)
             if (!isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
                     if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
                 }
             }
 
-            // numpad fallback for primary action
+            // Numpad fallback
             if (code.startsWith('Numpad')) {
                 return { type: 'primary_fallback' };
             }
@@ -180,12 +175,9 @@
 
         addHint(element, text, isAlert = false) {
             if (!element) return;
-            // ensure relative positioning for absolute child
             if (window.getComputedStyle(element).position === 'static') {
                 element.style.position = 'relative';
             }
-            
-            // prevent duplicate hints
             if (element.querySelector('.tah-hint')) return;
 
             const hint = document.createElement('span');
@@ -196,11 +188,11 @@
 
         formatKeys(keys) {
             if (!keys || keys.length === 0) return '';
-            return keys.map(k => k.replace('Numpad', '').replace('Decimal', '.').replace('Comma', ',')).join('/');
+            return keys.map(k => k.replace('Numpad', '').replace('Decimal', '.').replace('Plus', '+')).join('/');
         }
     };
 
-    // ATTACK LOGIC & DOM HANDLING
+    // ATTACK LOGIC
     const AttackController = {
         lastActionTime: 0,
 
@@ -303,9 +295,14 @@
                 return;
             }
 
+            // DETECT GAME STATE
+            const primary = document.querySelector(SELECTORS.primaryButton);
+            const primaryText = primary ? (primary.innerText || '').toLowerCase() : '';
+            const isStartStage = primary && (primaryText.includes('start') || primaryText.includes('attack'));
+
             let actionSuccess = false;
 
-            // Handle Dialogs
+            // End of Fight (Dialogs)
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3 && mapping.type === 'dialog') {
                 const btn = mapping.index === 1 ? dialogs.b1 : mapping.index === 2 ? dialogs.b2 : dialogs.b3;
@@ -314,34 +311,36 @@
                     actionSuccess = true;
                 }
             }
+
+            // Start of Fight (Primary Override)
+            // If the fight hasn't started, ALL mapped weapon keys click Start
+            // instead of trying to click the inactive weapon slots
+            else if (isStartStage && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
+                 if (primary) {
+                     primary.click();
+                     actionSuccess = true;
+                 }
+            }
             
-            // Handle Weapons
+            // Mid-Fight (Weapons)
             else if (mapping.type === 'weapon') {
                 const el = document.querySelector(SELECTORS.slots[mapping.slot]);
-                
-                // if the weapon slot does not exist or is hidden (Start of fight),
-                // treat this keypress as a "Primary Fallback" to hit the start/continue button
                 if (el && el.offsetParent !== null) {
                     el.click();
                     actionSuccess = true;
-                } else {
-                    mapping.type = 'primary_fallback'; // change type to fall through to next block
                 }
             }
 
-            // Handle Primary / Continue Button (or fallback from missing weapon)
-            if (!actionSuccess && mapping.type === 'primary_fallback') {
-                const primary = document.querySelector(SELECTORS.primaryButton);
+            // Fallback (Continue button, etc)
+            else if (mapping.type === 'primary_fallback') {
                 if (primary) {
                     const text = (primary.innerText || '').toLowerCase();
-                    
                     if (text.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
                             return;
                         }
                     }
-                    
                     primary.click();
                     actionSuccess = true;
                 }
@@ -355,7 +354,7 @@
         }
     };
 
-    // MENU & SETTINGS UI
+    // MENU
     const Menu = {
         menuIds: [],
 
@@ -454,7 +453,6 @@
             if (timeout) clearTimeout(timeout);
             timeout = setTimeout(() => {
                 AttackController.updateVisuals();
-                
                 if (AttackController.isInHospital()) {
                     location.reload();
                 }
