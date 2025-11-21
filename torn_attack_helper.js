@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.2
+// @version      1.1.3
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -261,7 +261,7 @@
             const primary = document.querySelector(SELECTORS.primaryButton);
             if (primary) {
                 const text = (primary.innerText || '').toLowerCase();
-                let hintText = 'Any Num';
+                let hintText = 'Any';
                 
                 if (text.includes('continue')) {
                     if (Config.data.continueAction === 'close') hintText += ' \u2192 Close';
