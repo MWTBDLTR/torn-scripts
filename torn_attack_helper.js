@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn Attack Helper
+// @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.5
+// @version      1.1.6
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -22,7 +22,7 @@
     const CONSTANTS = {
         KEY_COOLDOWN: 150,
         DEBOUNCE_TIME: 75,
-        DEFAULT_CHAIN_TARGET: '3547823', // fallback user id if we haven't saved one yet
+        DEFAULT_TARGET: '3547823', // fallback user id if we haven't saved one yet
     };
 
     const SELECTORS = {
@@ -84,7 +84,7 @@
                 '3': ['Numpad3'], // hospitalize
             },
             continueAction: 'default', // 'default', 'close', 'openFixed'
-            fixedTargetId: CONSTANTS.DEFAULT_CHAIN_TARGET
+            fixedTargetId: CONSTANTS.DEFAULT_TARGET
         },
 
         async load() {
@@ -272,7 +272,7 @@
                 return true;
             }
             if (continueAction === 'openFixed') {
-                const target = fixedTargetId || CONSTANTS.DEFAULT_CHAIN_TARGET;
+                const target = fixedTargetId || CONSTANTS.DEFAULT_TARGET;
                 window.location.href = `https://www.torn.com/loader.php?sid=attack&user2ID=${target}`;
                 return true;
             }
@@ -298,7 +298,7 @@
 
                 if (text.includes('continue')) {
                     if (Config.data.continueAction === 'close') hintText += ' \u2192 Close';
-                    else if (Config.data.continueAction === 'openFixed') hintText += ' \u2192 Chain';
+                    else if (Config.data.continueAction === 'openFixed') hintText += ' \u2192 Follow-up';
                 }
                 // primary buttons usually look best with standard slot styling
                 UI.addHint(primary, hintText, false, 'slot');
@@ -331,7 +331,7 @@
 
             // checks if the target is in hospital before trying to attack
             if (this.isInHospital()) {
-                console.log('[AttackHelper] Target in hospital. Reloading...');
+                console.log('[Torn Attack Page Helper] Target in hospital. Reloading...');
                 window.location.reload();
                 return;
             }
@@ -359,7 +359,7 @@
             // overrides buttons so any mapped key clicks the primary button during start/end
             else if (isPriorityPhase && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
                 if (primary) {
-                    // handles special continue actions like closing the tab or loading a chain target
+                    // handles special continue actions like closing the tab or loading a follow-up target
                     if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
@@ -463,7 +463,7 @@
                 AttackController.updateVisuals();
             }));
 
-            const contLabels = { default: 'Default Click', close: 'Close Tab', openFixed: 'Chain Target' };
+            const contLabels = { default: 'Default Click', close: 'Close Tab', openFixed: 'Follow-up Target' };
             const contLabel = `Continue Action: ${contLabels[Config.data.continueAction]} (Cycle)`;
             this.menuIds.push(GM_registerMenuCommand(contLabel, async () => {
                 const modes = ['default', 'close', 'openFixed'];
@@ -474,9 +474,9 @@
                 AttackController.updateVisuals();
             }));
 
-            const chainLabel = `Set Chain ID (Current: ${Config.data.fixedTargetId || 'Default'})`;
-            this.menuIds.push(GM_registerMenuCommand(chainLabel, async () => {
-                const input = prompt('Enter User ID for chaining (used when Continue Action is "Chain Target"):', Config.data.fixedTargetId);
+            const followupLabel = `Set Follow-up ID (Current: ${Config.data.fixedTargetId || 'Default'})`;
+            this.menuIds.push(GM_registerMenuCommand(followupLabel, async () => {
+                const input = prompt('Enter User ID for chaining (used when Continue Action is "Follow-up Target"):', Config.data.fixedTargetId);
                 if (input && /^\d+$/.test(input.trim())) {
                     Config.data.fixedTargetId = input.trim();
                     await Config.save();
@@ -519,7 +519,7 @@
         });
 
         AttackController.updateVisuals();
-        console.log(`[Torn Attack Helper] v${GM.log.script.version} Loaded`);
+        console.log(`[Torn Attack Page Helper] v${GM.log.script.version} Loaded`);
     }
 
     init();
