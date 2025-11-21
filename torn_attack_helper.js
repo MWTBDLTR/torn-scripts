@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.6
+// @version      1.1.8
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -331,7 +331,7 @@
 
             // checks if the target is in hospital before trying to attack
             if (this.isInHospital()) {
-                console.log('[Torn Attack Page Helper] Target in hospital. Reloading...');
+                console.log('[Torn Attack Page Helper] Target is in the hospital. Reloading...');
                 window.location.reload();
                 return;
             }
@@ -506,7 +506,10 @@
             timeout = setTimeout(() => {
                 AttackController.updateVisuals();
                 if (AttackController.isInHospital()) {
-                    location.reload();
+                    // adds a visual indicator
+                    document.body.style.border = "5px solid red";
+                    const btn = document.querySelector(SELECTORS.primaryButton);
+                    if (btn) UI.addHint(btn, "TARGET HOSPITALIZED", true);
                 }
             }, CONSTANTS.DEBOUNCE_TIME);
         });
