@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Attack Helper & Keybinds
+// @name         Torn Attack Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.1
-// @description  Customizable numpad shortcuts for attacks and configurable follow-up target (target list functionality is a WIP)
+// @version      1.1.2
+// @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/loader.php*
@@ -19,24 +19,22 @@
 (async function () {
     'use strict';
 
-    // CONST & SELECTORS
     const CONSTANTS = {
-        KEY_COOLDOWN: 150, // ms
-        DEBOUNCE_TIME: 75, // ms
-        DEFAULT_CHAIN_TARGET: '3547823', // Default NPC if none set
+        KEY_COOLDOWN: 150,
+        DEBOUNCE_TIME: 75,
+        DEFAULT_CHAIN_TARGET: '3547823', // default if none set
     };
 
     const SELECTORS = {
         primaryButton: '[data-test="attack-button"], button.torn-btn:first-child, button[class^="btn___"]:first-child',
         
-        // Weapon Slots
         slots: {
             1: '#weapon_main',
             2: '#weapon_second',
             3: '#weapon_melee',
             4: '#weapon_temp',
-            5: '#weapon_fists', // Punch
-            6: '#weapon_kick',  // Kick
+            5: '#weapon_fists',
+            6: '#weapon_kick',
         },
 
         mainContainer: '#mainContainer, #root, main, [role="main"], .content',
@@ -47,7 +45,7 @@
         }
     };
 
-    // UTILS: STORAGE & GM WRAPPER
+    // STORAGE & GM WRAPPER
     const Storage = {
         async get(key, defaultVal) {
             const fullKey = `tah_${key}`;
@@ -81,9 +79,9 @@
             },
             decimalTarget: 'punch', // 'punch' (5) or 'kick' (6)
             dialogKeys: {
-                '1': ['Numpad1'], // Leave
-                '2': ['Numpad2'], // Mug
-                '3': ['Numpad3'], // Hosp
+                '1': ['Numpad4'], // Leave
+                '2': ['Numpad5'], // Mug
+                '3': ['Numpad6'], // Hosp
             },
             continueAction: 'default', // 'default', 'close', 'openFixed'
             fixedTargetId: CONSTANTS.DEFAULT_CHAIN_TARGET
@@ -117,7 +115,7 @@
                 if (keys.includes(code)) return { type: 'weapon', slot: Number(slot) };
             }
 
-            // Check decimal/comma logic
+            // Check decimal logic
             if (['NumpadDecimal', 'NumpadComma'].includes(code)) {
                 const isAlreadyMapped = Object.values(this.data.weaponSlotKeys).some(k => k.includes(code));
                 if (!isAlreadyMapped) {
@@ -147,21 +145,22 @@
     // UI MANAGER
     const UI = {
         injectStyles() {
+            // this css probably isn't final
             const css = `
                 .tah-hint {
-                    position: absolute; 
-                    bottom: 2px; 
-                    right: 2px;
-                    top: auto; /* Overwrite previous defaults */
-                    background: rgba(0, 0, 0, 0.6); 
+                    position: absolute;
+                    bottom: 33px;
+                    right: 1px;
+                    top: auto;
+                    background: rgba(0, 0, 0, 0.3);
                     color: #fff;
-                    border: 1px solid rgba(255,255,255,0.1);
-                    border-radius: 3px; 
-                    padding: 1px 4px;
-                    font-size: 10px; 
+                    border: 1px solid rgba(0,0,0,0.5);
+                    border-radius: 1px;
+                    padding: 0px 2px;
+                    font-size: 10px;
                     font-weight: 400;
                     font-family: sans-serif;
-                    pointer-events: none; 
+                    pointer-events: none;
                     z-index: 9999;
                 }
                 .tah-hint-multi { border-color: #ffd700; color: #ffd700; }
@@ -306,12 +305,12 @@
             const primaryText = primary ? (primary.innerText || '').toLowerCase() : '';
             
             // If text is "start" OR "continue", we override everything to click this button
-            // We do NOT override if the text is "attack", so you can still switch weapons during the fight
+            // We do not override if the text is "attack", so we can still switch weapons during the fight
             const isPriorityPhase = primary && (primaryText.includes('start') || primaryText.includes('continue'));
 
             let actionSuccess = false;
 
-            // End of Fight (Dialogs)
+            // post fight
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3 && mapping.type === 'dialog') {
                 const btn = mapping.index === 1 ? dialogs.b1 : mapping.index === 2 ? dialogs.b2 : dialogs.b3;
@@ -321,11 +320,10 @@
                 }
             }
 
-            // Phase (Start / Continue) Override
-            // If we are in start or continue phase, mapped key clicks the primary button
+            // start or end override so any mapped key clicks the primary button
             else if (isPriorityPhase && (mapping.type === 'weapon' || mapping.type === 'primary_fallback')) {
                  if (primary) {
-                     // Handle continue-specific actions (like chain loader)
+                     // handle continue-specific actions (like chain loader)
                      if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
                         if (this.handleContinue()) {
                             e.preventDefault();
@@ -337,7 +335,7 @@
                  }
             }
             
-            // Mid-Fight (Weapons)
+            // mid-fight
             else if (mapping.type === 'weapon') {
                 const el = document.querySelector(SELECTORS.slots[mapping.slot]);
                 if (el && el.offsetParent !== null) {
@@ -346,7 +344,7 @@
                 }
             }
 
-            // Fallback
+            // fallback
             else if (mapping.type === 'primary_fallback') {
                 if (primary) {
                     if (primaryText.includes('continue') && Config.data.continueAction !== 'default') {
@@ -368,7 +366,7 @@
         }
     };
 
-    // MENU
+    // TamperMonkey or other menu
     const Menu = {
         menuIds: [],
 
@@ -481,7 +479,7 @@
         });
 
         AttackController.updateVisuals();
-        console.info(`[Torn Attack Helper] v${GM.info.script.version} Loaded.`);
+        console.info(`[Torn Attack Helper] v${GM.info.script.version} Loaded`);
     }
 
     init();
