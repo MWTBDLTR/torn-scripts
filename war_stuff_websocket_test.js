@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced + WebSocket
+// @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      1.1.ws-debug
-// @description  The ultimate war monitor. Uses WebSockets for INSTANT status updates and the API for detailed timers. Includes Debug Mode.
-// @author       xentac + MrChurch + Heasley (WebSocket logic) + Merge
+// @version      2.1.ws-test
+// @description  The ultimate war monitor. INSTANT status updates and sorting on war pages. Pair with my attack links script for lightning strike speed in your next war!
+// @author       MrChurch [3654415] + xentac (original twse) + Heasley (websocket idea)
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle
@@ -21,22 +21,22 @@
   const USE_WEBSOCKETS = true;
 
   // --- DEBUG STATE ---
-  // Default to false, but load from storage if previously set
-  let DEBUG = GM_getValue("twseo_debug_mode", false);
+  let DEBUG = GM_getValue("twse_debug_mode", false);
+
+  if (DEBUG) console.log("%c[TWSE-DEBUG] Script Loaded (v2.1)", "color: #00ff00; font-weight: bold; background: #333;");
 
   function toggleDebug() {
       DEBUG = !DEBUG;
-      GM_setValue("twseo_debug_mode", DEBUG);
-      alert(`TWSEO Debug Mode is now: ${DEBUG ? "ON" : "OFF"}.\nReloading page...`);
+      GM_setValue("twse_debug_mode", DEBUG);
+      alert(`TWSE Debug Mode is now: ${DEBUG ? "ON" : "OFF"}.\nReloading page...`);
       location.reload();
   }
 
   function log(...args) {
-      if (DEBUG) console.log("%c[TWSEO-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
+      if (DEBUG) console.log("%c[TWSE-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
   }
 
   // --- COMPATIBILITY ---
-  // de-dupe / play nice with FFScouter
   if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
   const ffScouterV2DisableWarMonitor = document.createElement("div");
   ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
@@ -44,7 +44,7 @@
   document.documentElement.appendChild(ffScouterV2DisableWarMonitor);
 
   // --- API KEY MANAGEMENT ---
-  const LS_KEY = "twseo_merged_apikey";
+  const LS_KEY = "twse_merged_apikey";
   let apiKey = localStorage.getItem(LS_KEY) ?? "###PDA-APIKEY###";
   const hasValidKey = () =>
     typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
@@ -79,10 +79,10 @@
   } catch {}
 
   // --- STYLES ---
-  const CONTENT   = "data-twseo-content";
-  const TRAVELING = "data-twseo-traveling";
-  const HIGHLIGHT = "data-twseo-highlight";
-  const HCLASS    = "twseo-highlight";
+  const CONTENT   = "data-twse-content";
+  const TRAVELING = "data-twse-traveling";
+  const HIGHLIGHT = "data-twse-highlight";
+  const HCLASS    = "twse-highlight";
   const HAS_HAS   = CSS.supports?.("selector(:has(*))") ?? false;
 
   GM_addStyle(`
@@ -100,18 +100,16 @@
     .members-list .not-ok.status::after    { color: var(--user-status-red-color); }
     .members-list .abroad.status::after,
     .members-list .traveling.status::after { color: var(--user-status-blue-color); }
-    
-    /* Visual indicator for WebSocket updates (Flash Gold) */
-    @keyframes twseo-flash {
+
+    @keyframes twse-flash {
         0% { box-shadow: inset 0 0 0px gold; }
         50% { box-shadow: inset 0 0 10px gold; }
         100% { box-shadow: inset 0 0 0px gold; }
     }
-    .twseo-ws-updated { animation: twseo-flash 1s ease-out; }
-    
-    /* Debug Indicator */
-    #twseo-debug-indicator {
-        position: fixed; top: 0; right: 0; background: orange; color: black; 
+    .twse-ws-updated { animation: twse-flash 1s ease-out; }
+
+    #twse-debug-indicator {
+        position: fixed; top: 0; right: 0; background: orange; color: black;
         font-weight: bold; padding: 2px 5px; z-index: 999999; font-size: 10px;
         pointer-events: none; opacity: 0.8;
     }
@@ -119,8 +117,8 @@
 
   if (DEBUG) {
       const debugInd = document.createElement("div");
-      debugInd.id = "twseo-debug-indicator";
-      debugInd.textContent = "TWSEO DEBUG ACTIVE";
+      debugInd.id = "twse-debug-indicator";
+      debugInd.textContent = "TWSE DEBUG";
       document.body.appendChild(debugInd);
   }
 
@@ -131,99 +129,123 @@
   let found_war = false;
   let warRoot = null;
 
-  // member_status Map: stores the latest known state for a user.
-  const member_status = new Map(); // userId -> Object
-  const member_lis = new Map();    // userId -> <li>
+  const member_status = new Map();
+  const member_lis = new Map();
   let memberListsCache = [];
 
   // --- WEBSOCKET LOGIC ---
   let socket;
   let subscribedFactions = new Set();
+  let msgId = 1;
+
+  // Use clean URL (Verified working)
+  const WS_URL = "wss://ws-centrifugo.torn.com/connection/websocket";
 
   function getWebSocketToken() {
       const el = document.getElementById('websocketConnectionData');
       if (!el) {
-          log("Could not find #websocketConnectionData element.");
+          log("CRITICAL: Could not find #websocketConnectionData element in DOM.");
           return null;
       }
       try {
-          return JSON.parse(el.innerText).token;
+          const data = JSON.parse(el.innerText);
+          return data.token;
       } catch (e) {
-          console.error("[TWSEO] Error parsing WS token:", e);
+          console.error("[TWSE] Error parsing WS data:", e);
           return null;
       }
   }
 
   function createWebSocketConnection() {
       if (!USE_WEBSOCKETS) return;
-      if (socket && socket.readyState === WebSocket.OPEN) return;
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
-      log("Connecting to WebSocket...");
-      socket = new WebSocket("wss://ws-centrifugo.torn.com/connection/websocket");
+      const token = getWebSocketToken();
+      if (!token) {
+          log("Cannot Connect: Token not found in DOM.");
+          return;
+      }
+
+      log(`Initializing WebSocket connection to ${WS_URL}...`);
+      socket = new WebSocket(WS_URL);
 
       socket.onopen = function() {
-          log("WS Connected. Authenticating...");
-          const token = getWebSocketToken();
-          if (!token) {
-              log("WS Authentication Failed: No token found.");
-              return;
-          }
-          
-          // Authenticate
+          // v2.0 Auth Format (Verified working)
           const authMsg = {
-              "params": { "token": token },
-              "id": 1
+              "connect": {
+                  "token": token,
+                  "name": "js"
+              },
+              "id": msgId++
           };
+          log("WS Socket Open. Sending Auth...");
           socket.send(JSON.stringify(authMsg));
       };
 
       socket.onmessage = function(event) {
           try {
-              const data = JSON.parse(event.data);
-
-              // 1. Handle Authentication Response (ID: 1)
-              if (data.id === 1 && data.result) {
-                  log("WS Authenticated. Subscribing to factions...");
-                  // After auth, subscribe to all currently visible factions
-                  subscribeToFactions(get_faction_ids());
+              if (event.data === '{}') {
+                  socket.send('{}');
+                  return;
               }
 
-              // 2. Handle Actual Updates
-              if (data?.result?.channel && data.result.channel.startsWith('faction-users-')) {
-                  const payload = data?.data?.data?.message?.namespaces?.users?.actions;
-                  
-                  // Handle Icon Updates (Hospital/Jail/Okay)
-                  if (payload?.updateIcons) {
-                      log("WS Received updateIcons payload", payload.updateIcons.icons);
-                      processWebSocketIcons(payload.updateIcons.icons);
+              const data = JSON.parse(event.data);
+
+              // 1. Handle Connect Response
+              if (data.connect) {
+                  log("WS Authenticated Successfully! (Client ID: " + data.connect.client + ")");
+                  subscribeToFactions(get_faction_ids());
+                  return;
+              }
+
+              // 2. Handle Push Updates
+              if (data.push && data.push.pub && data.push.pub.data) {
+                  const msg = data.push.pub.data.message;
+                  const actions = msg?.namespaces?.users?.actions;
+
+                  if (actions?.updateIcons) {
+                      // v2.1 FIX: Handle single-user structure correctly
+                      const update = actions.updateIcons;
+
+                      // Case A: Single User Update (Format: { userId: 123, icons: "..." })
+                      if (update.userId && update.icons) {
+                          // Wrap in a map-like structure for processing
+                          const singleMap = {};
+                          singleMap[update.userId] = update.icons;
+                          processWebSocketIcons(singleMap);
+                      }
+                      // Case B: Bulk/Map Update (Format: { "123": "...", "456": "..." })
+                      else {
+                          processWebSocketIcons(update);
+                      }
                   }
               }
           } catch (e) {
-              console.error("[TWSEO] WS Message Error:", e);
+              console.error("[TWSE] WS Message Error:", e);
           }
       };
 
       socket.onclose = function(event) {
-          log("WS Closed. Reconnecting in 5s...");
+          log(`WS Closed. Code: ${event.code}, Reason: ${event.reason || "None"}. Reconnecting in 5s...`);
           subscribedFactions.clear();
           setTimeout(createWebSocketConnection, 5000);
       };
-      
+
       socket.onerror = function(err) {
-          log("WS Error", err);
+          log("WS Error Detected");
       }
   }
 
   function subscribeToFactions(factionIds) {
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      
+
       factionIds.forEach(fid => {
           if (!subscribedFactions.has(fid)) {
               log(`Subscribing to channel: faction-users-${fid}`);
+
               const msg = {
-                  "method": 1,
-                  "params": { "channel": `faction-users-${fid}` },
-                  "id": 2
+                  "subscribe": { "channel": `faction-users-${fid}` },
+                  "id": msgId++
               };
               socket.send(JSON.stringify(msg));
               subscribedFactions.add(fid);
@@ -234,52 +256,58 @@
   function processWebSocketIcons(iconsObj) {
       if (!iconsObj) return;
 
+      // v2.1: iconsObj should now be guaranteed to be a Map { userId: htmlString }
       for (const [userId, iconHtml] of Object.entries(iconsObj)) {
-          const currentData = member_status.get(userId) || { status: {} };
-          
+          // Sanity check: ensure iconHtml is actually a string (prevent parsing issues)
+          if (typeof iconHtml !== 'string') continue;
+
+          const uidStr = String(userId);
+          const currentData = member_status.get(uidStr) || { status: {} };
+
           let newState = "Okay";
           let newDesc = "Okay";
-          
-          if (iconHtml.includes('class="hospital"')) {
+
+          // Basic parsing of the HTML blob
+          if (iconHtml.includes('class="hospital"') || iconHtml.includes("icon15")) {
               newState = "Hospital";
               newDesc = "In Hospital (WS)";
-          } else if (iconHtml.includes('class="jail"')) {
+          } else if (iconHtml.includes('class="jail"') || iconHtml.includes("icon16")) {
               newState = "Jail";
               newDesc = "In Jail (WS)";
-          } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"')) {
+          } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"') || iconHtml.includes("icon71")) {
               newState = "Traveling";
               newDesc = "Traveling (WS)";
           }
 
+          // Check if state changed (or if description changed from generic WS to specific)
           if (currentData.status.state !== newState) {
-              log(`Status Change Detected for User [${userId}]: ${currentData.status.state} -> ${newState}`);
-              
+              log(`Status Change: [${uidStr}]: ${currentData.status.state} -> ${newState}`);
+
               currentData.status.state = newState;
               currentData.status.description = newDesc;
-              
+
+              // Reset timer if entering hosp/jail (wait for API to fill real time)
               if (newState === 'Hospital' || newState === 'Jail') {
-                  currentData.status.until = (Date.now() / 1000) + 300; 
+                  currentData.status.until = (Date.now() / 1000) + 300;
               } else {
                   currentData.status.until = 0;
               }
 
-              member_status.set(userId, currentData);
-              
-              // Trigger visual flash for debug/feedback
-              triggerFlash(userId);
+              member_status.set(uidStr, currentData);
+              triggerFlash(uidStr);
           } else {
-              // Even if state didn't change (e.g., Hosp -> Hosp extension), flash to show we got data
-              if(DEBUG) triggerFlash(userId);
+              // Even if state is same, maybe icons changed? Flash to confirm receipt.
+              if(DEBUG) triggerFlash(uidStr);
           }
       }
   }
 
   function triggerFlash(userId) {
-      const li = member_lis.get(userId);
+      const li = member_lis.get(String(userId));
       if (li) {
-          li.classList.remove('twseo-ws-updated');
+          li.classList.remove('twse-ws-updated');
           void li.offsetWidth; // trigger reflow
-          li.classList.add('twseo-ws-updated');
+          li.classList.add('twse-ws-updated');
       }
   }
 
@@ -323,25 +351,23 @@
     warRoot = null;
     member_lis.clear();
     memberListsCache = [];
-    window.dispatchEvent(new Event("twseo-war-gone"));
+    window.dispatchEvent(new Event("twse-war-gone"));
   }
 
   function onWarFound() {
     if (found_war) return;
     found_war = true;
-    
-    // In Debug Mode, we might just be on a profile page without the .faction-war class
-    warRoot = document.querySelector(".faction-war");
-    if (!warRoot && DEBUG) {
-        log("Debug Mode: Using document as root (Profile Page Mode)");
-        warRoot = document; 
+
+    if (DEBUG) {
+        warRoot = document.querySelector(".faction-war") || document;
+        log("War/Faction Page Found. Starting Listeners...");
+    } else {
+        warRoot = document.querySelector(".faction-war") || document;
     }
-    if (!warRoot) warRoot = document; // Fallback
 
     extract_all_member_lis();
     prime_status_placeholders();
-    
-    // Connect WS
+
     if (USE_WEBSOCKETS) {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
             createWebSocketConnection();
@@ -349,27 +375,24 @@
             subscribeToFactions(get_faction_ids());
         }
     }
-    
-    window.dispatchEvent(new Event("twseo-war-found"));
+
+    window.dispatchEvent(new Event("twse-war-found"));
   }
 
   function refresh_member_lists_cache() {
-    // If real war exists, prefer it
     const warEl = document.querySelector(".faction-war");
     if (warEl) {
         warRoot = warEl;
         memberListsCache = Array.from(warEl.querySelectorAll("ul.members-list"));
         return;
     }
-    
-    // Fallback for Debug / Profile pages
+
     if (DEBUG) {
         memberListsCache = Array.from(document.querySelectorAll("ul.members-list"));
         if(memberListsCache.length > 0) warRoot = document;
         return;
     }
 
-    // Default behavior if not debug and no war
     warRoot = null;
     memberListsCache = [];
   }
@@ -380,10 +403,10 @@
     return memberListsCache;
   }
 
+  let lastKnownFactionIds = "";
   function get_faction_ids() {
     const ids = new Set();
-    
-    // Method 1: Look for links in the lists (Works on War Pages)
+
     get_member_lists().forEach((elem) => {
       const a = elem.querySelector(`a[href^="/factions.php"]`);
       if (a) {
@@ -397,17 +420,17 @@
       }
     });
 
-    // Method 2: Look at URL (Works on Profile Pages for Debug)
     if (ids.size === 0 && DEBUG) {
         const urlParams = new URLSearchParams(window.location.search);
         const urlId = urlParams.get("ID");
-        if (urlId) {
-            log(`Debug: Found Faction ID from URL: ${urlId}`);
-            ids.add(urlId);
-        }
+        if (urlId) ids.add(urlId);
     }
-    
-    if(DEBUG) log("Identified Faction IDs:", [...ids]);
+
+    const idStr = [...ids].sort().join(",");
+    if(DEBUG && idStr !== lastKnownFactionIds && idStr.length > 0) {
+        log("Identified Faction IDs:", [...ids]);
+        lastKnownFactionIds = idStr;
+    }
     return [...ids];
   }
 
@@ -429,14 +452,10 @@
     member_lis.clear();
     refresh_member_lists_cache();
     get_member_lists().forEach(extract_member_lis);
-    if(DEBUG) log(`Extracted ${member_lis.size} member <li> elements.`);
   }
 
   function extract_member_lis(ul) {
-    // Note: On profile pages, members are usually just <li>, not necessarily .enemy or .your
-    // We adjust selector for debug mode to capture all list items if generic classes aren't there
     const selector = DEBUG ? "li" : "li.enemy, li.your";
-    
     ul.querySelectorAll(selector).forEach((li) => {
       const a = li.querySelector(`a[href^="/profiles.php"]`);
       if (!a) return;
@@ -481,10 +500,8 @@
           scheduleRefreshLists();
           return;
         }
-        // General detection for debug mode on profile pages
-        if (DEBUG && node?.nodeType === 1 && node.matches?.("ul.members-list")) {
-            onWarFound(); // Trigger "War Found" logic to start listeners
-            scheduleRefreshLists();
+        if (DEBUG && node?.nodeType === 1) {
+            onWarFound();
             return;
         }
       }
@@ -497,16 +514,13 @@
       }
     }
   });
-  
-  // Initial Check
-  setTimeout(() => { 
-      if (document.querySelector(".faction-war")) {
-          onWarFound();
-      } else if (DEBUG && document.querySelector("ul.members-list")) {
+
+  setTimeout(() => {
+      if (DEBUG || document.querySelector(".faction-war")) {
           onWarFound();
       }
   }, 800);
-  
+
   observer.observe(document.body, { subtree: true, childList: true });
 
   // --- API BACKOFF / LOOP ---
@@ -525,14 +539,15 @@
   async function update_statuses_api() {
     if (!running || !hasValidKey()) return;
     if (warRoot && warRoot !== document && !warRoot.isConnected) onWarGone();
-    if (!found_war || document.hidden) return;
+    if (!found_war && !DEBUG) return;
+    if (document.hidden) return;
 
     const now = Date.now();
     if (now < backoffUntil) return;
 
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
-    
+
     if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + Math.floor(Math.random()*2000) - 1000) return;
 
     for (const id of faction_ids) {
@@ -555,14 +570,14 @@
   async function update_status_single(faction_id) {
     try {
       const r = await fetch(
-        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`,
+        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSE-Merged`,
         { method: 'GET', mode: 'cors', cache: 'no-store' }
       );
       const status = await r.json();
 
       const code = normalizeErrorCode(status);
       if (code != null) {
-        if ([5, 8, 9].includes(code)) { 
+        if ([5, 8, 9].includes(code)) {
           setBackoff(true);
           return false;
         }
@@ -588,7 +603,7 @@
 
   function watch() {
     if (found_war && warRoot && warRoot !== document && !warRoot.isConnected) onWarGone();
-    if (!found_war) return requestAnimationFrame(watch);
+    if (!found_war && !DEBUG) return requestAnimationFrame(watch);
     if (document.hidden) return requestAnimationFrame(watch);
 
     const now = performance.now();
@@ -617,7 +632,7 @@
           safeRemoveAttr(li, "data-until");
           safeRemoveAttr(li, "data-location");
           const desc = st.description || "Traveling";
-          
+
           if (desc.includes("Traveling to ")) {
               const content = "► " + desc.split("Traveling to ")[1];
               safeSetAttr(status_DIV, CONTENT, content);
@@ -636,11 +651,10 @@
           safeSetAttr(status_DIV, TRAVELING, (st.description || "").includes("In a") ? "true" : "false");
 
           const remain = Math.max(0, ((st.until >>> 0) - nowSeconds()) | 0);
-          
-          // WS detected update, but no time yet
+
           if (remain <= 0 && st.until === 0) {
-              safeSetAttr(status_DIV, CONTENT, st.state); 
-              safeSetAttr(status_DIV, HIGHLIGHT, "true"); 
+              safeSetAttr(status_DIV, CONTENT, st.state);
+              safeSetAttr(status_DIV, HIGHLIGHT, "true");
               if (!HAS_HAS) li.classList.add(HCLASS);
               break;
           }
@@ -657,7 +671,7 @@
           const t = `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
 
           if (status_DIV.getAttribute(CONTENT) !== t) safeSetAttr(status_DIV, CONTENT, t);
-          
+
           const isSoon = remain < 300 ? "true" : "false";
           safeSetAttr(status_DIV, HIGHLIGHT, isSoon);
 
@@ -674,7 +688,6 @@
       }
     });
 
-    // ... Sorting logic ...
     if (sort_enemies) {
       const lists = get_member_lists();
       for (let i = 0; i < lists.length; i++) {
@@ -682,10 +695,9 @@
         if (!ever_sorted) sorted_column = { column: "status", order: "asc" };
         if (sorted_column.column !== "status") continue;
 
-        // In debug mode, grab all LIs, not just enemy/your
         const selector = DEBUG ? "li" : "li.enemy, li.your";
         const lis = lists[i].querySelectorAll(selector);
-        
+
         const arr = Array.from(lis).map(li => ({
           li,
           a: +(li.dataset.sortA || 0),
@@ -720,7 +732,6 @@
     requestAnimationFrame(watch);
   }
 
-  // --- SCHEDULER ---
   let tickTimer = null;
   function scheduleTick() {
     clearTimeout(tickTimer);
@@ -736,7 +747,6 @@
     requestAnimationFrame(watch);
   }, 1000);
 
-  // --- EVENT LISTENERS ---
   window.addEventListener("hashchange", () => {
     onWarGone();
     setTimeout(() => {
