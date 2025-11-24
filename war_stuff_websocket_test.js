@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      4.5.7
+// @version      4.5.9
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting on the war page.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -32,7 +32,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v4.5.7) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
+      `%c[TWSEO] Script Loaded (v4.5.9) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
       "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -213,6 +213,7 @@
   const member_status = new Map();
   const member_lis = new Map();
   let memberListsCache = [];
+  const wsUpdateCache = new Map();
 
   // --- WEBSOCKET LOGIC ---
   let socket;
@@ -274,11 +275,14 @@
                   const msg = data.push.pub.data.message;
                   const actions = msg?.namespaces?.users?.actions;
 
-                  if (actions?.updateIcons) {
-                      const update = actions.updateIcons;
-                      if (update.userId && update.icons) {
+                  // UPDATED: Now looking strictly for 'updateStatus' instead of 'updateIcons'
+                  if (actions?.updateStatus) {
+                      const update = actions.updateStatus;
+                      
+                      // Handle single user update vs bulk map
+                      if (update.userId && update.status) {
                           const singleMap = {};
-                          singleMap[update.userId] = update.icons;
+                          singleMap[update.userId] = update.status;
                           processWebSocketIcons(singleMap);
                       } else {
                           processWebSocketIcons(update);
@@ -317,11 +321,23 @@
       if (!iconsObj) return;
 
       let needsRender = false;
+      const now = Date.now();
 
       for (const [userId, iconHtml] of Object.entries(iconsObj)) {
           if (typeof iconHtml !== 'string') continue;
 
           const uidStr = String(userId);
+
+          // --- DEDUPLICATION ---
+          // Ignore if we received the EXACT same payload for this user < 1.5s ago
+          const last = wsUpdateCache.get(uidStr);
+          if (last && last.data === iconHtml && (now - last.ts < 1500)) {
+              if (DEBUG) console.log(`[TWSEO] Ignored duplicate WS packet for ${uidStr}`);
+              continue;
+          }
+          wsUpdateCache.set(uidStr, { ts: now, data: iconHtml });
+          // ---------------------
+
           const currentData = member_status.get(uidStr) || { status: {} };
 
           let newState = "Okay";
