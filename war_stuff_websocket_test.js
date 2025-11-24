@@ -21,9 +21,9 @@
   const USE_WEBSOCKETS = true;
 
   // --- DEBUG STATE ---
-  let DEBUG = GM_getValue("twse_debug_mode", false);
+  let DEBUG = GM_getValue("twseo_debug_mode", false);
 
-  if (DEBUG) console.log("%c[TWSE-DEBUG] Script Loaded (v2.1)", "color: #00ff00; font-weight: bold; background: #333;");
+  if (DEBUG) console.log("%c[TWSEO-DEBUG] Script Loaded (v2.1)", "color: #00ff00; font-weight: bold; background: #333;");
 
   function toggleDebug() {
       DEBUG = !DEBUG;
@@ -33,7 +33,7 @@
   }
 
   function log(...args) {
-      if (DEBUG) console.log("%c[TWSE-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
+      if (DEBUG) console.log("%c[TWSEO-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
   }
 
   // --- COMPATIBILITY ---
@@ -151,7 +151,7 @@
           const data = JSON.parse(el.innerText);
           return data.token;
       } catch (e) {
-          console.error("[TWSE] Error parsing WS data:", e);
+          console.error("[TWSEO] Error parsing WS data:", e);
           return null;
       }
   }
@@ -221,7 +221,7 @@
                   }
               }
           } catch (e) {
-              console.error("[TWSE] WS Message Error:", e);
+              console.error("[TWSEO] WS Message Error:", e);
           }
       };
 
@@ -305,9 +305,9 @@
   function triggerFlash(userId) {
       const li = member_lis.get(String(userId));
       if (li) {
-          li.classList.remove('twse-ws-updated');
+          li.classList.remove('twseo-ws-updated');
           void li.offsetWidth; // trigger reflow
-          li.classList.add('twse-ws-updated');
+          li.classList.add('twseo-ws-updated');
       }
   }
 
@@ -351,7 +351,7 @@
     warRoot = null;
     member_lis.clear();
     memberListsCache = [];
-    window.dispatchEvent(new Event("twse-war-gone"));
+    window.dispatchEvent(new Event("twseo-war-gone"));
   }
 
   function onWarFound() {
@@ -376,7 +376,7 @@
         }
     }
 
-    window.dispatchEvent(new Event("twse-war-found"));
+    window.dispatchEvent(new Event("twseo-war-found"));
   }
 
   function refresh_member_lists_cache() {
@@ -570,7 +570,7 @@
   async function update_status_single(faction_id) {
     try {
       const r = await fetch(
-        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSE-Merged`,
+        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`,
         { method: 'GET', mode: 'cors', cache: 'no-store' }
       );
       const status = await r.json();

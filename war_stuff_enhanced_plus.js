@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced — Optimized & Merged
+// @name         Torn War Stuff Enhanced+
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
 // @version      0.2
-// @description  Show travel status and hospital time and sort by hospital time on the war page. Merged from "Torn War Stuff Enhanced" and "TWSE-Optimized", plus performance tweaks.
-// @author       xentac + MrChurch [3654415] + merge (+opt pass)
+// @description  Show player status on war page such as hospital time, travel to/from torn, and abroad location as well as sorting that list by hospital time. Many performance improvements for fast status changes and re-sorting.
+// @author       MrChurch [3654415] + xentac
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle
