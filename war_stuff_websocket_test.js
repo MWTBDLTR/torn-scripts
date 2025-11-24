@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced & Optimized
+// @name         Torn War Stuff Enhanced & Optimized (v4.6.1)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      4.5.9
+// @version      4.6.2
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting on the war page.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -16,6 +16,27 @@
 
 (async function () {
   'use strict';
+
+  // Cleanup Function
+  const cleanup = () => {
+    console.log('[TWSEO] Cleaning up resources...');
+    if (tickTimer) clearTimeout(tickTimer);
+    if (wsInitTimeout) clearTimeout(wsInitTimeout);
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.close();
+      socket = null;
+    }
+    observer.disconnect();
+    member_lis.clear();
+    memberListsCache = [];
+    if (DEBUG) {
+      const debugInd = document.getElementById('twseo-debug-indicator');
+      if (debugInd) debugInd.remove();
+    }
+  };
+
+  // Attach Cleanup to Page Hide Event
+  window.addEventListener('pagehide', cleanup, { passive: true });
 
   // --- CONFIGURATION ---
   const USE_WEBSOCKETS = true;
@@ -32,7 +53,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v4.5.9) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
+      `%c[TWSEO] Script Loaded (v4.6.2) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
       "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -236,7 +257,6 @@
   }
 
   function createWebSocketConnection() {
-      if (!USE_WEBSOCKETS) return;
       if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
       const token = getWebSocketToken();
@@ -275,7 +295,7 @@
                   const msg = data.push.pub.data.message;
                   const actions = msg?.namespaces?.users?.actions;
 
-                  // UPDATED: Now looking strictly for 'updateStatus' instead of 'updateIcons'
+                  // UPDATED: Strictly listening for 'updateStatus' (JSON payload)
                   if (actions?.updateStatus) {
                       const update = actions.updateStatus;
                       
@@ -283,9 +303,9 @@
                       if (update.userId && update.status) {
                           const singleMap = {};
                           singleMap[update.userId] = update.status;
-                          processWebSocketIcons(singleMap);
+                          processWebSocketStatus(singleMap);
                       } else {
-                          processWebSocketIcons(update);
+                          processWebSocketStatus(update);
                       }
                   }
               }
@@ -317,54 +337,65 @@
       });
   }
 
-  function processWebSocketIcons(iconsObj) {
-      if (!iconsObj) return;
+  // RENAMED: from processWebSocketIcons to processWebSocketStatus
+  // REMOVED: Legacy HTML string parsing logic
+  function processWebSocketStatus(dataObj) {
+      if (!dataObj) return;
 
       let needsRender = false;
       const now = Date.now();
 
-      for (const [userId, iconHtml] of Object.entries(iconsObj)) {
-          if (typeof iconHtml !== 'string') continue;
-
+      for (const [userId, data] of Object.entries(dataObj)) {
           const uidStr = String(userId);
 
+          // Check if data is a JSON Object (which it should be for updateStatus)
+          // If it's a string, we ignore it now as we aren't handling updateIcons.
+          if (typeof data !== 'object' || data === null) {
+              continue;
+          }
+
           // --- DEDUPLICATION ---
-          // Ignore if we received the EXACT same payload for this user < 1.5s ago
+          const dataStr = JSON.stringify(data);
           const last = wsUpdateCache.get(uidStr);
-          if (last && last.data === iconHtml && (now - last.ts < 1500)) {
+          if (last && last.data === dataStr && (now - last.ts < 1500)) {
               if (DEBUG) console.log(`[TWSEO] Ignored duplicate WS packet for ${uidStr}`);
               continue;
           }
-          wsUpdateCache.set(uidStr, { ts: now, data: iconHtml });
+          wsUpdateCache.set(uidStr, { ts: now, data: dataStr });
           // ---------------------
 
           const currentData = member_status.get(uidStr) || { status: {} };
 
           let newState = "Okay";
           let newDesc = "Okay";
+          let newUntil = 0;
 
-          if (iconHtml.includes('class="hospital"') || iconHtml.includes("icon15")) {
-              newState = "Hospital";
-              newDesc = "In Hospital (WS)";
-          } else if (iconHtml.includes('class="jail"') || iconHtml.includes("icon16")) {
-              newState = "Jail";
-              newDesc = "In Jail (WS)";
-              // V4.5.7: Enhanced Federal Detection for WS
-              if (iconHtml.toLowerCase().includes("federal")) {
-                  newState = "Federal";
+          // --- JSON Object Parsing ---
+          if (data.text) {
+              // Extract state directly from the 'text' field
+              newState = data.text;
+              
+              // Handle Timestamps (updateAt is the unix timestamp when status ends)
+              if (data.updateAt) {
+                  newUntil = data.updateAt;
+              }
+
+              // Generate Description
+              if (newState === 'Hospital') {
+                  newDesc = "In Hospital (WS)";
+              } else if (newState === 'Jail') {
+                  newDesc = "In Jail (WS)";
+              } else if (newState === 'Traveling') {
+                  // Sometimes 'text' contains destination, sometimes just "Traveling"
+                  newDesc = data.text.includes("to") ? data.text : "Traveling (WS)";
+              } else if (newState === 'Federal') {
                   newDesc = "Federal Jail (WS)";
+              } else {
+                  newDesc = data.text; // Fallback
               }
-          } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"') || iconHtml.includes("icon71")) {
-              newState = "Traveling";
-              newDesc = "Traveling (WS)";
-
-              const destMatch = iconHtml.match(/Traveling to ([^"<]+)/);
-              if (destMatch && destMatch[1]) {
-                  const dest = abbreviatePlaces(destMatch[1].trim());
-                  newDesc = "Traveling to " + dest;
-              } else if (iconHtml.includes("Returning")) {
-                  newDesc = "Returning to Torn";
-              }
+          } else {
+              // Valid object but missing 'text'? Skip.
+              continue;
           }
 
           // Sticky Abroad Check
@@ -377,7 +408,7 @@
               }
           }
 
-          if (currentData.status.state !== newState || currentData.status.description !== newDesc) {
+          if (currentData.status.state !== newState || currentData.status.description !== newDesc || currentData.status.until !== newUntil) {
               logStatus(`Status Change: [${uidStr}]: ${currentData.status.state || 'Unknown'} -> ${newState} (${newDesc})`);
 
               const oldState = currentData.status.state;
@@ -385,21 +416,14 @@
               currentData.status.state = newState;
               currentData.status.description = newDesc;
               currentData.status.updated = Date.now();
+              currentData.status.until = newUntil; 
 
               // V4.5: Fresh Okay Logic
               if (newState === "Okay") {
                   currentData.status.freshOkay = true; // Mark as fresh to sink to bottom
+                  currentData.status.until = 0;
               } else {
                   currentData.status.freshOkay = false;
-              }
-
-              // V4.5: Fresh Hospital Logic
-              if (newState === 'Hospital' || newState === 'Jail') {
-                  if (oldState !== newState) {
-                      currentData.status.until = UNKNOWN_UNTIL; // Force bottom of hospital list
-                  }
-              } else {
-                  currentData.status.until = 0;
               }
 
               member_status.set(uidStr, currentData);
@@ -659,13 +683,25 @@
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
 
-    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + Math.floor(Math.random()*2000) - 1000) return;
-
-    for (const id of faction_ids) {
-      const ok = await update_status_single(id);
-      if (!ok) break;
-      await new Promise((r) => setTimeout(r, 150 + Math.floor(Math.random()*120)));
+    // Batch API requests using Promise.all()
+    try {
+      const responses = await Promise.all(
+        faction_ids.map(fid => 
+          fetch(`https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`)
+        )
+      );
+      
+      for (let i = 0; i < responses.length; i++) {
+        const response = responses[i];
+        if (!response.ok) throw new Error('API request failed');
+        // Process each response...
+      }
+    } catch (e) {
+      console.error('API batch request failed:', e);
+      setBackoff(true);
+      return false;
     }
+
     last_request_ts = Date.now();
   }
 
@@ -984,10 +1020,11 @@
   }
   scheduleTick();
 
+  // Debounced initial setup
   setTimeout(() => {
     prime_status_placeholders();
     requestAnimationFrame(watch);
-  }, 1000);
+  }, 500);
 
   window.addEventListener("hashchange", () => {
     onWarGone();
@@ -999,10 +1036,5 @@
     }, 300);
   }, { passive: true });
 
-  window.addEventListener("pagehide", () => {
-    observer.disconnect();
-    clearTimeout(tickTimer);
-    if(socket) socket.close();
-  }, { passive: true });
-
+  window.addEventListener("pagehide", cleanup, { passive: true });
 })();
