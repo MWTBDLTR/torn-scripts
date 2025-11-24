@@ -431,7 +431,9 @@
     if (el.getAttribute(name) !== v) el.setAttribute(name, v);
   };
   const pad2 = (n) => (n < 10 ? "0" : "") + n;
-  const nowSeconds = () => Math.trunc((window.getCurrentTimestamp?.() ?? Date.now()) / 1000);
+
+  // OPTIMIZATION: Use bitwise OR for faster floor, keep logic inline
+  const nowSeconds = () => ((window.getCurrentTimestamp?.() ?? Date.now()) / 1000) | 0;
 
   function nativeIsOK(statusDiv) {
     return statusDiv.classList.contains('ok');
@@ -559,7 +561,11 @@
         const m = a.href.match(/[?&](?:XID|ID)=(\d+)/);
         id = m ? m[1] : null;
       }
-      if (id) member_lis.set(id, li);
+      if (id) {
+          member_lis.set(id, li);
+          // OPTIMIZATION: Cache ID on element to avoid Regex in watch loop
+          li.dataset.twseoId = id;
+      }
     });
   }
 
@@ -725,6 +731,9 @@
     if (now - last_frame < TIME_BETWEEN_FRAMES) return requestAnimationFrame(watch);
     last_frame = now;
 
+    // OPTIMIZATION: Calculate current seconds ONCE per frame, not for every member
+    const currentSec = nowSeconds();
+
     // Temporary map to store sort weights to avoid DOM reading in the sort loop
     const currentSortWeights = new Map();
 
@@ -747,7 +756,7 @@
       if ((st.state === "Hospital" || st.state === "Jail") && nativeIsOK(status_DIV)) {
           // V4.5.3 FIX: Check if status is backed by WS or a future timer before overwriting
           const isWs = (st.description || "").includes("(WS)");
-          const hasFutureTime = (st.until || 0) > nowSeconds();
+          const hasFutureTime = (st.until || 0) > currentSec;
 
           // Only sync if NOT from WS AND NO time remaining
           if (!isWs && !hasFutureTime) {
@@ -766,11 +775,15 @@
       setDataset(li, "location", "");
 
       // Attribute-Based Coloring
-      if (st.state === "Hospital" || st.state === "Jail") {
+      // FIX: Calculate if the timer is expired (excluding Unknown/WS-only timers)
+      const isExpired = (st.until || 0) <= nowSeconds() && st.until !== UNKNOWN_UNTIL;
+
+      if ((st.state === "Hospital" || st.state === "Jail") && !isExpired) {
           safeSetAttr(status_DIV, COLOR, "red");
       } else if (st.state === "Traveling" || st.state === "Abroad") {
           safeSetAttr(status_DIV, COLOR, "blue");
       } else {
+          // This covers "Okay" AND "Hospital/Jail" where the timer has expired
           safeSetAttr(status_DIV, COLOR, "green");
       }
 
@@ -827,7 +840,8 @@
 
           safeSetAttr(status_DIV, TRAVELING, (st.description || "").includes("In a") ? "true" : "false");
 
-          const remain = Math.max(0, ((st.until >>> 0) - nowSeconds()) | 0);
+          // OPTIMIZATION: Use pre-calculated currentSec
+          const remain = Math.max(0, ((st.until >>> 0) - currentSec) | 0);
 
           // Display text state if time is unknown/zero
           if ((remain <= 0 && st.until === 0) || st.until === UNKNOWN_UNTIL) {
@@ -882,8 +896,9 @@
         }
 
         const arr = Array.from(lis).map(li => {
-            // OPTIMIZATION: Read ID once, use Cached Score, use calculated SortWeight
-            const id = li.querySelector(`a[href^="/profiles.php"]`)?.href.match(/[?&](?:XID|ID)=(\d+)/)?.[1];
+            // OPTIMIZATION: Read Cached ID from dataset instead of parsing href
+            const id = li.dataset.twseoId;
+
             const st = member_status.get(id)?.status;
             let score = getScore(li, id); // Use Cache
 
