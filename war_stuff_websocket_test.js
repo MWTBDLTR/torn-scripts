@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced & Optimized (v4.6.1)
+// @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      4.6.3
+// @version      5.0.0
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting on the war page.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -17,33 +17,12 @@
 (async function () {
   'use strict';
 
-  // Cleanup Function
-  const cleanup = () => {
-    console.log('[TWSEO] Cleaning up resources...');
-    if (tickTimer) clearTimeout(tickTimer);
-    if (wsInitTimeout) clearTimeout(wsInitTimeout);
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.close();
-      socket = null;
-    }
-    observer.disconnect();
-    member_lis.clear();
-    memberListsCache = [];
-    if (DEBUG) {
-      const debugInd = document.getElementById('twseo-debug-indicator');
-      if (debugInd) debugInd.remove();
-    }
-  };
-
-  // Attach Cleanup to Page Hide Event
-  window.addEventListener('pagehide', cleanup, { passive: true });
-
   // --- CONFIGURATION ---
   const USE_WEBSOCKETS = true;
   const STARTUP_DELAY_MS = 3000;
   const RESYNC_THRESHOLD_MS = 3000;
   const UNKNOWN_UNTIL = 4294967295; // Max 32-bit int (Sorts to bottom of ascending list)
-  const TIME_BETWEEN_FRAMES = 500; // Faster refresh (4fps) for smoother timers
+  const TIME_BETWEEN_FRAMES = 250; // Faster refresh (4fps) for smoother timers
 
   // --- STATE MANAGEMENT ---
   let DEBUG = GM_getValue("twseo_debug_mode", false);
@@ -53,7 +32,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v4.6.3) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
+      `%c[TWSEO] Script Loaded (v5.0.0) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
       "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -234,7 +213,6 @@
   const member_status = new Map();
   const member_lis = new Map();
   let memberListsCache = [];
-  const wsUpdateCache = new Map();
 
   // --- WEBSOCKET LOGIC ---
   let socket;
@@ -257,6 +235,7 @@
   }
 
   function createWebSocketConnection() {
+      if (!USE_WEBSOCKETS) return;
       if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
       const token = getWebSocketToken();
@@ -295,17 +274,14 @@
                   const msg = data.push.pub.data.message;
                   const actions = msg?.namespaces?.users?.actions;
 
-                  // UPDATED: Strictly listening for 'updateStatus' (JSON payload)
-                  if (actions?.updateStatus) {
-                      const update = actions.updateStatus;
-                      
-                      // Handle single user update vs bulk map
-                      if (update.userId && update.status) {
+                  if (actions?.updateIcons) {
+                      const update = actions.updateIcons;
+                      if (update.userId && update.icons) {
                           const singleMap = {};
-                          singleMap[update.userId] = update.status;
-                          processWebSocketStatus(singleMap);
+                          singleMap[update.userId] = update.icons;
+                          processWebSocketIcons(singleMap);
                       } else {
-                          processWebSocketStatus(update);
+                          processWebSocketIcons(update);
                       }
                   }
               }
@@ -337,65 +313,42 @@
       });
   }
 
-  // RENAMED: from processWebSocketIcons to processWebSocketStatus
-  // REMOVED: Legacy HTML string parsing logic
-  function processWebSocketStatus(dataObj) {
-      if (!dataObj) return;
+  function processWebSocketIcons(iconsObj) {
+      if (!iconsObj) return;
 
       let needsRender = false;
-      const now = Date.now();
 
-      for (const [userId, data] of Object.entries(dataObj)) {
+      for (const [userId, iconHtml] of Object.entries(iconsObj)) {
+          if (typeof iconHtml !== 'string') continue;
+
           const uidStr = String(userId);
-
-          // Check if data is a JSON Object (which it should be for updateStatus)
-          // If it's a string, we ignore it now as we aren't handling updateIcons.
-          if (typeof data !== 'object' || data === null) {
-              continue;
-          }
-
-          // --- DEDUPLICATION ---
-          const dataStr = JSON.stringify(data);
-          const last = wsUpdateCache.get(uidStr);
-          if (last && last.data === dataStr && (now - last.ts < 1500)) {
-              if (DEBUG) console.log(`[TWSEO] Ignored duplicate WS packet for ${uidStr}`);
-              continue;
-          }
-          wsUpdateCache.set(uidStr, { ts: now, data: dataStr });
-          // ---------------------
-
           const currentData = member_status.get(uidStr) || { status: {} };
 
           let newState = "Okay";
           let newDesc = "Okay";
-          let newUntil = 0;
 
-          // --- JSON Object Parsing ---
-          if (data.text) {
-              // Extract state directly from the 'text' field
-              newState = data.text;
-              
-              // Handle Timestamps (updateAt is the unix timestamp when status ends)
-              if (data.updateAt) {
-                  newUntil = data.updateAt;
-              }
-
-              // Generate Description
-              if (newState === 'Hospital') {
-                  newDesc = "In Hospital (WS)";
-              } else if (newState === 'Jail') {
-                  newDesc = "In Jail (WS)";
-              } else if (newState === 'Traveling') {
-                  // Sometimes 'text' contains destination, sometimes just "Traveling"
-                  newDesc = data.text.includes("to") ? data.text : "Traveling (WS)";
-              } else if (newState === 'Federal') {
+          if (iconHtml.includes('class="hospital"') || iconHtml.includes("icon15")) {
+              newState = "Hospital";
+              newDesc = "In Hospital (WS)";
+          } else if (iconHtml.includes('class="jail"') || iconHtml.includes("icon16")) {
+              newState = "Jail";
+              newDesc = "In Jail (WS)";
+              // V4.5.7: Enhanced Federal Detection for WS
+              if (iconHtml.toLowerCase().includes("federal")) {
+                  newState = "Federal";
                   newDesc = "Federal Jail (WS)";
-              } else {
-                  newDesc = data.text; // Fallback
               }
-          } else {
-              // Valid object but missing 'text'? Skip.
-              continue;
+          } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"') || iconHtml.includes("icon71")) {
+              newState = "Traveling";
+              newDesc = "Traveling (WS)";
+
+              const destMatch = iconHtml.match(/Traveling to ([^"<]+)/);
+              if (destMatch && destMatch[1]) {
+                  const dest = abbreviatePlaces(destMatch[1].trim());
+                  newDesc = "Traveling to " + dest;
+              } else if (iconHtml.includes("Returning")) {
+                  newDesc = "Returning to Torn";
+              }
           }
 
           // Sticky Abroad Check
@@ -408,7 +361,7 @@
               }
           }
 
-          if (currentData.status.state !== newState || currentData.status.description !== newDesc || currentData.status.until !== newUntil) {
+          if (currentData.status.state !== newState || currentData.status.description !== newDesc) {
               logStatus(`Status Change: [${uidStr}]: ${currentData.status.state || 'Unknown'} -> ${newState} (${newDesc})`);
 
               const oldState = currentData.status.state;
@@ -416,14 +369,21 @@
               currentData.status.state = newState;
               currentData.status.description = newDesc;
               currentData.status.updated = Date.now();
-              currentData.status.until = newUntil; 
 
               // V4.5: Fresh Okay Logic
               if (newState === "Okay") {
                   currentData.status.freshOkay = true; // Mark as fresh to sink to bottom
-                  currentData.status.until = 0;
               } else {
                   currentData.status.freshOkay = false;
+              }
+
+              // V4.5: Fresh Hospital Logic
+              if (newState === 'Hospital' || newState === 'Jail') {
+                  if (oldState !== newState) {
+                      currentData.status.until = UNKNOWN_UNTIL; // Force bottom of hospital list
+                  }
+              } else {
+                  currentData.status.until = 0;
               }
 
               member_status.set(uidStr, currentData);
@@ -683,57 +643,14 @@
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
 
-    try {
-      for (const fid of faction_ids) {
-        await fetch(
-          `https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`,
-          { method: 'GET', mode: 'cors', cache: 'no-store' }
-        );
-        // Process each response individually
-        const response = await fetch(`https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`);
-        if (!response.ok) {
-          throw new Error('API request failed');
-        }
-        const status = await response.json();
-        
-        // Handle each member's status
-        if (status.members) {
-          for (const [k, v] of Object.entries(status.members)) {
-            if (v.status && v.status.description) {
-                v.status.description = abbreviatePlaces(v.status.description);
-            }
+    if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + Math.floor(Math.random()*2000) - 1000) return;
 
-            // --- STALE DATA PROTECTION ---
-            const current = member_status.get(k);
-            if (current) {
-                const curState = current.status.state;
-                const curDesc = current.status.description || "";
-                const isWsDerived = curDesc.includes("(WS)");
-                const timeSinceUpdate = Date.now() - (current.status.updated || 0);
-
-                if (
-                    (curState === "Traveling" || curState === "Hospital" || curState === "Jail") &&
-                    isWsDerived &&
-                    timeSinceUpdate < 60000 &&
-                    v.status.state === "Okay"
-                ) {
-                    if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'. keeping '${curState}'`);
-                    continue; // Skip update for this member
-                }
-            }
-
-            v.status.updated = Date.now();
-            member_status.set(k, v);
-          }
-        }
-      }
-    } catch (e) {
-      console.error('API request failed:', e);
-      setBackoff(true);
-      return false;
-    } finally {
-      last_request_ts = Date.now();
+    for (const id of faction_ids) {
+      const ok = await update_status_single(id);
+      if (!ok) break;
+      await new Promise((r) => setTimeout(r, 150 + Math.floor(Math.random()*120)));
     }
+    last_request_ts = Date.now();
   }
 
   function normalizeErrorCode(status) {
@@ -771,6 +688,8 @@
         }
 
         // --- STALE DATA PROTECTION ---
+        // If API says "Okay", but we have a recent WS "Traveling" or "Hospital" status,
+        // ignore the API update. The API is likely caching the old state.
         const current = member_status.get(k);
         if (current) {
             const curState = current.status.state;
@@ -788,6 +707,7 @@
                 continue; // Skip update for this member
             }
         }
+        // -----------------------------
 
         v.status.updated = Date.now();
         member_status.set(k, v);
@@ -1048,11 +968,10 @@
   }
   scheduleTick();
 
-  // Debounced initial setup
   setTimeout(() => {
     prime_status_placeholders();
     requestAnimationFrame(watch);
-  }, 500);
+  }, 1000);
 
   window.addEventListener("hashchange", () => {
     onWarGone();
@@ -1064,5 +983,10 @@
     }, 300);
   }, { passive: true });
 
-  window.addEventListener("pagehide", cleanup, { passive: true });
+  window.addEventListener("pagehide", () => {
+    observer.disconnect();
+    clearTimeout(tickTimer);
+    if(socket) socket.close();
+  }, { passive: true });
+
 })();
