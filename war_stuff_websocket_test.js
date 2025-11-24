@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized (v4.6.1)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      4.6.2
+// @version      4.6.3
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting on the war page.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -53,7 +53,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v4.6.2) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
+      `%c[TWSEO] Script Loaded (v4.6.3) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
       "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -683,26 +683,57 @@
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
 
-    // Batch API requests using Promise.all()
     try {
-      const responses = await Promise.all(
-        faction_ids.map(fid => 
-          fetch(`https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`)
-        )
-      );
-      
-      for (let i = 0; i < responses.length; i++) {
-        const response = responses[i];
-        if (!response.ok) throw new Error('API request failed');
-        // Process each response...
+      for (const fid of faction_ids) {
+        await fetch(
+          `https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`,
+          { method: 'GET', mode: 'cors', cache: 'no-store' }
+        );
+        // Process each response individually
+        const response = await fetch(`https://api.torn.com/faction/${fid}?selections=basic&key=${apiKey}`);
+        if (!response.ok) {
+          throw new Error('API request failed');
+        }
+        const status = await response.json();
+        
+        // Handle each member's status
+        if (status.members) {
+          for (const [k, v] of Object.entries(status.members)) {
+            if (v.status && v.status.description) {
+                v.status.description = abbreviatePlaces(v.status.description);
+            }
+
+            // --- STALE DATA PROTECTION ---
+            const current = member_status.get(k);
+            if (current) {
+                const curState = current.status.state;
+                const curDesc = current.status.description || "";
+                const isWsDerived = curDesc.includes("(WS)");
+                const timeSinceUpdate = Date.now() - (current.status.updated || 0);
+
+                if (
+                    (curState === "Traveling" || curState === "Hospital" || curState === "Jail") &&
+                    isWsDerived &&
+                    timeSinceUpdate < 60000 &&
+                    v.status.state === "Okay"
+                ) {
+                    if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'. keeping '${curState}'`);
+                    continue; // Skip update for this member
+                }
+            }
+
+            v.status.updated = Date.now();
+            member_status.set(k, v);
+          }
+        }
       }
     } catch (e) {
-      console.error('API batch request failed:', e);
+      console.error('API request failed:', e);
       setBackoff(true);
       return false;
+    } finally {
+      last_request_ts = Date.now();
     }
-
-    last_request_ts = Date.now();
   }
 
   function normalizeErrorCode(status) {
@@ -740,8 +771,6 @@
         }
 
         // --- STALE DATA PROTECTION ---
-        // If API says "Okay", but we have a recent WS "Traveling" or "Hospital" status,
-        // ignore the API update. The API is likely caching the old state.
         const current = member_status.get(k);
         if (current) {
             const curState = current.status.state;
@@ -759,7 +788,6 @@
                 continue; // Skip update for this member
             }
         }
-        // -----------------------------
 
         v.status.updated = Date.now();
         member_status.set(k, v);
