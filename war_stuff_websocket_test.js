@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced & Optimized
+// @name         Torn War Stuff Enhanced + WebSocket
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      2.1.ws-test
-// @description  The ultimate war monitor. INSTANT status updates and sorting on war pages. Pair with my attack links script for lightning strike speed in your next war!
-// @author       MrChurch [3654415] + xentac (original twse) + Heasley (websocket idea)
+// @version      3.3
+// @description  The ultimate war monitor. Uses WebSockets for INSTANT status updates and the API for detailed timers.
+// @author       MrChurch [3654415] + xentac + Heasley (WebSocket logic) + Merge
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle
@@ -19,32 +19,60 @@
 
   // --- CONFIGURATION ---
   const USE_WEBSOCKETS = true;
+  const STARTUP_DELAY_MS = 1500; // 1.5s delay to prevent connection "interrupted" errors
 
-  // --- DEBUG STATE ---
+  // --- STATE MANAGEMENT ---
   let DEBUG = GM_getValue("twseo_debug_mode", false);
+  let LOG_STATUS = GM_getValue("twseo_log_status", false);
 
-  if (DEBUG) console.log("%c[TWSEO-DEBUG] Script Loaded (v2.1)", "color: #00ff00; font-weight: bold; background: #333;");
+  console.log(
+      `%c[TWSEO] Script Loaded (v3.3) | Debug: ${DEBUG} | Logs: ${LOG_STATUS}`,
+      "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
+  );
 
   function toggleDebug() {
       DEBUG = !DEBUG;
-      GM_setValue("twse_debug_mode", DEBUG);
-      alert(`TWSE Debug Mode is now: ${DEBUG ? "ON" : "OFF"}.\nReloading page...`);
+      GM_setValue("twseo_debug_mode", DEBUG);
+      alert(`TWSEO Debug Mode is now: ${DEBUG ? "ON" : "OFF"}.\nReloading page...`);
       location.reload();
+  }
+
+  function toggleStatusLogs() {
+      LOG_STATUS = !LOG_STATUS;
+      GM_setValue("twseo_log_status", LOG_STATUS);
+      alert(`TWSEO Status Logs are now: ${LOG_STATUS ? "ON" : "OFF"}.`);
   }
 
   function log(...args) {
       if (DEBUG) console.log("%c[TWSEO-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
   }
 
+  function logStatus(msg) {
+      if (LOG_STATUS) console.log(`%c[TWSEO] ${msg}`, "color: #00ccff; font-weight: bold;");
+  }
+
+  // --- HELPER: ABBREVIATIONS ---
+  const COUNTRY_MAP = {
+    "South Africa": "SA",
+    "Cayman Islands": "CI",
+    "United Kingdom": "UK",
+    "Argentina": "Arg",
+    "Switzerland": "Switz"
+  };
+  const COUNTRY_RX = new RegExp(Object.keys(COUNTRY_MAP).join("|"), "g");
+  const abbreviatePlaces = (s) => s?.replace(COUNTRY_RX, (m) => COUNTRY_MAP[m]) ?? "";
+
   // --- COMPATIBILITY ---
-  if (document.querySelector("#FFScouterV2DisableWarMonitor")) return;
-  const ffScouterV2DisableWarMonitor = document.createElement("div");
-  ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
-  ffScouterV2DisableWarMonitor.style.display = "none";
-  document.documentElement.appendChild(ffScouterV2DisableWarMonitor);
+  if (!document.querySelector("#FFScouterV2DisableWarMonitor")) {
+      const ffScouterV2DisableWarMonitor = document.createElement("div");
+      ffScouterV2DisableWarMonitor.id = "FFScouterV2DisableWarMonitor";
+      ffScouterV2DisableWarMonitor.style.display = "none";
+      document.documentElement.appendChild(ffScouterV2DisableWarMonitor);
+      window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
+  }
 
   // --- API KEY MANAGEMENT ---
-  const LS_KEY = "twse_merged_apikey";
+  const LS_KEY = "twseo_merged_apikey";
   let apiKey = localStorage.getItem(LS_KEY) ?? "###PDA-APIKEY###";
   const hasValidKey = () =>
     typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
@@ -61,8 +89,6 @@
       running = true;
       backoffMs = 0;
       backoffUntil = 0;
-    } else {
-      alert("No valid key provided. The script will not call the API until a valid key is set.");
     }
   }
 
@@ -75,14 +101,15 @@
   try {
     GM_registerMenuCommand("Set API Key", () => promptSetKey());
     GM_registerMenuCommand("Clear API Key", () => clearKey());
+    GM_registerMenuCommand(`Toggle Status Logs (${LOG_STATUS ? "ON" : "OFF"})`, () => toggleStatusLogs());
     GM_registerMenuCommand(`Toggle Debug Mode (${DEBUG ? "ON" : "OFF"})`, () => toggleDebug());
   } catch {}
 
   // --- STYLES ---
-  const CONTENT   = "data-twse-content";
-  const TRAVELING = "data-twse-traveling";
-  const HIGHLIGHT = "data-twse-highlight";
-  const HCLASS    = "twse-highlight";
+  const CONTENT   = "data-twseo-content";
+  const TRAVELING = "data-twseo-traveling";
+  const HIGHLIGHT = "data-twseo-highlight";
+  const HCLASS    = "twseo-highlight";
   const HAS_HAS   = CSS.supports?.("selector(:has(*))") ?? false;
 
   GM_addStyle(`
@@ -93,23 +120,34 @@
     .members-list div.status[${CONTENT}] { color: transparent !important; }
     .members-list div.status[${CONTENT}]::after {
       content: attr(${CONTENT});
-      position: absolute; top: 0; left: 0; width: calc(100% - 10px); height: 100%;
-      background: inherit; display: flex; right: 10px; justify-content: flex-end; align-items: center;
+      position: absolute; 
+      top: 0; 
+      right: 10px; 
+      width: auto; 
+      max-width: 90px; 
+      height: 100%;
+      background: inherit; 
+      display: flex; 
+      justify-content: flex-end; 
+      align-items: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .members-list .ok.status::after        { color: var(--user-status-green-color); }
     .members-list .not-ok.status::after    { color: var(--user-status-red-color); }
     .members-list .abroad.status::after,
     .members-list .traveling.status::after { color: var(--user-status-blue-color); }
-
-    @keyframes twse-flash {
+    
+    @keyframes twseo-flash {
         0% { box-shadow: inset 0 0 0px gold; }
         50% { box-shadow: inset 0 0 10px gold; }
         100% { box-shadow: inset 0 0 0px gold; }
     }
-    .twse-ws-updated { animation: twse-flash 1s ease-out; }
-
-    #twse-debug-indicator {
-        position: fixed; top: 0; right: 0; background: orange; color: black;
+    .twseo-ws-updated { animation: twseo-flash 1s ease-out; }
+    
+    #twseo-debug-indicator {
+        position: fixed; top: 0; right: 0; background: orange; color: black; 
         font-weight: bold; padding: 2px 5px; z-index: 999999; font-size: 10px;
         pointer-events: none; opacity: 0.8;
     }
@@ -117,8 +155,8 @@
 
   if (DEBUG) {
       const debugInd = document.createElement("div");
-      debugInd.id = "twse-debug-indicator";
-      debugInd.textContent = "TWSE DEBUG";
+      debugInd.id = "twseo-debug-indicator";
+      debugInd.textContent = "TWSEO DEBUG";
       document.body.appendChild(debugInd);
   }
 
@@ -129,24 +167,21 @@
   let found_war = false;
   let warRoot = null;
 
-  const member_status = new Map();
-  const member_lis = new Map();
+  const member_status = new Map(); 
+  const member_lis = new Map();    
   let memberListsCache = [];
 
   // --- WEBSOCKET LOGIC ---
   let socket;
   let subscribedFactions = new Set();
-  let msgId = 1;
-
-  // Use clean URL (Verified working)
+  let msgId = 1; 
+  let wsInitTimeout = null; // Timer handle
+  
   const WS_URL = "wss://ws-centrifugo.torn.com/connection/websocket";
 
   function getWebSocketToken() {
       const el = document.getElementById('websocketConnectionData');
-      if (!el) {
-          log("CRITICAL: Could not find #websocketConnectionData element in DOM.");
-          return null;
-      }
+      if (!el) return null;
       try {
           const data = JSON.parse(el.innerText);
           return data.token;
@@ -161,24 +196,19 @@
       if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
       const token = getWebSocketToken();
-      if (!token) {
-          log("Cannot Connect: Token not found in DOM.");
-          return;
-      }
+      if (!token) return;
 
-      log(`Initializing WebSocket connection to ${WS_URL}...`);
+      log(`Initializing WebSocket connection...`);
       socket = new WebSocket(WS_URL);
 
       socket.onopen = function() {
-          // v2.0 Auth Format (Verified working)
           const authMsg = {
-              "connect": {
+              "connect": { 
                   "token": token,
                   "name": "js"
               },
               "id": msgId++
           };
-          log("WS Socket Open. Sending Auth...");
           socket.send(JSON.stringify(authMsg));
       };
 
@@ -191,31 +221,23 @@
 
               const data = JSON.parse(event.data);
 
-              // 1. Handle Connect Response
               if (data.connect) {
-                  log("WS Authenticated Successfully! (Client ID: " + data.connect.client + ")");
+                  log("WS Authenticated.");
                   subscribeToFactions(get_faction_ids());
                   return;
               }
 
-              // 2. Handle Push Updates
               if (data.push && data.push.pub && data.push.pub.data) {
                   const msg = data.push.pub.data.message;
                   const actions = msg?.namespaces?.users?.actions;
-
+                  
                   if (actions?.updateIcons) {
-                      // v2.1 FIX: Handle single-user structure correctly
                       const update = actions.updateIcons;
-
-                      // Case A: Single User Update (Format: { userId: 123, icons: "..." })
                       if (update.userId && update.icons) {
-                          // Wrap in a map-like structure for processing
                           const singleMap = {};
                           singleMap[update.userId] = update.icons;
                           processWebSocketIcons(singleMap);
-                      }
-                      // Case B: Bulk/Map Update (Format: { "123": "...", "456": "..." })
-                      else {
+                      } else {
                           processWebSocketIcons(update);
                       }
                   }
@@ -226,14 +248,10 @@
       };
 
       socket.onclose = function(event) {
-          log(`WS Closed. Code: ${event.code}, Reason: ${event.reason || "None"}. Reconnecting in 5s...`);
+          log(`WS Closed. Reconnecting in 5s...`);
           subscribedFactions.clear();
           setTimeout(createWebSocketConnection, 5000);
       };
-
-      socket.onerror = function(err) {
-          log("WS Error Detected");
-      }
   }
 
   function subscribeToFactions(factionIds) {
@@ -242,7 +260,6 @@
       factionIds.forEach(fid => {
           if (!subscribedFactions.has(fid)) {
               log(`Subscribing to channel: faction-users-${fid}`);
-
               const msg = {
                   "subscribe": { "channel": `faction-users-${fid}` },
                   "id": msgId++
@@ -256,18 +273,17 @@
   function processWebSocketIcons(iconsObj) {
       if (!iconsObj) return;
 
-      // v2.1: iconsObj should now be guaranteed to be a Map { userId: htmlString }
+      let needsRender = false;
+
       for (const [userId, iconHtml] of Object.entries(iconsObj)) {
-          // Sanity check: ensure iconHtml is actually a string (prevent parsing issues)
           if (typeof iconHtml !== 'string') continue;
 
           const uidStr = String(userId);
           const currentData = member_status.get(uidStr) || { status: {} };
-
+          
           let newState = "Okay";
           let newDesc = "Okay";
-
-          // Basic parsing of the HTML blob
+          
           if (iconHtml.includes('class="hospital"') || iconHtml.includes("icon15")) {
               newState = "Hospital";
               newDesc = "In Hospital (WS)";
@@ -277,28 +293,41 @@
           } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"') || iconHtml.includes("icon71")) {
               newState = "Traveling";
               newDesc = "Traveling (WS)";
+              
+              const destMatch = iconHtml.match(/Traveling to ([^"<]+)/);
+              if (destMatch && destMatch[1]) {
+                  const dest = abbreviatePlaces(destMatch[1].trim());
+                  newDesc = "Traveling to " + dest;
+              } else if (iconHtml.includes("Returning")) {
+                  newDesc = "Returning to Torn";
+              }
           }
 
-          // Check if state changed (or if description changed from generic WS to specific)
-          if (currentData.status.state !== newState) {
-              log(`Status Change: [${uidStr}]: ${currentData.status.state} -> ${newState}`);
-
+          if (currentData.status.state !== newState || currentData.status.description !== newDesc) {
+              logStatus(`Status Change: [${uidStr}]: ${currentData.status.state || 'Unknown'} -> ${newState} (${newDesc})`);
+              
+              const oldState = currentData.status.state;
+              
               currentData.status.state = newState;
               currentData.status.description = newDesc;
-
-              // Reset timer if entering hosp/jail (wait for API to fill real time)
+              
               if (newState === 'Hospital' || newState === 'Jail') {
-                  currentData.status.until = (Date.now() / 1000) + 300;
+                  if (oldState !== newState) {
+                      currentData.status.until = 0;
+                  }
               } else {
                   currentData.status.until = 0;
               }
 
               member_status.set(uidStr, currentData);
               triggerFlash(uidStr);
-          } else {
-              // Even if state is same, maybe icons changed? Flash to confirm receipt.
-              if(DEBUG) triggerFlash(uidStr);
+              needsRender = true;
           }
+      }
+
+      if (needsRender) {
+          last_frame = 0;
+          requestAnimationFrame(watch);
       }
   }
 
@@ -351,31 +380,40 @@
     warRoot = null;
     member_lis.clear();
     memberListsCache = [];
+    // Clean up WS on war gone? No, keep it for persistence during nav
     window.dispatchEvent(new Event("twseo-war-gone"));
   }
 
   function onWarFound() {
     if (found_war) return;
     found_war = true;
+    
+    const warWrapper = document.querySelector(".faction-war");
+    const anyList = document.querySelector("ul.members-list");
+    
+    warRoot = warWrapper || (anyList ? document : null);
 
-    if (DEBUG) {
-        warRoot = document.querySelector(".faction-war") || document;
-        log("War/Faction Page Found. Starting Listeners...");
-    } else {
-        warRoot = document.querySelector(".faction-war") || document;
+    if (!warRoot) {
+        found_war = false;
+        return;
     }
 
+    log("Target List Found. Initializing Monitor...");
     extract_all_member_lis();
     prime_status_placeholders();
-
+    
     if (USE_WEBSOCKETS) {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            createWebSocketConnection();
-        } else {
-            subscribeToFactions(get_faction_ids());
-        }
+        // v3.3: Delayed connection start
+        if (wsInitTimeout) clearTimeout(wsInitTimeout);
+        wsInitTimeout = setTimeout(() => {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                createWebSocketConnection();
+            } else {
+                subscribeToFactions(get_faction_ids());
+            }
+        }, STARTUP_DELAY_MS);
     }
-
+    
     window.dispatchEvent(new Event("twseo-war-found"));
   }
 
@@ -386,15 +424,12 @@
         memberListsCache = Array.from(warEl.querySelectorAll("ul.members-list"));
         return;
     }
-
-    if (DEBUG) {
-        memberListsCache = Array.from(document.querySelectorAll("ul.members-list"));
-        if(memberListsCache.length > 0) warRoot = document;
-        return;
+    
+    memberListsCache = Array.from(document.querySelectorAll("ul.members-list"));
+    if(memberListsCache.length > 0) warRoot = document;
+    else {
+        warRoot = null;
     }
-
-    warRoot = null;
-    memberListsCache = [];
   }
 
   function get_member_lists() {
@@ -403,10 +438,9 @@
     return memberListsCache;
   }
 
-  let lastKnownFactionIds = "";
   function get_faction_ids() {
     const ids = new Set();
-
+    
     get_member_lists().forEach((elem) => {
       const a = elem.querySelector(`a[href^="/factions.php"]`);
       if (a) {
@@ -420,17 +454,12 @@
       }
     });
 
-    if (ids.size === 0 && DEBUG) {
+    if (ids.size === 0) {
         const urlParams = new URLSearchParams(window.location.search);
         const urlId = urlParams.get("ID");
         if (urlId) ids.add(urlId);
     }
-
-    const idStr = [...ids].sort().join(",");
-    if(DEBUG && idStr !== lastKnownFactionIds && idStr.length > 0) {
-        log("Identified Faction IDs:", [...ids]);
-        lastKnownFactionIds = idStr;
-    }
+    
     return [...ids];
   }
 
@@ -455,7 +484,8 @@
   }
 
   function extract_member_lis(ul) {
-    const selector = DEBUG ? "li" : "li.enemy, li.your";
+    const selector = document.querySelector(".faction-war") ? "li.enemy, li.your" : "li";
+    
     ul.querySelectorAll(selector).forEach((li) => {
       const a = li.querySelector(`a[href^="/profiles.php"]`);
       if (!a) return;
@@ -495,14 +525,11 @@
   const observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
-        if (node?.classList?.contains?.("faction-war")) {
+        if (node?.classList?.contains?.("faction-war") || 
+           (node?.nodeType === 1 && (node.matches?.("ul.members-list") || node.querySelector?.("ul.members-list")))) {
           onWarFound();
           scheduleRefreshLists();
           return;
-        }
-        if (DEBUG && node?.nodeType === 1) {
-            onWarFound();
-            return;
         }
       }
       for (const node of m.removedNodes) {
@@ -514,13 +541,13 @@
       }
     }
   });
-
-  setTimeout(() => {
-      if (DEBUG || document.querySelector(".faction-war")) {
+  
+  setTimeout(() => { 
+      if (document.querySelector("ul.members-list")) {
           onWarFound();
-      }
+      } 
   }, 800);
-
+  
   observer.observe(document.body, { subtree: true, childList: true });
 
   // --- API BACKOFF / LOOP ---
@@ -539,7 +566,7 @@
   async function update_statuses_api() {
     if (!running || !hasValidKey()) return;
     if (warRoot && warRoot !== document && !warRoot.isConnected) onWarGone();
-    if (!found_war && !DEBUG) return;
+    if (!found_war) return; 
     if (document.hidden) return;
 
     const now = Date.now();
@@ -547,7 +574,7 @@
 
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
-
+    
     if (now - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + Math.floor(Math.random()*2000) - 1000) return;
 
     for (const id of faction_ids) {
@@ -570,14 +597,14 @@
   async function update_status_single(faction_id) {
     try {
       const r = await fetch(
-        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO`,
+        `https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO-Merged`,
         { method: 'GET', mode: 'cors', cache: 'no-store' }
       );
       const status = await r.json();
 
       const code = normalizeErrorCode(status);
       if (code != null) {
-        if ([5, 8, 9].includes(code)) {
+        if ([5, 8, 9].includes(code)) { 
           setBackoff(true);
           return false;
         }
@@ -588,6 +615,9 @@
       if (!status?.members) return true;
 
       for (const [k, v] of Object.entries(status.members)) {
+        if (v.status && v.status.description) {
+            v.status.description = abbreviatePlaces(v.status.description);
+        }
         member_status.set(k, v);
       }
       return true;
@@ -603,7 +633,7 @@
 
   function watch() {
     if (found_war && warRoot && warRoot !== document && !warRoot.isConnected) onWarGone();
-    if (!found_war && !DEBUG) return requestAnimationFrame(watch);
+    if (!found_war) return requestAnimationFrame(watch);
     if (document.hidden) return requestAnimationFrame(watch);
 
     const now = performance.now();
@@ -626,20 +656,40 @@
       setDataset(li, "until", st.until ?? "");
       setDataset(li, "location", "");
 
+      // V3.2 COLOR FIX: Enforce correct status class classes
+      if (st.state === "Hospital" || st.state === "Jail") {
+          status_DIV.classList.remove("ok", "traveling", "abroad");
+          status_DIV.classList.add("not-ok"); // Force Red
+      } else if (st.state === "Traveling" || st.state === "Abroad") {
+          status_DIV.classList.remove("ok", "not-ok", "hospital");
+          status_DIV.classList.add("traveling"); // Force Blue
+      } else {
+          // Okay
+          status_DIV.classList.remove("not-ok", "hospital", "traveling", "abroad");
+          status_DIV.classList.add("ok"); // Force Green
+      }
+
       switch (st.state) {
         case "Abroad":
         case "Traveling": {
           safeRemoveAttr(li, "data-until");
           safeRemoveAttr(li, "data-location");
           const desc = st.description || "Traveling";
-
+          
           if (desc.includes("Traveling to ")) {
+              setDataset(li, "sortA", 4);
               const content = "► " + desc.split("Traveling to ")[1];
               safeSetAttr(status_DIV, CONTENT, content);
+          } else if (desc.includes("In ")) {
+              setDataset(li, "sortA", 3);
+              const content = desc.split("In ")[1];
+              safeSetAttr(status_DIV, CONTENT, content);
           } else if (desc.includes("Returning")) {
+              setDataset(li, "sortA", 2);
               const content = "◄ " + desc.split("Returning to Torn from ")[1];
               safeSetAttr(status_DIV, CONTENT, content);
           } else {
+              setDataset(li, "sortA", 5);
               safeSetAttr(status_DIV, CONTENT, "Traveling");
           }
           break;
@@ -648,13 +698,15 @@
         case "Hospital":
         case "Jail": {
           setDataset(li, "sortA", 1);
+          
           safeSetAttr(status_DIV, TRAVELING, (st.description || "").includes("In a") ? "true" : "false");
 
           const remain = Math.max(0, ((st.until >>> 0) - nowSeconds()) | 0);
-
+          
+          // Display text state if time is unknown/zero
           if (remain <= 0 && st.until === 0) {
-              safeSetAttr(status_DIV, CONTENT, st.state);
-              safeSetAttr(status_DIV, HIGHLIGHT, "true");
+              safeSetAttr(status_DIV, CONTENT, st.state); 
+              safeSetAttr(status_DIV, HIGHLIGHT, "true"); 
               if (!HAS_HAS) li.classList.add(HCLASS);
               break;
           }
@@ -671,7 +723,7 @@
           const t = `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
 
           if (status_DIV.getAttribute(CONTENT) !== t) safeSetAttr(status_DIV, CONTENT, t);
-
+          
           const isSoon = remain < 300 ? "true" : "false";
           safeSetAttr(status_DIV, HIGHLIGHT, isSoon);
 
@@ -695,9 +747,14 @@
         if (!ever_sorted) sorted_column = { column: "status", order: "asc" };
         if (sorted_column.column !== "status") continue;
 
-        const selector = DEBUG ? "li" : "li.enemy, li.your";
-        const lis = lists[i].querySelectorAll(selector);
-
+        // Safe selector for sorting
+        let lis;
+        if (document.querySelector(".faction-war")) {
+            lis = lists[i].querySelectorAll("li.enemy, li.your");
+        } else {
+            lis = Array.from(lists[i].children).filter(child => child.tagName === 'LI');
+        }
+        
         const arr = Array.from(lis).map(li => ({
           li,
           a: +(li.dataset.sortA || 0),
