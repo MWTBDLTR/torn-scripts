@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Torn War Stuff Enhanced + WebSocket
+// @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
 // @version      4.5.7
-// @description  The ultimate war monitor. Uses WebSockets for INSTANT status updates and the API for detailed timers.
-// @author       MrChurch [3654415] + xentac + Heasley (WebSocket logic) + Merge
+// @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting on the war page.
+// @author       MrChurch [3654415] + xentac
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle
@@ -22,7 +22,7 @@
   const STARTUP_DELAY_MS = 3000;
   const RESYNC_THRESHOLD_MS = 3000;
   const UNKNOWN_UNTIL = 4294967295; // Max 32-bit int (Sorts to bottom of ascending list)
-  const TIME_BETWEEN_FRAMES = 250; // Faster refresh (4fps) for smoother timers
+  const TIME_BETWEEN_FRAMES = 500; // Faster refresh (4fps) for smoother timers
 
   // --- STATE MANAGEMENT ---
   let DEBUG = GM_getValue("twseo_debug_mode", false);
