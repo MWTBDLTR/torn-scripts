@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced + WebSocket
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      4.5.5
+// @version      4.5.7
 // @description  The ultimate war monitor. Uses WebSockets for INSTANT status updates and the API for detailed timers.
 // @author       MrChurch [3654415] + xentac + Heasley (WebSocket logic) + Merge
 // @license      MIT
@@ -32,7 +32,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v4.5.5) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
+      `%c[TWSEO] Script Loaded (v4.5.7) | Debug: ${DEBUG} | Sort Okay Score: ${SORT_OKAY_BY_SCORE}`,
       "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -333,6 +333,11 @@
           } else if (iconHtml.includes('class="jail"') || iconHtml.includes("icon16")) {
               newState = "Jail";
               newDesc = "In Jail (WS)";
+              // V4.5.7: Enhanced Federal Detection for WS
+              if (iconHtml.toLowerCase().includes("federal")) {
+                  newState = "Federal";
+                  newDesc = "Federal Jail (WS)";
+              }
           } else if (iconHtml.includes('class="traveling"') || iconHtml.includes('class="abroad"') || iconHtml.includes("icon71")) {
               newState = "Traveling";
               newDesc = "Traveling (WS)";
@@ -770,6 +775,16 @@
       }
 
       switch (st.state) {
+        case "Fallen":
+        case "Federal": {
+            currentSortWeights.set(id, 6);
+            safeSetAttr(status_DIV, CONTENT, st.state === "Federal" ? "Federal" : "Fallen");
+            safeSetAttr(status_DIV, COLOR, "red");
+            safeSetAttr(status_DIV, TRAVELING, "false");
+            safeSetAttr(status_DIV, HIGHLIGHT, "false");
+            break;
+        }
+
         case "Abroad":
         case "Traveling": {
           safeSetAttr(status_DIV, TRAVELING, "false");
@@ -798,6 +813,16 @@
 
         case "Hospital":
         case "Jail": {
+          // Check for Federal Jail (fallback for API updates)
+          if ((st.description || "").toLowerCase().includes("federal")) {
+              currentSortWeights.set(id, 6);
+              safeSetAttr(status_DIV, CONTENT, "Federal");
+              safeSetAttr(status_DIV, COLOR, "red");
+              safeSetAttr(status_DIV, TRAVELING, "false");
+              safeSetAttr(status_DIV, HIGHLIGHT, "false");
+              break;
+          }
+
           currentSortWeights.set(id, 1);
 
           safeSetAttr(status_DIV, TRAVELING, (st.description || "").includes("In a") ? "true" : "false");
