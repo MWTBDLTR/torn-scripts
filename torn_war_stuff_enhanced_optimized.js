@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    namespace
-// @version      0.0.2
+// @version      0.0.3
 // @description  Show travel status and hospital time and sort by hospital time on war page. Fork of xentac's fork of https://greasyfork.org/en/scripts/448681-torn-war-stuff
 // @author       MrChurch [3654415] + xentac (original TWSE)
 // @license      MIT
@@ -15,7 +15,6 @@
 (async function () {
     ("use strict");
 
-    // Prevent duplicate execution
     if (document.getElementById("FFScouterV2DisableWarMonitor")) return;
 
     const ffScouterV2DisableWarMonitor = document.createElement("div");
@@ -28,20 +27,19 @@
     const CONTENT = "data-twse-content";
     const TRAVELING = "data-twse-traveling";
     const HIGHLIGHT = "data-twse-highlight";
-    const API_INTERVAL = 10000; // 10 seconds (Safe for API limits)
-    const RENDER_INTERVAL = 1000; // 1 second (Updates timers)
+    const API_INTERVAL = 10000;
+    const RENDER_INTERVAL = 1000;
 
     let apiKey = localStorage.getItem(STORAGE_KEY) ?? "###PDA-APIKEY###";
     const sort_enemies = true;
 
-    // State tracking
+    // State
     let isRunning = true;
-    let foundWar = false;
+    let loopsStarted = false; // New flag to ensure we only start intervals once
     let lastApiRequest = 0;
     const memberStatusMap = new Map();
     const memberLiMap = new Map();
 
-    // Sort tracking to avoid DOM thrashing
     let currentSortColumn = "";
     let currentSortOrder = "";
     let needsSort = false;
@@ -49,7 +47,7 @@
     // --- Menu Commands ---
     try {
         GM_registerMenuCommand("Set Api Key", () => checkApiKey(false));
-    } catch (error) { /* Handled */ }
+    } catch (error) { }
 
     function checkApiKey(checkExisting = true) {
         if (!checkExisting || !apiKey || apiKey.includes("PDA-APIKEY") || apiKey.length !== 16) {
@@ -57,17 +55,18 @@
             if (userInput && userInput.length === 16) {
                 apiKey = userInput;
                 localStorage.setItem(STORAGE_KEY, userInput);
-            } else {
-                console.error("[TWSE] User cancelled Api Key input.");
             }
         }
     }
 
     // --- Styles ---
+    // MODIFIED: Only hide text if the parent UL has the 'twse-loaded' class
     GM_addStyle(`
     .members-list li:has(div.status[data-twse-highlight="true"]) { background-color: #afa5 !important; }
     .members-list div.status[data-twse-traveling="true"]::after { color: #F287FF !important; }
-    .members-list div.status { position: relative !important; color: transparent !important; }
+    
+    .members-list.twse-loaded div.status { position: relative !important; color: transparent !important; }
+    
     .members-list div.status::after {
       content: attr(data-twse-content);
       position: absolute; top: 0; left: 0;
@@ -100,7 +99,11 @@
 
     function extractAllMemberLis() {
         memberLiMap.clear();
-        getMemberLists().forEach((ul) => {
+        const lists = getMemberLists();
+        lists.forEach((ul) => {
+            // Mark this list as loaded so our CSS kicks in
+            ul.classList.add("twse-loaded");
+
             const lis = ul.querySelectorAll("LI.enemy, li.your");
             lis.forEach((li) => {
                 const atag = li.querySelector(`A[href^='/profiles.php']`);
@@ -110,17 +113,13 @@
                 }
             });
         });
-        // When we rescan the DOM, we should trigger a re-sort attempt
         needsSort = true;
     }
 
     function detectSortState(memberList) {
-        // Check the header icons to see what Torn thinks is sorted
         const parent = memberList.parentNode;
         if (!parent) return { column: null, order: null };
-
         const cols = ["member", "level", "points", "status"];
-
         for (const col of cols) {
             const div = parent.querySelector(`div.${col} div`);
             if (div && div.className.match(/activeIcon__/)) {
@@ -131,63 +130,60 @@
         return { column: null, order: null };
     }
 
-    // --- Initialization & Observers ---
+    // --- Initialization ---
 
-    // Initial Check
+    function startEverything() {
+        if (loopsStarted) return;
+
+        console.log("[TWSE] Starting Loops");
+        loopsStarted = true;
+        extractAllMemberLis();
+
+        // Render Loop
+        setInterval(renderLoop, RENDER_INTERVAL);
+        // Data Loop
+        dataLoop();
+    }
+
+    // Initial Check (Fast load)
     setTimeout(() => {
         if (document.querySelector(".faction-war")) {
             console.log("[TWSE] War Detected on Load");
-            foundWar = true;
-            extractAllMemberLis();
-            startLoops();
+            startEverything();
         }
     }, 500);
 
-    // Observer for dynamic navigation
+    // Observer (Dynamic load)
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
+            // Check added nodes for the war banner
             for (const node of mutation.addedNodes) {
                 if (node.classList && node.classList.contains("faction-war")) {
                     console.log("[TWSE] War Detected via Mutation");
-                    foundWar = true;
-                    extractAllMemberLis();
-                    // If loops aren't running, start them could go here, 
-                    // but current logic relies on flags
+                    startEverything();
+                    return;
                 }
             }
         }
     });
 
-    const wrapper = document.body;
-    observer.observe(wrapper, { subtree: true, childList: true });
+    observer.observe(document.body, { subtree: true, childList: true });
 
-    function startLoops() {
-        // Render Loop (Visuals) - Runs every 1s
-        setInterval(renderLoop, RENDER_INTERVAL);
-
-        // Data Loop (API) - Runs based on timeout logic
-        dataLoop();
-    }
-
-    // --- Data Logic (API) ---
+    // --- Data Logic ---
     async function dataLoop() {
         if (!isRunning) return;
 
         const now = Date.now();
-        if (foundWar && (now - lastApiRequest >= API_INTERVAL)) {
+        // Logic: If we are running, we fetch. 
+        if (now - lastApiRequest >= API_INTERVAL) {
             lastApiRequest = now;
             const factionIds = getFactionIds();
-
-            // Fetch data for all visible factions
             for (const fid of factionIds) {
                 await updateFactionStatus(fid);
             }
-            // After data update, we likely need to re-sort
             needsSort = true;
         }
-
-        // Schedule next run
-        setTimeout(dataLoop, 1000); // Check every second if we are allowed to run
+        setTimeout(dataLoop, 1000);
     }
 
     async function updateFactionStatus(factionId) {
@@ -196,15 +192,9 @@
                 `https://api.torn.com/faction/${factionId}?selections=basic&key=${apiKey}&comment=TornWarStuffEnhanced`
             );
             const data = await response.json();
-
-            if (data.error) {
-                handleApiError(data.error);
-                return;
-            }
-
+            if (data.error) { handleApiError(data.error); return; }
             if (data.members) {
                 for (const [k, v] of Object.entries(data.members)) {
-                    // Shorten country names for UI space
                     v.status.description = v.status.description
                         .replace("South Africa", "SA")
                         .replace("Cayman Islands", "CI")
@@ -214,41 +204,36 @@
                     memberStatusMap.set(k, v);
                 }
             }
-        } catch (err) {
-            console.error("[TWSE] Fetch Error:", err);
-        }
+        } catch (err) { console.error("[TWSE] Fetch Error:", err); }
     }
 
     function handleApiError(error) {
-        console.log("[TWSE] API Error:", error);
         const fatalCodes = [0, 1, 2, 3, 4, 6, 7, 10, 12, 13, 14, 16, 18, 21];
-        const retryCodes = [5, 8, 9]; // Limits or temp blocks
-
+        const retryCodes = [5, 8, 9];
         if (fatalCodes.includes(error.code)) {
             console.log("[TWSE] Fatal Error. Stopping.");
             isRunning = false;
         } else if (retryCodes.includes(error.code)) {
-            console.log("[TWSE] Rate limit/Temp block. Backing off.");
-            lastApiRequest = Date.now() + 30000; // Add 30s penalty
+            lastApiRequest = Date.now() + 30000;
         }
     }
 
-    // --- Render Logic (Visuals) ---
+    // --- Render Logic ---
     function renderLoop() {
-        if (!foundWar) return;
+        // Safety check: ensure we have elements
+        if (memberLiMap.size === 0) extractAllMemberLis();
 
-        const nowSec = Date.now() / 1000; // Timestamp in seconds for comparisons
+        const nowSec = Date.now() / 1000;
 
         memberLiMap.forEach((li, id) => {
             const state = memberStatusMap.get(id);
             const statusDiv = li.querySelector("DIV.status");
-
             if (!statusDiv) return;
 
-            // Fallback if no API data yet
+            // Fallback: If no API data yet, show current text
             if (!state) {
-                if (!statusDiv.hasAttribute(CONTENT)) {
-                    statusDiv.setAttribute(CONTENT, statusDiv.innerText);
+                if (!statusDiv.getAttribute(CONTENT)) {
+                    statusDiv.setAttribute(CONTENT, statusDiv.innerText.trim() || "...");
                 }
                 return;
             }
@@ -257,20 +242,16 @@
             li.setAttribute("data-until", status.until);
             li.setAttribute("data-location", "");
 
-            // Process State
             switch (status.state) {
                 case "Abroad":
                 case "Traveling":
                     handleTravelState(li, statusDiv, status);
                     break;
-
                 case "Hospital":
                 case "Jail":
                     handleHospitalState(li, statusDiv, status, nowSec);
                     break;
-
                 default:
-                    // OK / Normal
                     updateStatusAttr(statusDiv, CONTENT, statusDiv.innerText);
                     li.setAttribute("data-sortA", "0");
                     updateStatusAttr(statusDiv, TRAVELING, "false");
@@ -283,37 +264,26 @@
     }
 
     function updateStatusAttr(el, attr, value) {
-        if (el.getAttribute(attr) !== value) {
-            el.setAttribute(attr, value);
-        }
+        if (el.getAttribute(attr) !== value) el.setAttribute(attr, value);
     }
-
     function pad(n) { return n < 10 ? "0" + n : n; }
 
     function handleTravelState(li, statusDiv, status) {
-        // Preserve native class colors if needed, or override
         if (!(statusDiv.classList.contains("traveling") || statusDiv.classList.contains("abroad"))) {
             updateStatusAttr(statusDiv, CONTENT, statusDiv.innerText);
             return;
         }
-
         let content = "";
         let sortWeight = "0";
-
         if (status.description.includes("Traveling to ")) {
-            sortWeight = "4";
-            content = "► " + status.description.split("Traveling to ")[1];
+            sortWeight = "4"; content = "► " + status.description.split("Traveling to ")[1];
         } else if (status.description.includes("In ")) {
-            sortWeight = "3";
-            content = status.description.split("In ")[1];
+            sortWeight = "3"; content = status.description.split("In ")[1];
         } else if (status.description.includes("Returning")) {
-            sortWeight = "2";
-            content = "◄ " + status.description.split("Returning to Torn from ")[1];
+            sortWeight = "2"; content = "◄ " + status.description.split("Returning to Torn from ")[1];
         } else {
-            sortWeight = "5";
-            content = "Traveling";
+            sortWeight = "5"; content = "Traveling";
         }
-
         li.setAttribute("data-sortA", sortWeight);
         li.setAttribute("data-location", content);
         updateStatusAttr(statusDiv, CONTENT, content);
@@ -326,39 +296,25 @@
             updateStatusAttr(statusDiv, HIGHLIGHT, "false");
             return;
         }
-
         li.setAttribute("data-sortA", "1");
-
-        // Check "In a Federal Jail" vs standard
         const isTraveling = status.description.includes("In a") ? "true" : "false";
         updateStatusAttr(statusDiv, TRAVELING, isTraveling);
 
         const timeRemaining = Math.round(status.until - nowSec);
-
         if (timeRemaining <= 0) {
             updateStatusAttr(statusDiv, HIGHLIGHT, "false");
-            updateStatusAttr(statusDiv, CONTENT, "00:00:00"); // Show zeroed out
+            updateStatusAttr(statusDiv, CONTENT, "00:00:00");
             return;
         }
-
         const s = Math.floor(timeRemaining % 60);
         const m = Math.floor((timeRemaining / 60) % 60);
         const h = Math.floor(timeRemaining / 3600);
-        const timeString = `${pad(h)}:${pad(m)}:${pad(s)}`;
-
-        updateStatusAttr(statusDiv, CONTENT, timeString);
-
-        // Highlight if under 5 minutes (300s)
-        const highlight = timeRemaining < 300 ? "true" : "false";
-        updateStatusAttr(statusDiv, HIGHLIGHT, highlight);
+        updateStatusAttr(statusDiv, CONTENT, `${pad(h)}:${pad(m)}:${pad(s)}`);
+        updateStatusAttr(statusDiv, HIGHLIGHT, timeRemaining < 300 ? "true" : "false");
     }
 
-    // --- Sorting Logic ---
     function processSorting() {
         const nodes = getMemberLists();
-
-        // Check if user changed sort column since last frame
-        // We assume the first faction list represents the sort state of the page
         if (nodes.length > 0) {
             const sortState = detectSortState(nodes[0]);
             if (sortState.column !== currentSortColumn || sortState.order !== currentSortOrder) {
@@ -367,75 +323,35 @@
                 needsSort = true;
             }
         }
-
-        // If nothing changed (data or user intent), skip sorting
-        // This saves massive CPU by not detaching/appending nodes every frame
         if (!needsSort && currentSortColumn !== "status") return;
-        // If currentSortColumn IS status, we might need to re-sort as timers change, 
-        // but generally, sorting by 'sortA' (category) is stable. 
-        // To be perfectly efficient, we only strict sort if 'needsSort' is true.
-
         if (!needsSort) return;
 
         nodes.forEach(ul => {
-            // Force override to Status sort if the user hasn't explicitly picked another column
-            // (This replicates original script behavior, though it can be aggressive)
-            let activeCol = currentSortColumn;
-            let activeOrder = currentSortOrder;
-
-            // If the user hasn't clicked a column yet, default to Status Ascending
-            if (!activeCol) {
-                activeCol = "status";
-                activeOrder = "asc";
-            }
-
-            // We only intervene if sorting by status
+            let activeCol = currentSortColumn || "status";
+            let activeOrder = currentSortOrder || "asc";
             if (activeCol !== "status") return;
 
             const lis = Array.from(ul.querySelectorAll("LI.enemy, li.your"));
             const sortedLis = lis.sort((a, b) => {
-                let left = a;
-                let right = b;
-
-                if (activeOrder === "desc") {
-                    left = b; right = a;
-                }
-
-                // 1. Sort by Category (Hospital, Returning, In Country, Outbound, Traveling)
+                let left = a; let right = b;
+                if (activeOrder === "desc") { left = b; right = a; }
                 const sortA = (parseInt(left.getAttribute("data-sortA")) || 0) - (parseInt(right.getAttribute("data-sortA")) || 0);
                 if (sortA !== 0) return sortA;
-
-                // 2. Sort by Location Name
                 const leftLoc = left.getAttribute("data-location") || "";
                 const rightLoc = right.getAttribute("data-location") || "";
-                if (leftLoc && rightLoc) {
-                    return leftLoc.localeCompare(rightLoc);
-                }
-
-                // 3. Sort by Time Remaining
-                const leftUntil = parseInt(left.getAttribute("data-until")) || 0;
-                const rightUntil = parseInt(right.getAttribute("data-until")) || 0;
-                return leftUntil - rightUntil;
+                if (leftLoc && rightLoc) return leftLoc.localeCompare(rightLoc);
+                return (parseInt(left.getAttribute("data-until")) || 0) - (parseInt(right.getAttribute("data-until")) || 0);
             });
 
-            // DOM check: Only append if order is actually different
             let isSorted = true;
             for (let i = 0; i < sortedLis.length; i++) {
-                if (ul.children[i] !== sortedLis[i]) {
-                    isSorted = false;
-                    break;
-                }
+                if (ul.children[i] !== sortedLis[i]) { isSorted = false; break; }
             }
-
-            if (!isSorted) {
-                sortedLis.forEach(li => ul.appendChild(li));
-            }
+            if (!isSorted) sortedLis.forEach(li => ul.appendChild(li));
         });
-
-        needsSort = false; // Reset flag
+        needsSort = false;
     }
 
-    console.log("[TWSE] Enhanced Optimized Loaded");
-
+    console.log("[TWSE] Enhanced Optimized v3 Loaded");
     window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
 })();
