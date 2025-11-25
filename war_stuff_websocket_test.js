@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      5.4.0
+// @version      5.5.0
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -31,7 +31,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-    `%c[TWSEO] Script Loaded (v5.4.0) | Debug: ${DEBUG}`,
+    `%c[TWSEO] Script Loaded (v5.5.0) | Debug: ${DEBUG}`,
     "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -63,7 +63,7 @@
     if (LOG_STATUS) console.log(`%c[TWSEO] ${msg}`, "color: #00ccff; font-weight: bold;");
   }
 
-  // --- HELPER: ABBREVIATIONS & COLOR ---
+  // --- ABBREVIATIONS & COLOR ---
   const COUNTRY_MAP = {
     "South Africa": "SA", "Cayman Islands": "CI", "United Kingdom": "UK",
     "Argentina": "Arg", "Switzerland": "Switz"
@@ -77,7 +77,7 @@
     return "green";
   }
 
-  // --- HELPER: SCORE/LEVEL SCRAPER (With Cache) ---
+  // --- SCORE/LEVEL SCRAPER (With Cache) ---
   const scoreCache = new Map();
   function getScore(li, id) {
     if (scoreCache.has(id)) return scoreCache.get(id);
@@ -155,7 +155,7 @@
   const member_status = new Map(), member_lis = new Map();
   let memberListsCache = [];
 
-  // --- WEBSOCKET LOGIC ---
+  // --- WEBSOCKET ---
   let socket, subscribedFactions = new Set(), msgId = 1, wsInitTimeout = null;
   const WS_URL = "wss://ws-centrifugo.torn.com/connection/websocket";
 
@@ -180,7 +180,6 @@
     };
 
     socket.onmessage = (event) => {
-      // FIX: Handle batched messages (NDJSON) by splitting on newlines
       const messages = event.data.split('\n');
 
       messages.forEach(rawLine => {
@@ -239,23 +238,28 @@
       const currentData = member_status.get(uidStr) || { status: {} };
 
       const newState = s.text || "Okay";
+
       let newUntil = 0;
-      if (!s.okay && s.updateAt) newUntil = s.updateAt;
+      if (!s.okay) {
+        newUntil = UNKNOWN_UNTIL;
+      }
 
       const newDesc = newState + " (WS)";
       const oldUntil = currentData.status.until || 0;
       const timerDiff = Math.abs(newUntil - oldUntil);
 
       if (currentData.status.state !== newState || timerDiff > 5) {
-        logStatus(`Status Change: [${uidStr}] ${newState} -> Ends: ${newUntil}`);
+        logStatus(`Status Change: [${uidStr}] ${newState} -> Waiting for API Timer`);
 
         currentData.status.state = newState;
         currentData.status.description = newDesc;
         currentData.status.until = newUntil;
 
-        // --- FIX: Fallback to inferred color if WS color is missing/null ---
-        currentData.status.color = s.color || getStateColor(newState);
-        // ------------------------------------------------------------------
+        if (["Hospital", "Jail", "Federal", "Fallen"].includes(newState)) {
+          currentData.status.color = "red";
+        } else {
+          currentData.status.color = s.color || getStateColor(newState);
+        }
 
         currentData.status.updated = Date.now();
         currentData.status.freshOkay = !!s.okay;
@@ -437,7 +441,7 @@
       for (const [k, v] of Object.entries(status.members)) {
         if (v.status.description) v.status.description = abbreviatePlaces(v.status.description);
 
-        // --- STALE DATA PROTECTION (15s) ---
+        // --- STALE DATA PROTECTION ---
         const current = member_status.get(k);
         if (current) {
           const curState = current.status.state;
@@ -446,21 +450,17 @@
           const isFresh = (Date.now() - (current.status.updated || 0) < API_STALE_PROTECTION_MS);
 
           if (isWs && isFresh) {
-            // Protect Active from Stale API "Okay"
             if (["Traveling", "Hospital", "Jail"].includes(curState) && apiState === "Okay") {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'.`);
               continue;
             }
-            // Protect Hospital from Stale API "Traveling"
             if (["Hospital", "Jail"].includes(curState) && ["Traveling", "Abroad"].includes(apiState)) {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API '${apiState}'.`);
               continue;
             }
           }
         }
-        // --- INFER COLOR ON INPUT ---
         v.status.color = getStateColor(v.status.state);
-        // ----------------------------
         v.status.updated = Date.now();
         member_status.set(k, v);
       }
@@ -506,11 +506,9 @@
       setDataset(li, "until", st.until ?? "");
       const isExpired = (st.until || 0) <= currentSec && st.until !== UNKNOWN_UNTIL;
 
-      // --- COLOR LOGIC ---
       let useColor = st.color || "green";
       if (["Hospital", "Jail"].includes(st.state) && isExpired) useColor = "green";
       safeSetAttr(status_DIV, COLOR, useColor);
-      // ------------------
 
       switch (st.state) {
         case "Fallen": case "Federal":
