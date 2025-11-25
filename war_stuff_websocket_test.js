@@ -2,7 +2,7 @@
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
 // @version      5.2.0
-// @description  The ultimate rw monitor. Immediate status updates via JSON, hospital timers, and player sorting.
+// @description  The ultimate rw monitor. Immediate status updates, dynamic hospital timers, and lightning-fast player sorting.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
@@ -19,10 +19,11 @@
 
   // --- CONFIGURATION ---
   const USE_WEBSOCKETS = true;
+  const API_STALE_PROTECTION_MS = 15000;
   const STARTUP_DELAY_MS = 3000;
   const RESYNC_THRESHOLD_MS = 3000;
-  const UNKNOWN_UNTIL = 4294967295; // Max 32-bit int
-  const TIME_BETWEEN_FRAMES = 250; // Refresh rate (ms)
+  const UNKNOWN_UNTIL = 4294967295;
+  const TIME_BETWEEN_FRAMES = 250;
 
   // --- STATE MANAGEMENT ---
   let DEBUG = GM_getValue("twseo_debug_mode", false);
@@ -30,39 +31,39 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-      `%c[TWSEO] Script Loaded (v5.2.0) | Debug: ${DEBUG}`,
-      "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
+    `%c[TWSEO] Script Loaded (v5.2.0) | Debug: ${DEBUG}`,
+    "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
   function toggleDebug() {
-      DEBUG = !DEBUG;
-      GM_setValue("twseo_debug_mode", DEBUG);
-      alert(`Debug Mode: ${DEBUG ? "ON" : "OFF"}. Reloading...`);
-      location.reload();
+    DEBUG = !DEBUG;
+    GM_setValue("twseo_debug_mode", DEBUG);
+    alert(`Debug Mode: ${DEBUG ? "ON" : "OFF"}. Reloading...`);
+    location.reload();
   }
 
   function toggleStatusLogs() {
-      LOG_STATUS = !LOG_STATUS;
-      GM_setValue("twseo_log_status", LOG_STATUS);
-      alert(`Status Logs: ${LOG_STATUS ? "ON" : "OFF"}.`);
+    LOG_STATUS = !LOG_STATUS;
+    GM_setValue("twseo_log_status", LOG_STATUS);
+    alert(`Status Logs: ${LOG_STATUS ? "ON" : "OFF"}.`);
   }
 
   function toggleOkayScoreSort() {
-      SORT_OKAY_BY_SCORE = !SORT_OKAY_BY_SCORE;
-      GM_setValue("twseo_sort_okay_score", SORT_OKAY_BY_SCORE);
-      alert(`Sort Okay by Score: ${SORT_OKAY_BY_SCORE ? "ON" : "OFF"}. Reloading...`);
-      location.reload();
+    SORT_OKAY_BY_SCORE = !SORT_OKAY_BY_SCORE;
+    GM_setValue("twseo_sort_okay_score", SORT_OKAY_BY_SCORE);
+    alert(`Sort Okay by Score: ${SORT_OKAY_BY_SCORE ? "ON" : "OFF"}. Reloading...`);
+    location.reload();
   }
 
   function log(...args) {
-      if (DEBUG) console.log("%c[TWSEO-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
+    if (DEBUG) console.log("%c[TWSEO-DEBUG]", "color: #ffaa00; font-weight: bold;", ...args);
   }
 
   function logStatus(msg) {
-      if (LOG_STATUS) console.log(`%c[TWSEO] ${msg}`, "color: #00ccff; font-weight: bold;");
+    if (LOG_STATUS) console.log(`%c[TWSEO] ${msg}`, "color: #00ccff; font-weight: bold;");
   }
 
-  // --- HELPER: ABBREVIATIONS ---
+  // --- ABBREVIATIONS ---
   const COUNTRY_MAP = {
     "South Africa": "SA", "Cayman Islands": "CI", "United Kingdom": "UK",
     "Argentina": "Arg", "Switzerland": "Switz"
@@ -70,29 +71,29 @@
   const COUNTRY_RX = new RegExp(Object.keys(COUNTRY_MAP).join("|"), "g");
   const abbreviatePlaces = (s) => s?.replace(COUNTRY_RX, (m) => COUNTRY_MAP[m]) ?? "";
 
-  // --- HELPER: SCORE/LEVEL SCRAPER (With Cache) ---
+  // --- SCORE SCRAPER (With Cache) ---
   const scoreCache = new Map();
   function getScore(li, id) {
-      if (scoreCache.has(id)) return scoreCache.get(id);
-      let val = 0;
-      const pointsEl = li.querySelector(".points");
-      const lvlEl = li.querySelector(".level");
-      const txt = pointsEl ? pointsEl.textContent : (lvlEl ? lvlEl.textContent : "");
-      val = parseInt(txt.replace(/\D/g, ""), 10);
-      if (!isNaN(val) && val > 0) scoreCache.set(id, val);
-      return val || 0;
+    if (scoreCache.has(id)) return scoreCache.get(id);
+    let val = 0;
+    const pointsEl = li.querySelector(".points");
+    const lvlEl = li.querySelector(".level");
+    const txt = pointsEl ? pointsEl.textContent : (lvlEl ? lvlEl.textContent : "");
+    val = parseInt(txt.replace(/\D/g, ""), 10);
+    if (!isNaN(val) && val > 0) scoreCache.set(id, val);
+    return val || 0;
   }
 
-  // --- COMPATIBILITY ---
+  // --- COMPAT ---
   if (!document.querySelector("#FFScouterV2DisableWarMonitor")) {
-      const el = document.createElement("div");
-      el.id = "FFScouterV2DisableWarMonitor";
-      el.style.display = "none";
-      document.documentElement.appendChild(el);
-      window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
+    const el = document.createElement("div");
+    el.id = "FFScouterV2DisableWarMonitor";
+    el.style.display = "none";
+    document.documentElement.appendChild(el);
+    window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
   }
 
-  // --- API KEY MANAGEMENT ---
+  // --- KEY MANAGEMENT ---
   const LS_KEY = "twseo_merged_apikey";
   let apiKey = localStorage.getItem(LS_KEY) ?? "###PDA-APIKEY###";
   const hasValidKey = () => typeof apiKey === 'string' && apiKey.length === 16 && !apiKey.includes("PDA-APIKEY");
@@ -114,7 +115,7 @@
     GM_registerMenuCommand(`Toggle Sort Okay by Score`, toggleOkayScoreSort);
     GM_registerMenuCommand(`Toggle Status Logs`, toggleStatusLogs);
     GM_registerMenuCommand(`Toggle Debug Mode`, toggleDebug);
-  } catch {}
+  } catch { }
 
   // --- STYLES ---
   const CONTENT = "data-twseo-content", TRAVELING = "data-twseo-traveling", HIGHLIGHT = "data-twseo-highlight", COLOR = "data-twseo-color", HCLASS = "twseo-highlight";
@@ -139,7 +140,7 @@
   `);
 
   if (DEBUG) {
-      const d = document.createElement("div"); d.id = "twseo-debug-indicator"; d.textContent = "TWSEO DEBUG"; document.body.appendChild(d);
+    const d = document.createElement("div"); d.id = "twseo-debug-indicator"; d.textContent = "TWSEO DEBUG"; document.body.appendChild(d);
   }
 
   // --- STATE ---
@@ -153,122 +154,122 @@
   const WS_URL = "wss://ws-centrifugo.torn.com/connection/websocket";
 
   function getWebSocketToken() {
-      try {
-          return JSON.parse(document.getElementById('websocketConnectionData').innerText).token;
-      } catch { return null; }
+    try {
+      return JSON.parse(document.getElementById('websocketConnectionData').innerText).token;
+    } catch { return null; }
   }
 
   function createWebSocketConnection() {
-      if (!USE_WEBSOCKETS) return;
-      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+    if (!USE_WEBSOCKETS) return;
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
-      const token = getWebSocketToken();
-      if (!token) return;
+    const token = getWebSocketToken();
+    if (!token) return;
 
-      log("Initializing WebSocket...");
-      socket = new WebSocket(WS_URL);
+    log("Initializing WebSocket...");
+    socket = new WebSocket(WS_URL);
 
-      socket.onopen = () => {
-          socket.send(JSON.stringify({ "connect": { "token": token, "name": "js" }, "id": msgId++ }));
-      };
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ "connect": { "token": token, "name": "js" }, "id": msgId++ }));
+    };
 
-      socket.onmessage = (event) => {
-          // FIX: Handle batched messages (NDJSON) by splitting on newlines
-          const messages = event.data.split('\n');
+    socket.onmessage = (event) => {
+      // Handle batched messages (NDJSON) by splitting on newlines
+      const messages = event.data.split('\n');
 
-          messages.forEach(rawLine => {
-              const line = rawLine.trim();
-              if (!line) return;
+      messages.forEach(rawLine => {
+        const line = rawLine.trim();
+        if (!line) return;
 
-              try {
-                  if (line === '{}') { socket.send('{}'); return; }
-                  const data = JSON.parse(line);
+        try {
+          if (line === '{}') { socket.send('{}'); return; }
+          const data = JSON.parse(line);
 
-                  if (data.connect) {
-                      log("WS Authenticated.");
-                      subscribeToFactions(get_faction_ids());
-                      return;
-                  }
+          if (data.connect) {
+            log("WS Authenticated.");
+            subscribeToFactions(get_faction_ids());
+            return;
+          }
 
-                  if (data.push?.pub?.data?.message?.namespaces?.users?.actions) {
-                      const actions = data.push.pub.data.message.namespaces.users.actions;
-                      if (actions.updateStatus) {
-                          processWebSocketStatus(actions.updateStatus);
-                      }
-                  }
-              } catch (e) {
-                  // Ignore parse errors from heartbeat/empty lines
-                  if(DEBUG) console.error("[TWSEO] WS Parse Error:", e);
-              }
-          });
-      };
+          if (data.push?.pub?.data?.message?.namespaces?.users?.actions) {
+            const actions = data.push.pub.data.message.namespaces.users.actions;
+            if (actions.updateStatus) {
+              processWebSocketStatus(actions.updateStatus);
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors from heartbeat/empty lines
+          if (DEBUG) console.error("[TWSEO] WS Parse Error:", e);
+        }
+      });
+    };
 
-      socket.onclose = () => {
-          log("WS Closed. Reconnecting in 5s...");
-          subscribedFactions.clear();
-          setTimeout(createWebSocketConnection, 5000);
-      };
+    socket.onclose = () => {
+      log("WS Closed. Reconnecting in 5s...");
+      subscribedFactions.clear();
+      setTimeout(createWebSocketConnection, 5000);
+    };
   }
 
   function subscribeToFactions(factionIds) {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      factionIds.forEach(fid => {
-          if (!subscribedFactions.has(fid)) {
-              log(`Subscribing: faction-users-${fid}`);
-              socket.send(JSON.stringify({ "subscribe": { "channel": `faction-users-${fid}` }, "id": msgId++ }));
-              subscribedFactions.add(fid);
-          }
-      });
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    factionIds.forEach(fid => {
+      if (!subscribedFactions.has(fid)) {
+        log(`Subscribing: faction-users-${fid}`);
+        socket.send(JSON.stringify({ "subscribe": { "channel": `faction-users-${fid}` }, "id": msgId++ }));
+        subscribedFactions.add(fid);
+      }
+    });
   }
 
   function processWebSocketStatus(updateData) {
-      const updates = Array.isArray(updateData) ? updateData : [updateData];
-      let needsRender = false;
+    const updates = Array.isArray(updateData) ? updateData : [updateData];
+    let needsRender = false;
 
-      updates.forEach(u => {
-          if (!u.userId || !u.status) return;
+    updates.forEach(u => {
+      if (!u.userId || !u.status) return;
 
-          const uidStr = String(u.userId);
-          const s = u.status;
-          const currentData = member_status.get(uidStr) || { status: {} };
+      const uidStr = String(u.userId);
+      const s = u.status;
+      const currentData = member_status.get(uidStr) || { status: {} };
 
-          const newState = s.text || "Okay";
-          // updateAt is UNIX timestamp when status ENDS
-          let newUntil = 0;
-          if (!s.okay && s.updateAt) newUntil = s.updateAt;
+      const newState = s.text || "Okay";
+      // updateAt is UNIX timestamp when status ENDS
+      let newUntil = 0;
+      if (!s.okay && s.updateAt) newUntil = s.updateAt;
 
-          const newDesc = newState + " (WS)";
-          const oldUntil = currentData.status.until || 0;
-          const timerDiff = Math.abs(newUntil - oldUntil);
+      const newDesc = newState + " (WS)";
+      const oldUntil = currentData.status.until || 0;
+      const timerDiff = Math.abs(newUntil - oldUntil);
 
-          if (currentData.status.state !== newState || timerDiff > 5) {
-              logStatus(`Status Change (JSON): [${uidStr}] ${newState} -> Ends: ${newUntil}`);
+      if (currentData.status.state !== newState || timerDiff > 5) {
+        logStatus(`Status Change: [${uidStr}] ${newState} -> Ends: ${newUntil}`);
 
-              currentData.status.state = newState;
-              currentData.status.description = newDesc;
-              currentData.status.until = newUntil;
-              currentData.status.updated = Date.now();
-              currentData.status.freshOkay = !!s.okay;
+        currentData.status.state = newState;
+        currentData.status.description = newDesc;
+        currentData.status.until = newUntil;
+        currentData.status.updated = Date.now();
+        currentData.status.freshOkay = !!s.okay;
 
-              member_status.set(uidStr, currentData);
-              triggerFlash(uidStr);
-              needsRender = true;
-          }
-      });
-
-      if (needsRender) {
-          last_frame = 0;
-          requestAnimationFrame(watch);
+        member_status.set(uidStr, currentData);
+        triggerFlash(uidStr);
+        needsRender = true;
       }
+    });
+
+    if (needsRender) {
+      last_frame = 0;
+      requestAnimationFrame(watch);
+    }
   }
 
   function triggerFlash(userId) {
-      const li = member_lis.get(String(userId));
-      if (li) {
-          li.classList.remove('twseo-ws-updated');
-          void li.offsetWidth;
-          li.classList.add('twseo-ws-updated');
-      }
+    const li = member_lis.get(String(userId));
+    if (li) {
+      li.classList.remove('twseo-ws-updated');
+      void li.offsetWidth;
+      li.classList.add('twseo-ws-updated');
+    }
   }
 
   // --- CACHING & HELPERS ---
@@ -278,9 +279,9 @@
     if (!d || !d.isConnected) { d = li.querySelector("div.status"); if (d) liStatusDiv.set(li, d); }
     return d;
   }
-  const setDataset = (el, key, value) => { if(el && el.dataset[key] !== String(value || "")) el.dataset[key] = String(value || ""); };
-  const safeSetAttr = (el, name, value) => { if(el && el.getAttribute(name) !== String(value)) el.setAttribute(name, String(value)); };
-  const safeRemoveAttr = (el, name) => { if(el?.hasAttribute(name)) el.removeAttribute(name); };
+  const setDataset = (el, key, value) => { if (el && el.dataset[key] !== String(value || "")) el.dataset[key] = String(value || ""); };
+  const safeSetAttr = (el, name, value) => { if (el && el.getAttribute(name) !== String(value)) el.setAttribute(name, String(value)); };
+  const safeRemoveAttr = (el, name) => { if (el?.hasAttribute(name)) el.removeAttribute(name); };
   const pad2 = (n) => (n < 10 ? "0" : "") + n;
   const nowSeconds = () => (Date.now() / 1000) | 0;
 
@@ -304,11 +305,11 @@
     prime_status_placeholders();
 
     if (USE_WEBSOCKETS) {
-        if (wsInitTimeout) clearTimeout(wsInitTimeout);
-        wsInitTimeout = setTimeout(() => {
-            if (!socket || socket.readyState !== WebSocket.OPEN) createWebSocketConnection();
-            else subscribeToFactions(get_faction_ids());
-        }, STARTUP_DELAY_MS);
+      if (wsInitTimeout) clearTimeout(wsInitTimeout);
+      wsInitTimeout = setTimeout(() => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) createWebSocketConnection();
+        else subscribeToFactions(get_faction_ids());
+      }, STARTUP_DELAY_MS);
     }
     window.dispatchEvent(new Event("twseo-war-found"));
   }
@@ -331,9 +332,9 @@
     get_member_lists().forEach((elem) => {
       const a = elem.querySelector(`a[href^="/factions.php"]`);
       if (a) {
-          const u = new URL(a.href, location.origin);
-          const id = u.searchParams.get("ID") || (a.href.split("ID=")[1]||"").split("&")[0];
-          if (id) ids.add(id);
+        const u = new URL(a.href, location.origin);
+        const id = u.searchParams.get("ID") || (a.href.split("ID=")[1] || "").split("&")[0];
+        if (id) ids.add(id);
       }
     });
     if (ids.size === 0) { const id = new URLSearchParams(window.location.search).get("ID"); if (id) ids.add(id); }
@@ -356,13 +357,13 @@
     member_lis.clear(); refresh_member_lists_cache();
     const selector = document.querySelector(".faction-war") ? "li.enemy, li.your" : "li";
     get_member_lists().forEach(ul => {
-        ul.querySelectorAll(selector).forEach(li => {
-            const a = li.querySelector(`a[href^="/profiles.php"]`);
-            if (!a) return;
-            const u = new URL(a.href, location.origin);
-            const id = u.searchParams.get("XID") || u.searchParams.get("ID");
-            if (id) { member_lis.set(id, li); li.dataset.twseoId = id; }
-        });
+      ul.querySelectorAll(selector).forEach(li => {
+        const a = li.querySelector(`a[href^="/profiles.php"]`);
+        if (!a) return;
+        const u = new URL(a.href, location.origin);
+        const id = u.searchParams.get("XID") || u.searchParams.get("ID");
+        if (id) { member_lis.set(id, li); li.dataset.twseoId = id; }
+      });
     });
   }
 
@@ -405,21 +406,21 @@
     if (Date.now() < backoffUntil) return;
     const faction_ids = get_faction_ids();
     if (!faction_ids.length) return;
-    if (Date.now() - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + (Math.random()*2000-1000)) return;
+    if (Date.now() - last_request_ts < MIN_TIME_SINCE_LAST_REQUEST + (Math.random() * 2000 - 1000)) return;
 
     for (const id of faction_ids) {
       if (!(await update_status_single(id))) break;
-      await new Promise(r => setTimeout(r, 150 + Math.random()*120));
+      await new Promise(r => setTimeout(r, 150 + Math.random() * 120));
     }
     last_request_ts = Date.now();
   }
 
   async function update_status_single(faction_id) {
     try {
-      const r = await fetch(`https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO-Merged`, {cache: 'no-store'});
+      const r = await fetch(`https://api.torn.com/faction/${faction_id}?selections=basic&key=${apiKey}&comment=TWSEO-Merged`, { cache: 'no-store' });
       const status = await r.json();
       if (status.error) {
-        if ([5, 8, 9].includes(status.error.code)) { backoffMs = Math.min(BACKOFF_MAX, (backoffMs||BACKOFF_BASE)*2); backoffUntil = Date.now() + backoffMs; return false; }
+        if ([5, 8, 9].includes(status.error.code)) { backoffMs = Math.min(BACKOFF_MAX, (backoffMs || BACKOFF_BASE) * 2); backoffUntil = Date.now() + backoffMs; return false; }
         return false;
       }
       if (!status.members) return true;
@@ -427,26 +428,28 @@
       for (const [k, v] of Object.entries(status.members)) {
         if (v.status.description) v.status.description = abbreviatePlaces(v.status.description);
 
-        // --- STALE DATA PROTECTION (IMPROVED) ---
+        // --- STALE DATA PROTECTION ---
         const current = member_status.get(k);
         if (current) {
-            const curState = current.status.state;
-            const apiState = v.status.state;
-            const isWs = (current.status.description || "").includes("(WS)");
-            const isFresh = (Date.now() - (current.status.updated || 0) < 60000); // WS update < 60s ago
+          const curState = current.status.state;
+          const apiState = v.status.state;
+          const isWs = (current.status.description || "").includes("(WS)");
 
-            if (isWs && isFresh) {
-                // 1. Protect Active (Hosp/Jail/Travel) from Stale API "Okay"
-                if (["Traveling", "Hospital", "Jail"].includes(curState) && apiState === "Okay") {
-                    if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'.`);
-                    continue;
-                }
-                // 2. Protect Hospital/Jail from Stale API "Traveling" (e.g. landed & hit)
-                if (["Hospital", "Jail"].includes(curState) && ["Traveling", "Abroad"].includes(apiState)) {
-                    if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API '${apiState}'.`);
-                    continue;
-                }
+          // REDUCED: We only mistrust the API if the WS update was < 15 seconds ago
+          const isFresh = (Date.now() - (current.status.updated || 0) < API_STALE_PROTECTION_MS);
+
+          if (isWs && isFresh) {
+            // 1. Protect Active (Hosp/Jail/Travel) from Stale API "Okay"
+            if (["Traveling", "Hospital", "Jail"].includes(curState) && apiState === "Okay") {
+              if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'.`);
+              continue;
             }
+            // 2. Protect Hospital/Jail from Stale API "Traveling" (e.g. landed & hit)
+            if (["Hospital", "Jail"].includes(curState) && ["Traveling", "Abroad"].includes(apiState)) {
+              if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API '${apiState}'.`);
+              continue;
+            }
+          }
         }
         // ----------------------------------------
         v.status.updated = Date.now();
@@ -484,11 +487,11 @@
 
       // Self-Healing
       if ((st.state === "Hospital" || st.state === "Jail") && nativeIsOK(status_DIV)) {
-          const isWs = (st.description || "").includes("(WS)");
-          const hasFutureTime = (st.until || 0) > currentSec;
-          if (!isWs && !hasFutureTime && (Date.now() - (st.updated||0) > RESYNC_THRESHOLD_MS)) {
-              st.state = "Okay"; st.description = "Okay"; st.updated = Date.now(); st.freshOkay = true;
-          }
+        const isWs = (st.description || "").includes("(WS)");
+        const hasFutureTime = (st.until || 0) > currentSec;
+        if (!isWs && !hasFutureTime && (Date.now() - (st.updated || 0) > RESYNC_THRESHOLD_MS)) {
+          st.state = "Okay"; st.description = "Okay"; st.updated = Date.now(); st.freshOkay = true;
+        }
       }
 
       setDataset(li, "until", st.until ?? "");
@@ -501,48 +504,48 @@
 
       switch (st.state) {
         case "Fallen": case "Federal":
-            currentSortWeights.set(id, 6); // Bottom of list
-            safeSetAttr(status_DIV, CONTENT, st.state === "Federal" ? "Federal" : "Fallen");
-            safeSetAttr(status_DIV, COLOR, "red");
-            safeSetAttr(status_DIV, TRAVELING, "false");
-            safeSetAttr(status_DIV, HIGHLIGHT, "false");
-            break;
+          currentSortWeights.set(id, 6); // Bottom of list
+          safeSetAttr(status_DIV, CONTENT, st.state === "Federal" ? "Federal" : "Fallen");
+          safeSetAttr(status_DIV, COLOR, "red");
+          safeSetAttr(status_DIV, TRAVELING, "false");
+          safeSetAttr(status_DIV, HIGHLIGHT, "false");
+          break;
 
         case "Abroad": case "Traveling":
           safeSetAttr(status_DIV, TRAVELING, "false");
           const desc = st.description || "Traveling";
           if (desc.includes("Traveling to ")) {
-              currentSortWeights.set(id, 4);
-              safeSetAttr(status_DIV, CONTENT, "► " + desc.split("Traveling to ")[1]);
+            currentSortWeights.set(id, 4);
+            safeSetAttr(status_DIV, CONTENT, "► " + desc.split("Traveling to ")[1]);
           } else if (desc.includes("In ")) {
-              currentSortWeights.set(id, 3);
-              safeSetAttr(status_DIV, CONTENT, desc.split("In ")[1]);
+            currentSortWeights.set(id, 3);
+            safeSetAttr(status_DIV, CONTENT, desc.split("In ")[1]);
           } else if (desc.includes("Returning")) {
-              currentSortWeights.set(id, 2);
-              safeSetAttr(status_DIV, CONTENT, "◄ " + desc.split("Returning to Torn from ")[1]);
+            currentSortWeights.set(id, 2);
+            safeSetAttr(status_DIV, CONTENT, "◄ " + desc.split("Returning to Torn from ")[1]);
           } else {
-              currentSortWeights.set(id, 5);
-              safeSetAttr(status_DIV, CONTENT, "Traveling");
+            currentSortWeights.set(id, 5);
+            safeSetAttr(status_DIV, CONTENT, "Traveling");
           }
           break;
 
         case "Hospital": case "Jail":
-          if ((st.description||"").toLowerCase().includes("federal")) {
-             currentSortWeights.set(id, 6); safeSetAttr(status_DIV, CONTENT, "Federal"); safeSetAttr(status_DIV, COLOR, "red"); break;
+          if ((st.description || "").toLowerCase().includes("federal")) {
+            currentSortWeights.set(id, 6); safeSetAttr(status_DIV, CONTENT, "Federal"); safeSetAttr(status_DIV, COLOR, "red"); break;
           }
           currentSortWeights.set(id, 1);
-          safeSetAttr(status_DIV, TRAVELING, (st.description||"").includes("In a") ? "true" : "false");
+          safeSetAttr(status_DIV, TRAVELING, (st.description || "").includes("In a") ? "true" : "false");
 
           const remain = Math.max(0, ((st.until >>> 0) - currentSec) | 0);
           if (remain <= 0 && st.until === 0) {
-              safeSetAttr(status_DIV, CONTENT, st.state); safeSetAttr(status_DIV, HIGHLIGHT, "true"); if(!HAS_HAS) li.classList.add(HCLASS);
-              break;
+            safeSetAttr(status_DIV, CONTENT, st.state); safeSetAttr(status_DIV, HIGHLIGHT, "true"); if (!HAS_HAS) li.classList.add(HCLASS);
+            break;
           }
           if (remain <= 0) {
-              safeSetAttr(status_DIV, HIGHLIGHT, "false"); safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
-              break;
+            safeSetAttr(status_DIV, HIGHLIGHT, "false"); safeSetAttr(status_DIV, CONTENT, status_DIV.getAttribute(CONTENT) || status_DIV.textContent);
+            break;
           }
-          const t = `${pad2((remain/3600)|0)}:${pad2(((remain/60)|0)%60)}:${pad2(remain%60)}`;
+          const t = `${pad2((remain / 3600) | 0)}:${pad2(((remain / 60) | 0) % 60)}:${pad2(remain % 60)}`;
           if (status_DIV.getAttribute(CONTENT) !== t) safeSetAttr(status_DIV, CONTENT, t);
           const isSoon = remain < 300 ? "true" : "false";
           safeSetAttr(status_DIV, HIGHLIGHT, isSoon);
@@ -567,12 +570,12 @@
         else lis = Array.from(lists[i].children).filter(child => child.tagName === 'LI');
 
         const arr = Array.from(lis).map(li => {
-            const id = li.dataset.twseoId;
-            const st = member_status.get(id)?.status;
-            let score = getScore(li, id);
-            if (st?.state === "Okay" && st?.freshOkay) score = -1;
-            else if (!SORT_OKAY_BY_SCORE) score = 0;
-            return { li, a: currentSortWeights.get(id) ?? 0, until: st?.until ?? 0, score };
+          const id = li.dataset.twseoId;
+          const st = member_status.get(id)?.status;
+          let score = getScore(li, id);
+          if (st?.state === "Okay" && st?.freshOkay) score = -1;
+          else if (!SORT_OKAY_BY_SCORE) score = 0;
+          return { li, a: currentSortWeights.get(id) ?? 0, until: st?.until ?? 0, score };
         });
 
         const asc = sorted_column.order === "asc";
