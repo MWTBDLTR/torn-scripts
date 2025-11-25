@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      5.3.1
+// @version      5.4.0
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -31,7 +31,7 @@
   let SORT_OKAY_BY_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
   console.log(
-    `%c[TWSEO] Script Loaded (v5.3.1) | Debug: ${DEBUG}`,
+    `%c[TWSEO] Script Loaded (v5.4.0) | Debug: ${DEBUG}`,
     "color: #00ff00; font-weight: bold; background: #333; padding: 2px 5px;"
   );
 
@@ -63,7 +63,7 @@
     if (LOG_STATUS) console.log(`%c[TWSEO] ${msg}`, "color: #00ccff; font-weight: bold;");
   }
 
-  // --- ABBREVIATIONS & COLOR ---
+  // --- HELPER: ABBREVIATIONS & COLOR ---
   const COUNTRY_MAP = {
     "South Africa": "SA", "Cayman Islands": "CI", "United Kingdom": "UK",
     "Argentina": "Arg", "Switzerland": "Switz"
@@ -77,7 +77,7 @@
     return "green";
   }
 
-  // --- SCORE/LEVEL SCRAPER (With Cache) ---
+  // --- HELPER: SCORE/LEVEL SCRAPER (With Cache) ---
   const scoreCache = new Map();
   function getScore(li, id) {
     if (scoreCache.has(id)) return scoreCache.get(id);
@@ -180,7 +180,7 @@
     };
 
     socket.onmessage = (event) => {
-      // handle batched messages (NDJSON) by splitting on newlines
+      // FIX: Handle batched messages (NDJSON) by splitting on newlines
       const messages = event.data.split('\n');
 
       messages.forEach(rawLine => {
@@ -252,7 +252,11 @@
         currentData.status.state = newState;
         currentData.status.description = newDesc;
         currentData.status.until = newUntil;
-        currentData.status.color = s.color;
+
+        // --- FIX: Fallback to inferred color if WS color is missing/null ---
+        currentData.status.color = s.color || getStateColor(newState);
+        // ------------------------------------------------------------------
+
         currentData.status.updated = Date.now();
         currentData.status.freshOkay = !!s.okay;
 
@@ -433,7 +437,7 @@
       for (const [k, v] of Object.entries(status.members)) {
         if (v.status.description) v.status.description = abbreviatePlaces(v.status.description);
 
-        // --- STALE DATA PROTECTION ---
+        // --- STALE DATA PROTECTION (15s) ---
         const current = member_status.get(k);
         if (current) {
           const curState = current.status.state;
@@ -442,12 +446,12 @@
           const isFresh = (Date.now() - (current.status.updated || 0) < API_STALE_PROTECTION_MS);
 
           if (isWs && isFresh) {
-            // protect from stale API "Okay"
+            // Protect Active from Stale API "Okay"
             if (["Traveling", "Hospital", "Jail"].includes(curState) && apiState === "Okay") {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'.`);
               continue;
             }
-            // protect from stale API "Traveling"
+            // Protect Hospital from Stale API "Traveling"
             if (["Hospital", "Jail"].includes(curState) && ["Traveling", "Abroad"].includes(apiState)) {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API '${apiState}'.`);
               continue;
@@ -456,6 +460,7 @@
         }
         // --- INFER COLOR ON INPUT ---
         v.status.color = getStateColor(v.status.state);
+        // ----------------------------
         v.status.updated = Date.now();
         member_status.set(k, v);
       }
@@ -505,12 +510,13 @@
       let useColor = st.color || "green";
       if (["Hospital", "Jail"].includes(st.state) && isExpired) useColor = "green";
       safeSetAttr(status_DIV, COLOR, useColor);
+      // ------------------
 
       switch (st.state) {
         case "Fallen": case "Federal":
           currentSortWeights.set(id, 6);
           safeSetAttr(status_DIV, CONTENT, st.state === "Federal" ? "Federal" : "Fallen");
-          safeSetAttr(status_DIV, COLOR, "red"); // old and redundant but safe to leave
+          safeSetAttr(status_DIV, COLOR, "red");
           safeSetAttr(status_DIV, TRAVELING, "false");
           safeSetAttr(status_DIV, HIGHLIGHT, "false");
           break;
