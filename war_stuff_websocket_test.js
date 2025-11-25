@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      5.5.1
+// @version      5.5.2
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -22,7 +22,7 @@
   let LOG_STATUS = GM_getValue("twseo_log_status", false);
   let SORT_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
-  console.log(`[TWSEO] v5.5.1 | Debug: ${DEBUG}`);
+  console.log(`[TWSEO] v5.5.2 | Debug: ${DEBUG}`);
 
   const toggle = (k, v, n) => { GM_setValue(k, !v); alert(`${n}: ${!v ? "ON" : "OFF"}`); location.reload(); };
   GM_registerMenuCommand("Set API Key", promptSetKey);
@@ -186,7 +186,8 @@
     if (!s) return null;
     if (s.classList.contains('ok')) return { state: "Okay", description: "Okay", until: 0, color: "green", freshOkay: true };
     const t = s.textContent || "";
-    if (t.includes("Hospital")) return { state: "Hospital", description: t, until: CFG.UNTIL_MAX, color: "red" }; // Time unknown but State is Hospital
+    // Note: If script already rendered a timer, t is that timer. But we check attributes below.
+    if (t.includes("Hospital")) return { state: "Hospital", description: t, until: CFG.UNTIL_MAX, color: "red" };
     if (t.includes("Federal")) return { state: "Federal", description: t, until: CFG.UNTIL_MAX, color: "red" };
     if (t.includes("Traveling")) return { state: "Traveling", description: t, until: 0, color: "blue" };
     return null;
@@ -199,14 +200,20 @@
         for (const n of m.addedNodes) if (n?.classList?.contains?.("faction-war") || n?.matches?.("ul.members-list")) { onWarFound(); schedRef(); return; }
         for (const n of m.removedNodes) if (n?.matches?.(".faction-war")) onWarGone();
       }
-      // Prioritize Native Updates
       if (m.type === 'attributes' && m.attributeName === 'class' && (m.target.classList.contains('status') || m.target.tagName === 'LI')) {
-        const li = m.target.closest('li');
-        const id = li?.dataset?.twseoId;
-        if (id) {
-          const nat = parseNative(li);
-          if (nat) { member_status.set(id, { status: { ...nat, updated: Date.now() } }); logStatus(`Native Override [${id}]: ${nat.state}`); }
-        }
+          const li = m.target.closest('li');
+          const id = li?.dataset?.twseoId;
+          if (id) {
+              const nat = parseNative(li);
+              if (nat) {
+                  const cur = member_status.get(id)?.status;
+                  // SMART MERGE: Preserve API timer if State matches and API timer is valid future
+                  if (cur && cur.state === nat.state && cur.until > ((Date.now()/1000)|0)) {
+                      nat.until = cur.until;
+                  }
+                  member_status.set(id, { status: { ...nat, updated: Date.now() } });
+              }
+          }
       }
     }
   });
@@ -237,13 +244,12 @@
       for (const [k, v] of Object.entries(d.members)) {
         if (v.status.description) v.status.description = abbr(v.status.description);
         const cur = member_status.get(k);
-        // Protection: If current is WS or Native (fresh), and API is stale/conflicting, skip API
         if (cur && (Date.now() - (cur.status.updated || 0) < CFG.STALE)) {
-          const isWsOrNative = (cur.status.description || "").includes("(WS)") || (cur.status.freshOkay && cur.status.updated > Date.now() - 5000);
-          if (isWsOrNative) {
-            if ((["Traveling", "Hospital", "Jail"].includes(cur.status.state) && v.status.state === "Okay") ||
-              (["Hospital", "Jail"].includes(cur.status.state) && ["Traveling", "Abroad"].includes(v.status.state))) continue;
-          }
+           const isWsOrNative = (cur.status.description || "").includes("(WS)") || (cur.status.freshOkay && cur.status.updated > Date.now() - 5000);
+           if (isWsOrNative) {
+             if ((["Traveling", "Hospital", "Jail"].includes(cur.status.state) && v.status.state === "Okay") ||
+               (["Hospital", "Jail"].includes(cur.status.state) && ["Traveling", "Abroad"].includes(v.status.state))) continue;
+           }
         }
         v.status.color = getColor(v.status.state); v.status.updated = Date.now();
         member_status.set(k, v);
@@ -274,11 +280,9 @@
       }
 
       const st = stData.status || {};
-
-      // Self-Healing (Passive) + Native Check (Active via Obs, but backup here)
       if (["Hospital", "Jail"].includes(st.state) && sDiv.classList.contains('ok')) {
         if (!st.description?.includes("(WS)") && !(st.until > curSec) && (Date.now() - (st.updated || 0) > CFG.RESYNC)) {
-          st.state = "Okay"; st.description = "Okay"; st.updated = Date.now(); st.freshOkay = true;
+           st.state = "Okay"; st.description = "Okay"; st.updated = Date.now(); st.freshOkay = true;
         }
       }
 
@@ -303,17 +307,20 @@
           weights.set(id, 6); safeSet(sDiv, ATTRS.CONT, "Federal"); safeSet(sDiv, ATTRS.COL, "red");
         } else {
           weights.set(id, 1); safeSet(sDiv, ATTRS.TRAV, st.description?.includes("In a") ? "true" : "false");
-          const rem = Math.max(0, ((st.until >>> 0) - curSec) | 0);
-          if (rem <= 0 && st.until === 0) {
-            safeSet(sDiv, ATTRS.CONT, st.state); safeSet(sDiv, ATTRS.HL, "true"); if (!HAS_HAS) li.classList.add("twseo-highlight");
-          } else if (rem <= 0) {
-            safeSet(sDiv, ATTRS.HL, "false"); safeSet(sDiv, ATTRS.CONT, sDiv.getAttribute(ATTRS.CONT) || sDiv.textContent);
+          if (st.until === CFG.UNTIL_MAX) {
+              // Unknown time (likely native update), show text instead of "Infinity"
+              safeSet(sDiv, ATTRS.CONT, st.state); safeSet(sDiv, ATTRS.HL, "true"); if (!HAS_HAS) li.classList.add("twseo-highlight");
           } else {
-            const t = `${pad((rem / 3600) | 0)}:${pad(((rem / 60) | 0) % 60)}:${pad(rem % 60)}`;
-            if (sDiv.getAttribute(ATTRS.CONT) !== t) safeSet(sDiv, ATTRS.CONT, t);
-            const soon = rem < 300;
-            safeSet(sDiv, ATTRS.HL, soon ? "true" : "false");
-            if (!HAS_HAS && soon) li.classList.add("twseo-highlight");
+              const rem = Math.max(0, ((st.until >>> 0) - curSec) | 0);
+              if (rem <= 0) {
+                safeSet(sDiv, ATTRS.HL, "false"); safeSet(sDiv, ATTRS.CONT, sDiv.getAttribute(ATTRS.CONT) || sDiv.textContent);
+              } else {
+                const t = `${pad((rem / 3600) | 0)}:${pad(((rem / 60) | 0) % 60)}:${pad(rem % 60)}`;
+                if (sDiv.getAttribute(ATTRS.CONT) !== t) safeSet(sDiv, ATTRS.CONT, t);
+                const soon = rem < 300;
+                safeSet(sDiv, ATTRS.HL, soon ? "true" : "false");
+                if (!HAS_HAS && soon) li.classList.add("twseo-highlight");
+              }
           }
         }
       } else {
