@@ -435,23 +435,20 @@
           const apiState = v.status.state;
           const isWs = (current.status.description || "").includes("(WS)");
 
-          // REDUCED: We only mistrust the API if the WS update was < 15 seconds ago
+          // only mistrust the API if the WS update was < 15 seconds ago
           const isFresh = (Date.now() - (current.status.updated || 0) < API_STALE_PROTECTION_MS);
 
           if (isWs && isFresh) {
-            // 1. Protect Active (Hosp/Jail/Travel) from Stale API "Okay"
             if (["Traveling", "Hospital", "Jail"].includes(curState) && apiState === "Okay") {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API 'Okay'.`);
               continue;
             }
-            // 2. Protect Hospital/Jail from Stale API "Traveling" (e.g. landed & hit)
             if (["Hospital", "Jail"].includes(curState) && ["Traveling", "Abroad"].includes(apiState)) {
               if (DEBUG) console.log(`[TWSEO] Protecting [${k}] from stale API '${apiState}'.`);
               continue;
             }
           }
         }
-        // ----------------------------------------
         v.status.updated = Date.now();
         member_status.set(k, v);
       }
