@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
 // @namespace    https://github.com/MWTBDLTR/torn-scripts
-// @version      5.5.0
+// @version      5.5.1
 // @description  The ultimate rw monitor. Immediate status updates, hospital timers, and player sorting.
 // @author       MrChurch [3654415] + xentac
 // @license      MIT
@@ -22,7 +22,7 @@
     let LOG_STATUS = GM_getValue("twseo_log_status", false);
     let SORT_SCORE = GM_getValue("twseo_sort_okay_score", false);
 
-    console.log(`[TWSEO] v5.5.0 | Debug: ${DEBUG}`);
+    console.log(`[TWSEO] v5.5.1 | Debug: ${DEBUG}`);
 
     const toggle = (k, v, n) => { GM_setValue(k, !v); alert(`${n}: ${!v ? "ON" : "OFF"}`); location.reload(); };
     GM_registerMenuCommand("Set API Key", promptSetKey);
@@ -180,16 +180,40 @@
 
     const prime = () => (warRoot || document).querySelectorAll(".members-list div.status:not([" + ATTRS.CONT + "])").forEach(e => e.setAttribute(ATTRS.CONT, e.textContent));
 
+    // NATIVE PARSING
+    const parseNative = (li) => {
+        const s = getSDiv(li);
+        if (!s) return null;
+        if (s.classList.contains('ok')) return { state: "Okay", description: "Okay", until: 0, color: "green", freshOkay: true };
+        const t = s.textContent || "";
+        if (t.includes("Hospital")) return { state: "Hospital", description: t, until: CFG.UNTIL_MAX, color: "red" }; // Time unknown but State is Hospital
+        if (t.includes("Federal")) return { state: "Federal", description: t, until: CFG.UNTIL_MAX, color: "red" };
+        if (t.includes("Traveling")) return { state: "Traveling", description: t, until: 0, color: "blue" };
+        return null;
+    };
+
     let refPend = false;
     const obs = new MutationObserver((muts) => {
         for (const m of muts) {
-            for (const n of m.addedNodes) if (n?.classList?.contains?.("faction-war") || n?.matches?.("ul.members-list")) { onWarFound(); schedRef(); return; }
-            for (const n of m.removedNodes) if (n?.matches?.(".faction-war")) onWarGone();
+            if (m.type === 'childList') {
+                for (const n of m.addedNodes) if (n?.classList?.contains?.("faction-war") || n?.matches?.("ul.members-list")) { onWarFound(); schedRef(); return; }
+                for (const n of m.removedNodes) if (n?.matches?.(".faction-war")) onWarGone();
+            }
+            // Prioritize Native Updates
+            if (m.type === 'attributes' && m.attributeName === 'class' && (m.target.classList.contains('status') || m.target.tagName === 'LI')) {
+                const li = m.target.closest('li');
+                const id = li?.dataset?.twseoId;
+                if (id) {
+                    const nat = parseNative(li);
+                    if (nat) { member_status.set(id, { status: { ...nat, updated: Date.now() } }); logStatus(`Native Override [${id}]: ${nat.state}`); }
+                }
+            }
         }
     });
+
     const schedRef = () => { if (!refPend) { refPend = true; setTimeout(() => { refPend = false; memberListsCache = []; if (CFG.WS && socket?.readyState === 1) subTo(getFIDs()); }, 0); } };
     setTimeout(() => { if (document.querySelector("ul.members-list")) onWarFound(); }, 800);
-    obs.observe(document.body, { subtree: true, childList: true });
+    obs.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
 
     let lastReq = 0, backoffUntil = 0, backoffMs = 0;
     async function apiUpdate() {
@@ -213,9 +237,13 @@
             for (const [k, v] of Object.entries(d.members)) {
                 if (v.status.description) v.status.description = abbr(v.status.description);
                 const cur = member_status.get(k);
-                if (cur && (cur.status.description || "").includes("(WS)") && (Date.now() - (cur.status.updated || 0) < CFG.STALE)) {
-                    if ((["Traveling", "Hospital", "Jail"].includes(cur.status.state) && v.status.state === "Okay") ||
-                        (["Hospital", "Jail"].includes(cur.status.state) && ["Traveling", "Abroad"].includes(v.status.state))) continue;
+                // Protection: If current is WS or Native (fresh), and API is stale/conflicting, skip API
+                if (cur && (Date.now() - (cur.status.updated || 0) < CFG.STALE)) {
+                    const isWsOrNative = (cur.status.description || "").includes("(WS)") || (cur.status.freshOkay && cur.status.updated > Date.now() - 5000);
+                    if (isWsOrNative) {
+                        if ((["Traveling", "Hospital", "Jail"].includes(cur.status.state) && v.status.state === "Okay") ||
+                            (["Hospital", "Jail"].includes(cur.status.state) && ["Traveling", "Abroad"].includes(v.status.state))) continue;
+                    }
                 }
                 v.status.color = getColor(v.status.state); v.status.updated = Date.now();
                 member_status.set(k, v);
@@ -246,6 +274,8 @@
             }
 
             const st = stData.status || {};
+
+            // Self-Healing (Passive) + Native Check (Active via Obs, but backup here)
             if (["Hospital", "Jail"].includes(st.state) && sDiv.classList.contains('ok')) {
                 if (!st.description?.includes("(WS)") && !(st.until > curSec) && (Date.now() - (st.updated || 0) > CFG.RESYNC)) {
                     st.state = "Okay"; st.description = "Okay"; st.updated = Date.now(); st.freshOkay = true;
