@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         War Attack Links (TWSE Safe)
+// @name         Torn War Page Attack Links
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.2
-// @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized (TWSE-O) - no network activity, no background requests, no automation, just DOM rewiring.
+// @version      2.0
+// @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
@@ -12,15 +12,6 @@
 (function () {
   'use strict';
 
-  // Policy notes:
-  // - This script only operates on the DOM of the current, manually loaded page.
-  // - It performs NO background or automated requests. Navigation only occurs on trusted user gestures.
-  // - It does not bypass captcha or attempt automation; it merely rewires visible "Attack" controls.
-  // - There is no network usage; no API calls; no background requests; just pure blissful DOM manipulation.
-  // - It does not store or transmit any user data.
-  // - It is intended to enhance user experience while complying with Torn's terms of service.
-
-  // Configuration
   const OPEN_IN_NEW_TAB = true;
   const MARK = 'attackLinkHandled';
   const ROW_MARK = 'attackRowHandled';
@@ -108,26 +99,22 @@
 
   function openAttackUrl(url){
     if (!scriptEnabled || !url) return;
-    // only occurs on trusted input events (enforced by listeners)
     if (OPEN_IN_NEW_TAB) {
-      // noopener for security, noreferrer to avoid leaking referrer
       window.open(url, '_blank', 'noopener,noreferrer');
     } else {
       location.assign(url);
     }
   }
 
-  // only act on primary-button, trusted events, and elements with data-attack-url
   document.addEventListener('click', (e) => {
     const t = e.target?.closest?.('[data-attack-url]');
     if (!t) return;
     if (!e.isTrusted) return;
-    if (e.button !== 0) return; // primary clicks only
+    if (e.button !== 0) return;
     e.preventDefault();
     openAttackUrl(t.getAttribute('data-attack-url'));
   }, { capture:false, passive:false });
 
-  // Keyboard activation: Enter/Space; only trusted events
   document.addEventListener('keydown', (e) => {
     if (!e.isTrusted) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -253,6 +240,5 @@
     console.log("[War Attack Links] Initialization successful");
   }
 
-  // Re-scan once after initial load to catch late content
   setTimeout(() => initialScan(), 800);
 })();

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced & Optimized
-// @namespace    namespace
-// @version      0.0.3
-// @description  Show travel status and hospital time and sort by hospital time on war page. Fork of xentac's fork of https://greasyfork.org/en/scripts/448681-torn-war-stuff
+// @namespace    https://github.com/MWTBDLTR
+// @version      0.0.5
+// @description  Show travel status and hospital time and sort by hospital time on war page
 // @author       MrChurch [3654415] + xentac (original TWSE)
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
@@ -22,20 +22,18 @@
     ffScouterV2DisableWarMonitor.style.display = "none";
     document.documentElement.appendChild(ffScouterV2DisableWarMonitor);
 
-    // --- Constants & Config ---
-    const STORAGE_KEY = "xentac-torn_war_stuff_enhanced-apikey";
-    const CONTENT = "data-twse-content";
-    const TRAVELING = "data-twse-traveling";
-    const HIGHLIGHT = "data-twse-highlight";
+    const STORAGE_KEY = "torn_war_stuff_eo-apikey";
+    const CONTENT = "data-twseo-content";
+    const TRAVELING = "data-twseo-traveling";
+    const HIGHLIGHT = "data-twseo-highlight";
     const API_INTERVAL = 10000;
     const RENDER_INTERVAL = 1000;
 
     let apiKey = localStorage.getItem(STORAGE_KEY) ?? "###PDA-APIKEY###";
     const sort_enemies = true;
 
-    // State
     let isRunning = true;
-    let loopsStarted = false; // New flag to ensure we only start intervals once
+    let loopsStarted = false;
     let lastApiRequest = 0;
     const memberStatusMap = new Map();
     const memberLiMap = new Map();
@@ -44,14 +42,13 @@
     let currentSortOrder = "";
     let needsSort = false;
 
-    // --- Menu Commands ---
     try {
         GM_registerMenuCommand("Set Api Key", () => checkApiKey(false));
     } catch (error) { }
 
     function checkApiKey(checkExisting = true) {
         if (!checkExisting || !apiKey || apiKey.includes("PDA-APIKEY") || apiKey.length !== 16) {
-            const userInput = prompt("Please enter a PUBLIC Api Key:", apiKey ?? "");
+            const userInput = prompt("Public API Key:", apiKey ?? "");
             if (userInput && userInput.length === 16) {
                 apiKey = userInput;
                 localStorage.setItem(STORAGE_KEY, userInput);
@@ -59,16 +56,15 @@
         }
     }
 
-    // --- Styles ---
-    // MODIFIED: Only hide text if the parent UL has the 'twse-loaded' class
     GM_addStyle(`
-    .members-list li:has(div.status[data-twse-highlight="true"]) { background-color: #afa5 !important; }
-    .members-list div.status[data-twse-traveling="true"]::after { color: #F287FF !important; }
-    
-    .members-list.twse-loaded div.status { position: relative !important; color: transparent !important; }
-    
+    .members-list { display: flex !important; flex-direction: column !important; }
+    .members-list li:has(div.status[data-twseo-highlight="true"]) { background-color: #afa5 !important; }
+    .members-list div.status[data-twseo-traveling="true"]::after { color: #F287FF !important; }
+
+    .members-list.twseo-loaded div.status { position: relative !important; color: transparent !important; }
+
     .members-list div.status::after {
-      content: attr(data-twse-content);
+      content: attr(data-twseo-content);
       position: absolute; top: 0; left: 0;
       width: calc(100% - 10px); height: 100%;
       background: inherit; display: flex; right: 10px;
@@ -79,7 +75,6 @@
     .members-list .abroad.status::after, .members-list .traveling.status::after { color: var(--user-status-blue-color); }
   `);
 
-    // --- DOM Helpers ---
     function getMemberLists() {
         return document.querySelectorAll("ul.members-list");
     }
@@ -101,8 +96,7 @@
         memberLiMap.clear();
         const lists = getMemberLists();
         lists.forEach((ul) => {
-            // Mark this list as loaded so our CSS kicks in
-            ul.classList.add("twse-loaded");
+            ul.classList.add("twseo-loaded");
 
             const lis = ul.querySelectorAll("LI.enemy, li.your");
             lis.forEach((li) => {
@@ -130,51 +124,37 @@
         return { column: null, order: null };
     }
 
-    // --- Initialization ---
-
     function startEverything() {
         if (loopsStarted) return;
 
-        console.log("[TWSE] Starting Loops");
+        console.log("[TornWarStuffEO] Starting Loops");
         loopsStarted = true;
         extractAllMemberLis();
 
-        // Render Loop
         setInterval(renderLoop, RENDER_INTERVAL);
-        // Data Loop
         dataLoop();
     }
 
-    // Initial Check (Fast load)
     setTimeout(() => {
         if (document.querySelector(".faction-war")) {
-            console.log("[TWSE] War Detected on Load");
+            console.log("[TornWarStuffEO] War Detected on Load");
             startEverything();
         }
     }, 500);
 
-    // Observer (Dynamic load)
     const observer = new MutationObserver((mutations) => {
-        for (const mutation of mutations) {
-            // Check added nodes for the war banner
-            for (const node of mutation.addedNodes) {
-                if (node.classList && node.classList.contains("faction-war")) {
-                    console.log("[TWSE] War Detected via Mutation");
-                    startEverything();
-                    return;
-                }
-            }
+        if (document.querySelector(".faction-war") && !loopsStarted) {
+             console.log("[TornWarStuffEO] War Detected via Mutation");
+             startEverything();
         }
     });
 
     observer.observe(document.body, { subtree: true, childList: true });
 
-    // --- Data Logic ---
     async function dataLoop() {
         if (!isRunning) return;
 
         const now = Date.now();
-        // Logic: If we are running, we fetch. 
         if (now - lastApiRequest >= API_INTERVAL) {
             lastApiRequest = now;
             const factionIds = getFactionIds();
@@ -204,23 +184,21 @@
                     memberStatusMap.set(k, v);
                 }
             }
-        } catch (err) { console.error("[TWSE] Fetch Error:", err); }
+        } catch (err) { console.error("[TornWarStuffEO] Fetch Error:", err); }
     }
 
     function handleApiError(error) {
         const fatalCodes = [0, 1, 2, 3, 4, 6, 7, 10, 12, 13, 14, 16, 18, 21];
         const retryCodes = [5, 8, 9];
         if (fatalCodes.includes(error.code)) {
-            console.log("[TWSE] Fatal Error. Stopping.");
+            console.log("[TornWarStuffEO] Fatal Error. Stopping.");
             isRunning = false;
         } else if (retryCodes.includes(error.code)) {
             lastApiRequest = Date.now() + 30000;
         }
     }
 
-    // --- Render Logic ---
     function renderLoop() {
-        // Safety check: ensure we have elements
         if (memberLiMap.size === 0) extractAllMemberLis();
 
         const nowSec = Date.now() / 1000;
@@ -230,7 +208,6 @@
             const statusDiv = li.querySelector("DIV.status");
             if (!statusDiv) return;
 
-            // Fallback: If no API data yet, show current text
             if (!state) {
                 if (!statusDiv.getAttribute(CONTENT)) {
                     statusDiv.setAttribute(CONTENT, statusDiv.innerText.trim() || "...");
@@ -323,8 +300,8 @@
                 needsSort = true;
             }
         }
+
         if (!needsSort && currentSortColumn !== "status") return;
-        if (!needsSort) return;
 
         nodes.forEach(ul => {
             let activeCol = currentSortColumn || "status";
@@ -332,7 +309,8 @@
             if (activeCol !== "status") return;
 
             const lis = Array.from(ul.querySelectorAll("LI.enemy, li.your"));
-            const sortedLis = lis.sort((a, b) => {
+
+            lis.sort((a, b) => {
                 let left = a; let right = b;
                 if (activeOrder === "desc") { left = b; right = a; }
                 const sortA = (parseInt(left.getAttribute("data-sortA")) || 0) - (parseInt(right.getAttribute("data-sortA")) || 0);
@@ -343,15 +321,17 @@
                 return (parseInt(left.getAttribute("data-until")) || 0) - (parseInt(right.getAttribute("data-until")) || 0);
             });
 
-            let isSorted = true;
-            for (let i = 0; i < sortedLis.length; i++) {
-                if (ul.children[i] !== sortedLis[i]) { isSorted = false; break; }
-            }
-            if (!isSorted) sortedLis.forEach(li => ul.appendChild(li));
+            lis.forEach((li, index) => {
+                const newOrder = index + 1;
+                if (li.style.order != newOrder) {
+                   li.style.order = newOrder;
+                }
+            });
         });
+
         needsSort = false;
     }
 
-    console.log("[TWSE] Enhanced Optimized v3 Loaded");
+    console.log("[TornWarStuffEO] Loaded");
     window.dispatchEvent(new Event("FFScouterV2DisableWarMonitor"));
 })();
