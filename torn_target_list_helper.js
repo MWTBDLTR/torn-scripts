@@ -12,6 +12,8 @@
 // @grant       GM_registerMenuCommand
 // @grant       GM_addStyle
 // @match       https://www.torn.com/page.php?sid=list&type=targets*
+// @connect     ffscouter.com
+// @connect     api.torn.com
 // ==/UserScript==
 
 const API_KEY = "###PDA-APIKEY###";
