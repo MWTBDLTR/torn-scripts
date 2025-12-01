@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Torn OC Role Restrictions
 // @namespace    https://xentac.github.io
-// @version      0.8
+// @version      0.7
 // @description  Highlight role restrictions and best roles in OC 2.0 (modified copy of "Torn OC Role Evaluator"). Well paired with https://greasyfork.org/en/scripts/526834-oc-success-chance-2-0.
-// @author       underko[3362751], xentac[3354782], MrChurch[3654415]
+// @author       underko[3362751], xentac[3354782]
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_xmlhttpRequest
 // @connect      raw.githubusercontent.com
-// @connect      tornprobability.com
 // @license      MIT
 // ==/UserScript==
 
@@ -152,84 +151,8 @@
 
     let crimeData = {};
     let previousTab = "none";
-    let ocWeights = {};
-
-    function normalizeKey(str) {
-        return str.replace(/[\s#]/g, '');
-    }
-
-    // Called when API data arrives after page load
-    function refreshCrimes() {
-        crimeData = {}; // Clear the cache to allow re-processing
-        const allCrimes = document.querySelectorAll(".wrapper___U2Ap7");
-        allCrimes.forEach((crimeNode) => {
-            processCrime(crimeNode);
-        });
-    }
-
-    function fetchRoleWeights() {
-        try {
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: "https://tornprobability.com:3000/api/GetRoleWeights",
-                headers: { "Content-Type": "application/json" },
-                onload: function (response) {
-                    if (response.status === 200) {
-                        try {
-                            ocWeights = JSON.parse(response.responseText);
-                            console.log("[OCRoleRestrictions] Loaded Role Weights:", ocWeights);
-                            // Force UI update to override any defaults
-                            refreshCrimes();
-                        } catch (e) {
-                            console.error("[OCRoleRestrictions] Error parsing weights:", e);
-                        }
-                    } else {
-                        console.log("[OCRoleRestrictions] Failed to load weights, status:", response.status);
-                    }
-                },
-                onerror: function (err) {
-                    console.error("[OCRoleRestrictions] Network error fetching weights:", err);
-                }
-            });
-        } catch (e) {
-            console.error("[OCRoleRestrictions] GM_xmlhttpRequest failed:", e);
-        }
-    }
-
-    // Calc suggested lower bound based on weight using Piecewise Linear Interpolation - There could be a better algorithm for this?
-    // Agrees with community values (Looter @ Wt7 -> 42%, Looter4 @ Wt21 -> 67%, Max @ Wt50 -> 75%)
-    // These "feelgoods" align with values we get from this algo, so maybe it's fine.
-    function getLowerFromWeight(weight) {
-        let val;
-        if (weight < 8) {
-            // Low impact (0 to 8 weight -> 40% - 42%)
-            val = 40 + (weight * 0.25);
-        } else if (weight < 20) {
-            // Medium-high impact (8 to 20 weight -> 60% - 67%)
-            val = 60 + ((weight - 8) * 0.6);
-        } else if (weight < 40) {
-            // High impact (20 to 40 weight -> 67% to 75%)
-            val = 67 + ((weight - 20) * 0.4);
-        } else {
-            // Diminishing returns (40+ weight -> 75%+)
-            // Soft cap that creeps up slowly
-            val = 75 + ((weight - 40) * 0.1);
-        }
-        return Math.round(val);
-    }
 
     function classifyOcRoleInfluence(ocName, roleName) {
-        // Try API weights first
-        const cleanOcName = normalizeKey(ocName);
-        const cleanRoleName = normalizeKey(roleName);
-
-        if (ocWeights[cleanOcName] && ocWeights[cleanOcName][cleanRoleName] !== undefined) {
-            const weight = ocWeights[cleanOcName][cleanRoleName];
-            const lower = getLowerFromWeight(weight);
-            return { lower: lower, upper: lower + 10 };
-        }
-
-        // Fallback to defaults if no weight found
         const ocInfo = ocRoleInfluence[ocName];
         const roleData = ocInfo?.find((r) => r.role === roleName);
         const lower = roleData ? roleData.lower : 70;
@@ -310,7 +233,6 @@
 
     function processCrime(wrapper) {
         const ocId = wrapper.getAttribute("data-oc-id");
-        // Ensure we process if the cache is empty or if we are forcing an update
         if (!ocId || crimeData[ocId]) return;
 
         const titleEl = wrapper.querySelector("p.panelTitle___aoGuV");
@@ -326,8 +248,6 @@
             const chance = successEl
                 ? parseInt(successEl.textContent.trim(), 10)
                 : null;
-
-            // Note: classifyOcRoleInfluence now prefers the API weights if available
             const evaluation =
                 chance !== null
                     ? classifyOcRoleInfluence(crimeTitle, roleName)
@@ -374,8 +294,6 @@
 
         observer.observe(root, { childList: true, subtree: true });
     }
-
-    fetchRoleWeights(); // Start fetching weights immediately
 
     const factionId = getFactionId();
     const cb = () => {
