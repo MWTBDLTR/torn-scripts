@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Page Attack Links
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      2.0
+// @version      2.1
 // @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -17,8 +17,10 @@
   const ROW_MARK = 'attackRowHandled';
   let scriptEnabled = true;
 
-  const rIC = window.requestIdleCallback || function (cb){ return setTimeout(() => cb({timeRemaining:()=>50}), 60); };
+  const rIC = window.requestIdleCallback || function (cb) { return setTimeout(() => cb({ timeRemaining: () => 50 }), 60); };
   const cIC = window.cancelIdleCallback || clearTimeout;
+
+  let idleHandle = null;
 
   const getAttackUrl = (userId) =>
     `https://www.torn.com/loader.php?sid=attack&user2ID=${userId}`;
@@ -35,7 +37,7 @@
     if (txt && txt.length <= 10 && txt.toLowerCase() === 'attack') return true;
     const title = (el.getAttribute?.('title') || '').toLowerCase();
     if (title === 'attack') return true;
-    const aria  = (el.getAttribute?.('aria-label') || '').toLowerCase();
+    const aria = (el.getAttribute?.('aria-label') || '').toLowerCase();
     return aria === 'attack';
   };
 
@@ -46,7 +48,7 @@
     return m ? m[1] : null;
   };
 
-  (function addStyles(){
+  (function addStyles() {
     const style = document.createElement('style');
     style.textContent = `
       .custom-attack-button {
@@ -78,11 +80,10 @@
     document.head.appendChild(style);
   })();
 
-  (function createToggle(){
+  (function createToggle() {
     const button = document.createElement('button');
     button.textContent = 'Attack Script: ON';
     button.className = 'attack-toggle-btn';
-    // react to trusted user clicks
     button.addEventListener('click', (e) => {
       if (!e.isTrusted || (e.button !== 0 && e.button !== undefined)) return;
       scriptEnabled = !scriptEnabled;
@@ -97,7 +98,7 @@
     }
   })();
 
-  function openAttackUrl(url){
+  function openAttackUrl(url) {
     if (!scriptEnabled || !url) return;
     if (OPEN_IN_NEW_TAB) {
       window.open(url, '_blank', 'noopener,noreferrer');
@@ -113,7 +114,7 @@
     if (e.button !== 0) return;
     e.preventDefault();
     openAttackUrl(t.getAttribute('data-attack-url'));
-  }, { capture:false, passive:false });
+  }, { capture: false, passive: false });
 
   document.addEventListener('keydown', (e) => {
     if (!e.isTrusted) return;
@@ -122,7 +123,7 @@
     if (!t) return;
     e.preventDefault();
     openAttackUrl(t.getAttribute('data-attack-url'));
-  }, { capture:false, passive:false });
+  }, { capture: false, passive: false });
 
   const processedRows = new WeakSet();
 
@@ -157,7 +158,7 @@
     if (!el.textContent.trim()) el.textContent = 'Attack';
   }
 
-  function processRow(row){
+  function processRow(row) {
     if (!row || !(row instanceof Element)) return;
     if (processedRows.has(row)) return;
 
@@ -175,20 +176,17 @@
     row.dataset[ROW_MARK] = '1';
   }
 
-  function normalizeAttackControlsForRows(rows){
+  function normalizeAttackControlsForRows(rows) {
     if (!scriptEnabled || rows.size === 0) return;
     for (const row of rows) processRow(row);
   }
 
-  function initialScan(){
+  function initialScan() {
     const rows = new Set(document.querySelectorAll('.enemy'));
     normalizeAttackControlsForRows(rows);
   }
 
-  let idleHandle = null;
-  const pendingRows = new Set();
-
-  function scheduleWork(){
+  function scheduleWork() {
     if (idleHandle) return;
     idleHandle = rIC(() => {
       idleHandle = null;
@@ -198,7 +196,7 @@
     });
   }
 
-  function collectRowsFromMutation(m){
+  function collectRowsFromMutation(m) {
     for (const n of m.addedNodes || []) {
       if (!(n instanceof Element)) continue;
       if (n.classList?.contains('enemy')) {
@@ -219,7 +217,7 @@
     scheduleWork();
   });
 
-  function startObserver(){
+  function startObserver() {
     if (!document.body) return;
     mo.observe(document.body, {
       childList: true,
@@ -240,5 +238,6 @@
     console.log("[War Attack Links] Initialization successful");
   }
 
+  // Reduced initial scan delay
   setTimeout(() => initialScan(), 800);
 })();
