@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn War Stuff Enhanced Optimized (TWSE-O)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.0
+// @version      0.0.1
 // @description  Travel status and hospital time sorted on war page, optimized and update resilient.
-// @author       MrChurch [3654415]
+// @author       MrChurch [3654415], xentac (original TWSE)
 // @license      MIT
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_addStyle

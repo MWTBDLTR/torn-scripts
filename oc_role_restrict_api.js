@@ -3,7 +3,7 @@
 // @namespace    https://https://github.com/MWTBDLTR/oc_role_restrictions
 // @version      0.1
 // @description  Role restrictions using API data, forked from xentac[3354782] who forked underko[3362751]. It's a party.
-// @author       MrChurch[3654415]
+// @author       MrChurch[3654415], underko[3362751], xentac[3354782]
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_xmlhttpRequest
 // @connect      raw.githubusercontent.com

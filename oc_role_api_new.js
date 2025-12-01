@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn OC Role Restrictions Enhanced
 // @namespace    https://xentac.github.io
-// @version      1.1
+// @version      2.0
 // @description  Highlight role restrictions and display role weights from TornProbability.
-// @author       underko[3362751], xentac[3354782], MrChurch[3654415]
+// @author       MrChurch[3654415], xentac[3354782], underko[3362751]
 // @match        https://www.torn.com/factions.php*
 // @grant        GM_xmlhttpRequest
 // @connect      raw.githubusercontent.com
