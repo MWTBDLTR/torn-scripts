@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Page Attack Links
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      2.1
+// @version      2.2
 // @description  Swap Attack URLs on war page and play nice with Torn War Stuff Enhanced Optimized
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -18,7 +18,6 @@
   let scriptEnabled = true;
 
   const rIC = window.requestIdleCallback || function (cb) { return setTimeout(() => cb({ timeRemaining: () => 50 }), 60); };
-  const cIC = window.cancelIdleCallback || clearTimeout;
 
   let idleHandle = null;
 
@@ -62,6 +61,10 @@
         user-select: none;
         margin-left: 8px;
         line-height: 1.6;
+        transition: background-color 0.2s;
+      }
+      .custom-attack-button:hover {
+        background-color: #0052ea !important;
       }
       .custom-attack-button.disabled,
       .custom-attack-button[aria-disabled="true"] {
@@ -129,15 +132,8 @@
 
   function makeClickable(el, url) {
     if (!el || !isVisible(el) || isDisabled(el)) return;
-    if (el.dataset[MARK] === '1') {
-      if (el.tagName === 'A') {
-        if (el.href !== url) el.href = url;
-      } else {
-        el.setAttribute('data-attack-url', url);
-      }
-      return;
-    }
 
+    // Always reset and reapply to handle moved/updated elements
     el.dataset[MARK] = '1';
 
     if (el.tagName === 'A') {
@@ -160,7 +156,6 @@
 
   function processRow(row) {
     if (!row || !(row instanceof Element)) return;
-    if (processedRows.has(row)) return;
 
     const userId = getUserIdForRow(row);
     if (!userId) return;
@@ -172,7 +167,8 @@
       if (!isAttackControl(el)) continue;
       makeClickable(el, url);
     }
-    processedRows.add(row);
+
+    // Mark row as processed but allow reprocessing if needed
     row.dataset[ROW_MARK] = '1';
   }
 
@@ -206,8 +202,25 @@
         if (row) pendingRows.add(row);
       }
     }
+
+    // Handle attribute changes that might affect attack buttons
     if (m.type === 'attributes') {
       const row = m.target.closest?.('.enemy');
+      if (row) {
+        pendingRows.add(row);
+        // Also check if the target itself is an attack button
+        if (isAttackControl(m.target)) {
+          const userId = getUserIdForRow(row);
+          if (userId) {
+            makeClickable(m.target, getAttackUrl(userId));
+          }
+        }
+      }
+    }
+
+    // Handle character data changes (text content changes)
+    if (m.type === 'characterData') {
+      const row = m.target.parentElement?.closest?.('.enemy');
       if (row) pendingRows.add(row);
     }
   }
@@ -223,7 +236,8 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['title', 'aria-label', 'class', 'style', 'aria-hidden', 'disabled', 'aria-disabled']
+      attributeFilter: ['title', 'aria-label', 'class', 'style', 'aria-hidden', 'disabled', 'aria-disabled'],
+      characterData: true
     });
   }
 
@@ -239,5 +253,13 @@
   }
 
   // Reduced initial scan delay
-  setTimeout(() => initialScan(), 800);
+  setTimeout(() => initialScan(), 500);
+
+  // Periodic rescan to catch any missed elements
+  setInterval(() => {
+    if (scriptEnabled) {
+      initialScan();
+    }
+  }, 5000);
+
 })();
