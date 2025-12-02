@@ -14,8 +14,10 @@
 (function () {
     "use strict";
 
-    // Set to true to enable logs for role/scenario validation and source tracking
-    const DEBUG = true;
+    // Set to true to enable logging for role/scenario validation and source tracking
+    const DEBUG = false;
+
+    console.log("[OCRoleRestrictions] Script initialized.");
 
     let ocRoleInfluence = {
         "Pet Project": [
@@ -159,13 +161,14 @@
     let supportedScenarios = [];
     let apiRoleNames = {};
 
+    // Updated: Now lowercases input to handle case mismatches due to API funkyness
     function normalizeKey(str) {
-        return str.replace(/[\s#]/g, '');
+        return str.replace(/[\s#]/g, '').toLowerCase();
     }
 
     // Called when API data arrives after page load
     function refreshCrimes() {
-        crimeData = {}; // Clear the cache to allow re-processing
+        crimeData = {};
         const allCrimes = document.querySelectorAll(".wrapper___U2Ap7");
         allCrimes.forEach((crimeNode) => {
             processCrime(crimeNode);
@@ -182,14 +185,16 @@
                     if (response.status === 200) {
                         try {
                             ocWeights = JSON.parse(response.responseText);
-                            console.log("[OCRoleRestrictions] Loaded Role Weights from API:", ocWeights);
-                            // Force UI update to override any defaults
+                            console.log("[OCRoleRestrictions] Loaded Role Weights from API.");
+                            if (DEBUG) {
+                                console.log("[OCRoleRestrictions] Role Weights Data:", ocWeights);
+                            }
                             refreshCrimes();
                         } catch (e) {
                             console.error("[OCRoleRestrictions] Error parsing weights from API:", e);
                         }
                     } else {
-                        console.error("[OCRoleRestrictions] Failed to load weights from API, status:", response.status);
+                        console.log("[OCRoleRestrictions] Failed to load weights from API, status:", response.status);
                     }
                 },
                 onerror: function (err) {
@@ -211,14 +216,17 @@
                     if (response.status === 200) {
                         try {
                             supportedScenarios = JSON.parse(response.responseText);
-                            console.log("[OCRoleRestrictions] Loaded Supported Scenarios from API:", supportedScenarios);
+                            console.log("[OCRoleRestrictions] Loaded Supported Scenarios from API.");
+                            if (DEBUG) {
+                                console.log("[OCRoleRestrictions] Supported Scenarios Data:", supportedScenarios);
+                            }
                             // Trigger refresh to apply scenario filtering if data arrives late
                             refreshCrimes();
                         } catch (e) {
                             console.error("[OCRoleRestrictions] Error parsing supported scenarios from API:", e);
                         }
                     } else {
-                        console.error("[OCRoleRestrictions] Failed to load supported scenarios from API, status:", response.status);
+                        console.log("[OCRoleRestrictions] Failed to load supported scenarios from API, status:", response.status);
                     }
                 },
                 onerror: function (err) {
@@ -240,14 +248,17 @@
                     if (response.status === 200) {
                         try {
                             apiRoleNames = JSON.parse(response.responseText);
-                            console.log("[OCRoleRestrictions] Loaded Role Names from API:", apiRoleNames);
+                            console.log("[OCRoleRestrictions] Loaded Role Names from API.");
+                            if (DEBUG) {
+                                console.log("[OCRoleRestrictions] Role Names Data:", apiRoleNames);
+                            }
                             // Trigger refresh to apply role filtering if data arrives late
                             refreshCrimes();
                         } catch (e) {
                             console.error("[OCRoleRestrictions] Error parsing role names from API:", e);
                         }
                     } else {
-                        console.error("[OCRoleRestrictions] Failed to load role names from API, status:", response.status);
+                        console.log("[OCRoleRestrictions] Failed to load role names from API, status:", response.status);
                     }
                 },
                 onerror: function (err) {
@@ -282,22 +293,41 @@
     }
 
     function classifyOcRoleInfluence(ocName, roleName) {
-        // Try API weights first
+        // Prepare keys (normalizeKey now returns lowercase to handle API funkyness)
         const cleanOcName = normalizeKey(ocName);
         const cleanRoleName = normalizeKey(roleName);
+        let weight = undefined;
 
-        if (ocWeights[cleanOcName] && ocWeights[cleanOcName][cleanRoleName] !== undefined) {
-            const weight = ocWeights[cleanOcName][cleanRoleName];
-            const lower = getLowerFromWeight(weight);
-            return { lower: lower, upper: lower + 10, source: "API (Calculated)" };
+        // Find the matching OC key in the API object
+        // Iterate the API keys to find one that matches our normalized Torn key
+        const apiOcKey = Object.keys(ocWeights).find(key => normalizeKey(key) === cleanOcName);
+
+        if (apiOcKey) {
+            const scenarioRoles = ocWeights[apiOcKey];
+            // Find the matching role key in the API object
+            const apiRoleKey = Object.keys(scenarioRoles).find(key => normalizeKey(key) === cleanRoleName);
+
+            if (apiRoleKey) {
+                weight = scenarioRoles[apiRoleKey];
+            } else if (DEBUG) {
+                console.log(`[OCRoleRestrictions] Role Lookup Failed: Role '${roleName}' (Norm: ${cleanRoleName}) not found in API scenario '${apiOcKey}'. Available:`, Object.keys(scenarioRoles));
+            }
+        } else if (DEBUG && Object.keys(ocWeights).length > 0) {
+            console.log(`[OCRoleRestrictions] Scenario Lookup Failed: '${ocName}' (Norm: ${cleanOcName}) not found in API.`);
         }
 
-        // Fallback to defaults if no weight found
+        // Return if weight found
+        if (weight !== undefined) {
+            const lower = getLowerFromWeight(weight);
+            return { lower: lower, upper: lower + 10, source: `API` };
+        }
+
+        // Fallback to defaults
         const ocInfo = ocRoleInfluence[ocName];
         const roleData = ocInfo?.find((r) => r.role === roleName);
         const lower = roleData ? roleData.lower : 70;
         let upper = lower + 10;
-        let source = roleData ? "Hardcoded Default" : "Generic Fallback";
+        let source = roleData ? "Default Value" : "Fallback Value";
 
         if (ocInfo) {
             const roleLowers = ocInfo
@@ -306,7 +336,6 @@
                 })
                 .sort();
 
-            // If our role is a low influence role, set the upper bound to the next highest lower bound if upper doesn't already pass it
             if (roleLowers[0] == lower && upper < roleLowers[1]) {
                 upper = roleLowers[1];
             }
@@ -328,7 +357,7 @@
                     }
                 });
         } catch (e) {
-            console.error("[OCRoleRestrictions] Couldn't extract faction id:", e);
+            console.log("[OCRoleRestrictions] Couldn't extract faction id:", e);
         }
 
         return factionId;
@@ -343,7 +372,7 @@
                     "Content-Type": "application/json",
                 },
                 onload: async function (response) {
-                    console.log(response);
+                    if (DEBUG) console.log(response);
                     if (response.status != 200) {
                         console.error(
                             "[OCRoleRestrictions] Bad response fetching faction restrictions:",
@@ -374,7 +403,7 @@
 
     function processCrime(wrapper) {
         const ocId = wrapper.getAttribute("data-oc-id");
-        // Ensure we process if the cache is empty or if we are forcing an update
+        // Process if the cache is empty, or if we are forcing an update
         if (!ocId || crimeData[ocId]) return;
 
         const titleEl = wrapper.querySelector("p.panelTitle___aoGuV");
@@ -382,14 +411,14 @@
 
         const crimeTitle = titleEl.textContent.trim();
 
-        // Verify if the scenario is supported by our API to prevent script breakage on new Torn updates.
-        // If API data is loaded and this scenario isn't in it, skip processing.
+        // Verify if the scenario is supported by the API to prevent script breakage on OC updates
+        // Using normalized keys for robust comparison
         if (supportedScenarios.length > 0) {
-            const isSupported = supportedScenarios.some(s => s.name === crimeTitle);
+            const cleanTitle = normalizeKey(crimeTitle);
+            const isSupported = supportedScenarios.some(s => normalizeKey(s.name) === cleanTitle);
+
             if (!isSupported) {
-                if (DEBUG) {
-                    console.log(`[OCRoleRestrictions] Ignoring unsupported scenario: ${crimeTitle}`);
-                }
+                console.log(`[OCRoleRestrictions] Skipped unsupported scenario: ${crimeTitle}`);
                 return;
             }
         }
@@ -400,13 +429,15 @@
         roleEls.forEach((roleEl) => {
             const roleName = roleEl.textContent.trim();
 
-            // Verify if the role is supported for this scenario by our API.
-            // If API data is loaded, check if this role exists in the known configuration for this crime.
+            // Verify if the role is supported for this scenario by the API
+            // Search for the API key that matches the current crime title
             if (Object.keys(apiRoleNames).length > 0) {
-                const knownRoles = apiRoleNames[crimeTitle];
-                // Check if we have role definitions for this crime.
-                // We normalize both the API roles and the website roles (removing spaces and #) to ensure "Looter #1" matches "Looter 1"
-                if (knownRoles) {
+                const cleanTitle = normalizeKey(crimeTitle);
+                const apiOcKey = Object.keys(apiRoleNames).find(key => normalizeKey(key) === cleanTitle);
+
+                if (apiOcKey) {
+                    const knownRoles = apiRoleNames[apiOcKey];
+                    // knownRoles is an object like {P1: "Looter 1", P2: "Looter 2"}
                     const normalizedKnownRoles = Object.values(knownRoles).map(r => normalizeKey(r));
                     const normalizedRoleName = normalizeKey(roleName);
 
@@ -430,7 +461,7 @@
                     ? classifyOcRoleInfluence(crimeTitle, roleName)
                     : { lower: 70, upper: 80, source: "None (No Chance Data)" };
 
-            // Log the source of the passrate used in debug mode
+            // Log the source of the passrate used
             if (DEBUG) {
                 console.log(`[OCRoleRestrictions] ${crimeTitle} - ${roleName}: Using ${evaluation.source}`);
             }
@@ -454,6 +485,7 @@
         });
 
         crimeData[ocId] = { id: ocId, title: crimeTitle, roles };
+        console.log(`[OCRoleRestrictions] Successfully processed: ${crimeTitle}`);
     }
 
     function setupMutationObserver(root) {
