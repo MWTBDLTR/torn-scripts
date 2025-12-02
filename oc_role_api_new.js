@@ -14,6 +14,9 @@
 (function () {
     "use strict";
 
+    // Set to true to enable logs for role/scenario validation and source tracking
+    const DEBUG = true;
+
     let ocRoleInfluence = {
         "Pet Project": [
             { role: "Kidnapper", lower: 70 },
@@ -153,6 +156,8 @@
     let crimeData = {};
     let previousTab = "none";
     let ocWeights = {};
+    let supportedScenarios = [];
+    let apiRoleNames = {};
 
     function normalizeKey(str) {
         return str.replace(/[\s#]/g, '');
@@ -177,14 +182,14 @@
                     if (response.status === 200) {
                         try {
                             ocWeights = JSON.parse(response.responseText);
-                            console.log("[OCRoleRestrictions] Loaded Role Weights:", ocWeights);
+                            console.log("[OCRoleRestrictions] Loaded Role Weights from API:", ocWeights);
                             // Force UI update to override any defaults
                             refreshCrimes();
                         } catch (e) {
-                            console.error("[OCRoleRestrictions] Error parsing weights:", e);
+                            console.error("[OCRoleRestrictions] Error parsing weights from API:", e);
                         }
                     } else {
-                        console.log("[OCRoleRestrictions] Failed to load weights, status:", response.status);
+                        console.error("[OCRoleRestrictions] Failed to load weights from API, status:", response.status);
                     }
                 },
                 onerror: function (err) {
@@ -193,6 +198,64 @@
             });
         } catch (e) {
             console.error("[OCRoleRestrictions] GM_xmlhttpRequest failed:", e);
+        }
+    }
+
+    function fetchSupportedScenarios() {
+        try {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: "https://tornprobability.com:3000/api/GetSupportedScenarios",
+                headers: { "Content-Type": "application/json" },
+                onload: function (response) {
+                    if (response.status === 200) {
+                        try {
+                            supportedScenarios = JSON.parse(response.responseText);
+                            console.log("[OCRoleRestrictions] Loaded Supported Scenarios from API:", supportedScenarios);
+                            // Trigger refresh to apply scenario filtering if data arrives late
+                            refreshCrimes();
+                        } catch (e) {
+                            console.error("[OCRoleRestrictions] Error parsing supported scenarios from API:", e);
+                        }
+                    } else {
+                        console.error("[OCRoleRestrictions] Failed to load supported scenarios from API, status:", response.status);
+                    }
+                },
+                onerror: function (err) {
+                    console.error("[OCRoleRestrictions] Network error fetching supported scenarios:", err);
+                }
+            });
+        } catch (e) {
+            console.error("[OCRoleRestrictions] GM_xmlhttpRequest failed for scenarios:", e);
+        }
+    }
+
+    function fetchRoleNames() {
+        try {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: "https://tornprobability.com:3000/api/GetRoleNames",
+                headers: { "Content-Type": "application/json" },
+                onload: function (response) {
+                    if (response.status === 200) {
+                        try {
+                            apiRoleNames = JSON.parse(response.responseText);
+                            console.log("[OCRoleRestrictions] Loaded Role Names from API:", apiRoleNames);
+                            // Trigger refresh to apply role filtering if data arrives late
+                            refreshCrimes();
+                        } catch (e) {
+                            console.error("[OCRoleRestrictions] Error parsing role names from API:", e);
+                        }
+                    } else {
+                        console.error("[OCRoleRestrictions] Failed to load role names from API, status:", response.status);
+                    }
+                },
+                onerror: function (err) {
+                    console.error("[OCRoleRestrictions] Network error fetching role names:", err);
+                }
+            });
+        } catch (e) {
+            console.error("[OCRoleRestrictions] GM_xmlhttpRequest failed for role names:", e);
         }
     }
 
@@ -226,7 +289,7 @@
         if (ocWeights[cleanOcName] && ocWeights[cleanOcName][cleanRoleName] !== undefined) {
             const weight = ocWeights[cleanOcName][cleanRoleName];
             const lower = getLowerFromWeight(weight);
-            return { lower: lower, upper: lower + 10 };
+            return { lower: lower, upper: lower + 10, source: "API (Calculated)" };
         }
 
         // Fallback to defaults if no weight found
@@ -234,6 +297,7 @@
         const roleData = ocInfo?.find((r) => r.role === roleName);
         const lower = roleData ? roleData.lower : 70;
         let upper = lower + 10;
+        let source = roleData ? "Hardcoded Default" : "Generic Fallback";
 
         if (ocInfo) {
             const roleLowers = ocInfo
@@ -248,7 +312,7 @@
             }
         }
 
-        return { lower, upper };
+        return { lower, upper, source };
     }
 
     function getFactionId() {
@@ -264,7 +328,7 @@
                     }
                 });
         } catch (e) {
-            console.log("[OCRoleRestrictions] Couldn't extract faction id:", e);
+            console.error("[OCRoleRestrictions] Couldn't extract faction id:", e);
         }
 
         return factionId;
@@ -317,11 +381,44 @@
         if (!titleEl) return;
 
         const crimeTitle = titleEl.textContent.trim();
+
+        // Verify if the scenario is supported by our API to prevent script breakage on new Torn updates.
+        // If API data is loaded and this scenario isn't in it, skip processing.
+        if (supportedScenarios.length > 0) {
+            const isSupported = supportedScenarios.some(s => s.name === crimeTitle);
+            if (!isSupported) {
+                if (DEBUG) {
+                    console.log(`[OCRoleRestrictions] Ignoring unsupported scenario: ${crimeTitle}`);
+                }
+                return;
+            }
+        }
+
         const roles = [];
 
         const roleEls = wrapper.querySelectorAll(".title___UqFNy");
         roleEls.forEach((roleEl) => {
             const roleName = roleEl.textContent.trim();
+
+            // Verify if the role is supported for this scenario by our API.
+            // If API data is loaded, check if this role exists in the known configuration for this crime.
+            if (Object.keys(apiRoleNames).length > 0) {
+                const knownRoles = apiRoleNames[crimeTitle];
+                // Check if we have role definitions for this crime.
+                // We normalize both the API roles and the website roles (removing spaces and #) to ensure "Looter #1" matches "Looter 1"
+                if (knownRoles) {
+                    const normalizedKnownRoles = Object.values(knownRoles).map(r => normalizeKey(r));
+                    const normalizedRoleName = normalizeKey(roleName);
+
+                    if (!normalizedKnownRoles.includes(normalizedRoleName)) {
+                        if (DEBUG) {
+                            console.log(`[OCRoleRestrictions] Ignoring unsupported role: ${roleName} in scenario: ${crimeTitle}`);
+                        }
+                        return;
+                    }
+                }
+            }
+
             const successEl = roleEl.nextElementSibling;
             const chance = successEl
                 ? parseInt(successEl.textContent.trim(), 10)
@@ -331,7 +428,13 @@
             const evaluation =
                 chance !== null
                     ? classifyOcRoleInfluence(crimeTitle, roleName)
-                    : { lower: 70, upper: 80 };
+                    : { lower: 70, upper: 80, source: "None (No Chance Data)" };
+
+            // Log the source of the passrate used in debug mode
+            if (DEBUG) {
+                console.log(`[OCRoleRestrictions] ${crimeTitle} - ${roleName}: Using ${evaluation.source}`);
+            }
+
             roles.push({ role: roleName, chance, evaluation });
 
             if (successEl && evaluation.lower) {
@@ -376,6 +479,8 @@
     }
 
     fetchRoleWeights(); // Start fetching weights immediately
+    fetchSupportedScenarios(); // Fetch supported scenarios
+    fetchRoleNames(); // Fetch role names
 
     const factionId = getFactionId();
     const cb = () => {
@@ -401,30 +506,6 @@
     // -- @homepage https://github.com/CoeJoder/waitForKeyElements.js
     // -- @source https://raw.githubusercontent.com/CoeJoder/waitForKeyElements.js/master/waitForKeyElements.js
 
-    /**
-     * A utility function for userscripts that detects and handles AJAXed content.
-     *
-     * @example
-     * waitForKeyElements("div.comments", (element) => {
-     *   element.innerHTML = "This text inserted by waitForKeyElements().";
-     * });
-     *
-     * waitForKeyElements(() => {
-     *   const iframe = document.querySelector('iframe');
-     *   if (iframe) {
-     *     const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-     *     return iframeDoc.querySelectorAll("div.comments");
-     *   }
-     *   return null;
-     * }, callbackFunc);
-     *
-     * @param {(string|function)} selectorOrFunction - The selector string or function.
-     * @param {function}          callback           - The callback function; takes a single DOM element as parameter.
-     *                                                 If returns true, element will be processed again on subsequent iterations.
-     * @param {boolean}           [waitOnce=true]    - Whether to stop after the first elements are found.
-     * @param {number}            [interval=300]     - The time (ms) to wait between iterations.
-     * @param {number}            [maxIntervals=-1]  - The max number of intervals to run (negative number for unlimited).
-     */
     function waitForKeyElements(
         selectorOrFunction,
         callback,
