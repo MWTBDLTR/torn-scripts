@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.1.8
+// @version      1.2
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -506,8 +506,7 @@
             timeout = setTimeout(() => {
                 AttackController.updateVisuals();
                 if (AttackController.isInHospital()) {
-                    // adds a visual indicator
-                    document.body.style.border = "5px solid red";
+                    // visual indicator line removed here
                     const btn = document.querySelector(SELECTORS.primaryButton);
                     if (btn) UI.addHint(btn, "TARGET HOSPITALIZED", true);
                 }
