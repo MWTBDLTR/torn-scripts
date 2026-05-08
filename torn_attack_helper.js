@@ -5,7 +5,7 @@
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
-// @match        https://www.torn.com/loader.php*
+// @match        https://www.torn.com/page.php?sid=attack*
 // @run-at       document-idle
 // @grant        GM.getValue
 // @grant        GM.setValue
