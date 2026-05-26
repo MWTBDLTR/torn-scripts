@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.4
+// @version      1.5
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -37,12 +37,8 @@
             6: '#weapon_kick',
         },
 
-        mainContainer: '#mainContainer, #root, main, [role="main"], .content',
-
-        // buttons that appear when the fight is over (leave, mug, hospitalize)
-        actionButtons: {
-            group3: 'button.torn-btn:nth-child(3), button[class^="btn___"]:nth-child(3)'
-        }
+        // Narrowed down to the specific react roots where the fight happens
+        mainContainer: '#mainContainer, #root, main, [role="main"], .content'
     };
 
     // handles saving and loading settings, checking both tamper/grease monkey and local storage
@@ -102,8 +98,9 @@
         },
 
         getKeyMapping(code) {
-            // checks if the fight is finished to switch key logic
-            const isFightOver = !!document.querySelector(SELECTORS.actionButtons.group3);
+            // checks if the fight is finished to switch key logic using the new robust check
+            const dialogs = AttackController.getOverrideButtons();
+            const isFightOver = !!(dialogs && dialogs.b3);
 
             if (isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
@@ -231,16 +228,27 @@
         lastActionTime: 0,
 
         getOverrideButtons() {
-            const b3 = document.querySelector(SELECTORS.actionButtons.group3);
-            if (!b3) return null;
+            const container = document.querySelector(SELECTORS.mainContainer);
+            if (!container) return null;
 
-            let b2 = b3.previousElementSibling;
-            while (b2 && b2.tagName !== 'BUTTON') b2 = b2.previousElementSibling;
+            // Grab all buttons in the main attack container
+            const allButtons = Array.from(container.querySelectorAll('button'));
+            let b1 = null, b2 = null, b3 = null;
 
-            let b1 = b2 ? b2.previousElementSibling : null;
-            while (b1 && b1.tagName !== 'BUTTON') b1 = b1.previousElementSibling;
+            // Filter purely by text content to immune the script against sibling/wrapper injection
+            for (const btn of allButtons) {
+                const text = (btn.textContent || '').toLowerCase().trim();
+                if (text === 'leave') b1 = btn;
+                else if (text === 'mug') b2 = btn;
+                else if (text === 'hospitalize') b3 = btn;
+            }
 
-            return { b1, b2, b3 };
+            // Return the group if we found at least one of the primary end-game actions
+            if (b1 || b2 || b3) {
+                return { b1, b2, b3 };
+            }
+
+            return null;
         },
 
         isTyping(target) {
@@ -251,12 +259,13 @@
         },
 
         isInHospital() {
-            const bodyText = document.body.innerText || '';
+            // textContent avoids forcing a CSS layout calculation/reflow
+            const bodyText = document.body.textContent || '';
             if (/this person is currently in hospital and cannot be attacked/i.test(bodyText)) return true;
 
             const container = document.querySelector(SELECTORS.mainContainer);
             if (container) {
-                const text = container.innerText.toLowerCase();
+                const text = container.textContent.toLowerCase();
                 // scans the page text to see if the target is already hospitalized
                 return /\b(target|opponent|person).{0,30}\b(hospital)/.test(text);
             }
@@ -512,7 +521,10 @@
             }, CONSTANTS.DEBOUNCE_TIME);
         });
 
-        observer.observe(document.body, {
+        // OPTIMIZATION: Target the attack container specifically, fallback to body if missing
+        const targetNode = document.querySelector(SELECTORS.mainContainer) || document.body;
+
+        observer.observe(targetNode, {
             childList: true,
             subtree: true,
             attributes: true,
@@ -520,7 +532,8 @@
         });
 
         AttackController.updateVisuals();
-        console.log(`[Torn Attack Page Helper] v${GM.log.script.version} Loaded`);
+        // Updated to use optional chaining for GM object safety
+        console.log(`[Torn Attack Page Helper] v${typeof GM !== 'undefined' ? GM.info?.script?.version : '1.4'} Loaded`);
     }
 
     init();
