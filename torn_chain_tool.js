@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Chain Tools: Live ETA + History (V2-only)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.0.0
+// @version      1.1
 // @description  Live chain ETAs, history browser with filters/sort/paging/CSV, chain report viewer, and per-hit timeline chart (req fac api access). Caches to IndexedDB. V2 endpoints only. No shenanigans.
 // @author       MrChurch
 // @match        https://www.torn.com/war.php*
@@ -222,31 +222,37 @@
   document.body.appendChild(root);
 
   (function makeDraggable(handleId, wrap) {
-    const handle = root.querySelector("#" + handleId);
-    let dragging = false,
-      sx = 0,
-      sy = 0,
-      ox = 0,
-      oy = 0;
-    handle.addEventListener("mousedown", (e) => {
-      dragging = true;
-      sx = e.clientX;
-      sy = e.clientY;
-      const r = wrap.getBoundingClientRect();
-      ox = r.left;
-      oy = r.top;
-      e.preventDefault();
-    });
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - sx,
-        dy = e.clientY - sy;
-      wrap.style.left = Math.max(0, ox + dx) + "px";
-      wrap.style.top = Math.max(0, oy + dy) + "px";
-      wrap.style.right = "auto";
-      wrap.style.position = "fixed";
-    });
-    window.addEventListener("mouseup", () => (dragging = false));
+  const handle = root.querySelector("#" + handleId);
+  let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  let ticking = false; // Add animation frame lock
+
+  handle.addEventListener("mousedown", (e) => {
+    dragging = true;
+    sx = e.clientX;
+    sy = e.clientY;
+    const r = wrap.getBoundingClientRect();
+    ox = r.left;
+    oy = r.top;
+    e.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    
+    if (!ticking) {
+      window.requestAnimationFrame(() => {
+        wrap.style.left = Math.max(0, ox + dx) + "px";
+        wrap.style.top = Math.max(0, oy + dy) + "px";
+        wrap.style.right = "auto";
+        wrap.style.position = "fixed";
+        ticking = false;
+      });
+      ticking = true;
+    }
+  });
+
+  window.addEventListener("mouseup", () => (dragging = false));
   })("tceDrag", root);
 
   // Refs
@@ -351,6 +357,15 @@
     if (histPage > 1) {
       histPage--;
       renderHistoryTable();
+    }
+  });
+  refs.histTableBody.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr");
+    if (tr && tr.hasAttribute("data-id")) {
+      const id = parseInt(tr.getAttribute("data-id"), 10);
+      const start = parseInt(tr.getAttribute("data-start"), 10);
+      const end = parseInt(tr.getAttribute("data-end"), 10);
+      openChainDetail(id, start, end);
     }
   });
   refs.histNext.addEventListener("click", () => {
@@ -471,21 +486,28 @@
       })
       .join("");
   }
+let isFetchingLive = false; // Add state flag
+
   function tickNow() {
-    if (!ensureKey()) return;
-    toast("updating…");
-    fetchChain()
-      .then((data) => {
-        toast("live");
-        const { chainCurrent, timeoutSec } = data;
-        HISTORY.push({ t: Date.now(), chain: chainCurrent });
-        const rate = computeRate();
-        setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
-      })
-      .catch((err) => {
-        console.error(err);
-        toast(err.message || "error");
-      });
+  if (!ensureKey() || isFetchingLive) return; // Prevent overlap
+  
+  isFetchingLive = true;
+  toast("updating…");
+  fetchChain()
+    .then((data) => {
+      toast("live");
+      const { chainCurrent, timeoutSec } = data;
+      HISTORY.push({ t: Date.now(), chain: chainCurrent });
+      const rate = computeRate();
+      setLiveUI({ chainCurrent, timeoutSec, rateHPM: rate });
+    })
+    .catch((err) => {
+      console.error(err);
+      toast(err.message || "error");
+    })
+    .finally(() => {
+      isFetchingLive = false; // Release lock
+    });
   }
   function startPolling() {
     clearInterval(pollTimer);
@@ -566,14 +588,6 @@
         </tr>`;
       })
       .join("");
-    refs.histTableBody.querySelectorAll("tr").forEach((tr) => {
-      tr.addEventListener("click", () => {
-        const id = parseInt(tr.getAttribute("data-id"), 10);
-        const start = parseInt(tr.getAttribute("data-start"), 10);
-        const end = parseInt(tr.getAttribute("data-end"), 10);
-        openChainDetail(id, start, end);
-      });
-    });
     refs.histInfo.textContent = total ? `${total.toLocaleString()} chains` : "No results";
     refs.histPageLabel.textContent = `Page ${histPage}/${totalPages}`;
   }
@@ -1330,63 +1344,72 @@
     return s.size;
   }
 
-  async function fetchAttacksWindow(fromSec, toSec) {
-    const url = buildFactionAttacksUrl(fromSec, toSec);
-    // NOTE: The line to fix the filtering, mentioned above, is included here.
-    const keepResults = new Set(["leave", "mugged", "hospitalized", "attacked"]);
+async function fetchAttacksWindow(fromSec, toSec, retryCount = 0) { // Add retry parameter
+  const url = buildFactionAttacksUrl(fromSec, toSec);
+  const keepResults = new Set(["leave", "mugged", "hospitalized", "attacked"]);
 
-    try {
-      const payload = await httpGetJSON(url);
-      const batch = Array.isArray(payload?.attacks) ? payload.attacks : [];
+  try {
+    const payload = await httpGetJSON(url);
+    const batch = Array.isArray(payload?.attacks) ? payload.attacks : [];
 
-      // Return only the attacks that are valid for chaining
-      return batch.filter(r => {
-        const res = String(r.result || "").toLowerCase();
-        return keepResults.has(res);
-      });
+    return batch.filter(r => {
+      const res = String(r.result || "").toLowerCase();
+      return keepResults.has(res);
+    });
 
-    } catch (e) {
-      const msg = String(e?.message || e);
-      if (msg.includes("rate limit") || msg.includes("429")) {
-        // If we get rate limited, wait 5 seconds and retry this same chunk
-        await new Promise((r) => setTimeout(r, 5000));
-        return fetchAttacksWindow(fromSec, toSec);
-      }
-      // For any other error, let the calling function handle it
-      throw e;
+  } catch (e) {
+    const msg = String(e?.message || e);
+    // Add retryCount cap of 3
+    if ((msg.includes("rate limit") || msg.includes("429")) && retryCount < 3) {
+      await new Promise((r) => setTimeout(r, 5000));
+      return fetchAttacksWindow(fromSec, toSec, retryCount + 1);
     }
+    throw e;
   }
+}
 
   async function fetchAttacksWindowChunked(fromSec, toSec, expectedLen = null) {
-    const CHUNK = 5 * 60; // 5 minutes
-    const byCode = new Map();
-    let start = fromSec;
+  const byCode = new Map();
+  let currentStart = fromSec;
 
-    while (start <= toSec) {
-      const end = Math.min(start + CHUNK - 1, toSec);
-      const batch = await fetchAttacksWindow(start, end);
+  while (currentStart <= toSec) {
+    // Request from currentStart up to toSec. The API will enforce limit=100.
+    const batch = await fetchAttacksWindow(currentStart, toSec);
 
-      for (const r of batch) {
-        const code = String(r.code ?? r.attack_id ?? r.id ?? "");
-        if (code && !byCode.has(code)) byCode.set(code, r);
-      }
+    if (!batch || batch.length === 0) break;
 
-      // Early exit logic if we've found the whole chain
-      if (expectedLen) {
-        const links = [...byCode.values()].map((r) => Number(r.chain ?? 0)).filter((n) => n > 0);
-        if (links.length > 0 && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
-          break;
-        }
-      }
-
-      start = end + 1;
-
-      // Gentle pacing between chunks to avoid rate limits
-      await new Promise(r => setTimeout(r, 800));
+    let lastTs = currentStart;
+    for (const r of batch) {
+      const code = String(r.code ?? r.attack_id ?? r.id ?? "");
+      if (code && !byCode.has(code)) byCode.set(code, r);
+      
+      const ended = Number(r.ended || r.started);
+      if (ended > lastTs) lastTs = ended;
     }
 
-    return [...byCode.values()].sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
+    // Early exit logic if the whole chain is found
+    if (expectedLen) {
+      const links = [...byCode.values()].map((r) => Number(r.chain ?? 0)).filter((n) => n > 0);
+      if (links.length > 0 && Math.min(...links) === 1 && Math.max(...links) >= expectedLen) {
+        break;
+      }
+    }
+
+    // If less than the limit is returned, all records for the time window are fetched.
+    if (batch.length < 100) {
+      break; 
+    }
+
+    // Hit the limit. The next batch starts from the timestamp of the last attack.
+    // The `byCode` Map naturally deduplicates hits that happened in the exact same second.
+    currentStart = lastTs;
+
+    // Gentle pacing to avoid rate limits
+    await new Promise(r => setTimeout(r, 800));
   }
+
+  return [...byCode.values()].sort((a, b) => (a.ended ?? 0) - (b.ended ?? 0));
+}
 
   let OUR_FACTION_ID = null;
 
