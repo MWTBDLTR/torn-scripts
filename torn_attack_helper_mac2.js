@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Attack Page Helper (Mac)
+// @name         Torn Attack Page Helper (MacBook)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
 // @version      1.5
-// @description  Mac-optimized shortcuts (arrows + J/K/L) for attacks to enhance accessibility
+// @description  Customizable shortcuts for attacks to enhance accessibility, using keys J, K, L and arrow keys.
 // @author       MrChurch [3654415]
 // @license      MIT
 // @match        https://www.torn.com/page.php?sid=attack*
@@ -29,15 +29,14 @@
         primaryButton: '[data-test="attack-button"], button.torn-btn:first-child, button[class^="btn___"]:first-child',
 
         slots: {
-            1: '#weapon_main',
-            2: '#weapon_second',
-            3: '#weapon_melee',
-            4: '#weapon_temp',
-            5: '#weapon_fists',
-            6: '#weapon_kick',
+            '1': '#weapon_main',    // Arrow Up assigned here
+            '2': '#weapon_second',  // Arrow Down assigned here
+            '3': '#weapon_melee',   // Arrow Left assigned here
+            '4': '#weapon_temp',    // Arrow Right assigned here
+            '5': '#weapon_fists',
+            '6': '#weapon_kick',
         },
 
-        // Narrowed down to the specific react roots where the fight happens
         mainContainer: '#mainContainer, #root, main, [role="main"], .content'
     };
 
@@ -70,16 +69,19 @@
                 '2': ['ArrowDown'],
                 '3': ['ArrowLeft'],
                 '4': ['ArrowRight'],
-                '5': ['Comma'],
-                '6': ['Period'],
+                '5': ['Comma'], 
+                '6': ['Period'], 
             },
-            decimalTarget: 'punch', // 'punch' (5) or 'kick' (6)
+            decimalTarget: 'punch',
             dialogKeys: {
-                '1': ['KeyJ'], // leave
-                '2': ['KeyK'], // mug
-                '3': ['KeyL'], // hospitalize
+                // Leave: J
+                '1': ['KeyJ'], 
+                // Mug: K
+                '2': ['KeyK'], 
+                // Hospitalize: L
+                '3': ['KeyL'], 
             },
-            continueAction: 'default', // 'default', 'close', 'openFixed'
+            continueAction: 'default',
             fixedTargetId: CONSTANTS.DEFAULT_TARGET
         },
 
@@ -104,6 +106,7 @@
 
             if (isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
+                    // Use standard KeyCode checking (e.g., 'KeyJ')
                     if (keys.includes(code)) return { type: 'dialog', index: Number(idx) };
                 }
             }
@@ -113,6 +116,17 @@
                 if (keys.includes(code)) return { type: 'weapon', slot: Number(slot) };
             }
 
+            // special handling for the decimal key since it acts as a toggle
+            if (['period', 'comma'].includes(code)) { // Use standard event codes here
+                const isAlreadyMapped = Object.values(this.data.weaponSlotKeys).some(k => k.toLowerCase().includes('period') || k.toLowerCase().includes('comma'));
+                if (!isAlreadyMapped) {
+                    return {
+                        type: 'weapon',
+                        slot: this.data.decimalTarget === 'kick' ? 6 : 5
+                    };
+                }
+            }
+
             // just in case we aren't at the end screen but need dialog keys
             if (!isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
@@ -120,11 +134,7 @@
                 }
             }
 
-            // default behavior for arrow keys
-            if (code.startsWith('Arrow')) {
-                return { type: 'primary_fallback' };
-            }
-
+            // default behavior for any other key code not mapped above
             return null;
         }
     };
@@ -208,21 +218,23 @@
 
         formatKeys(keys) {
             if (!keys || keys.length === 0) return '';
-            return keys.map(k => {
-                // Format arrow keys
-                if (k === 'ArrowUp') return '↑';
-                if (k === 'ArrowDown') return '↓';
-                if (k === 'ArrowLeft') return '←';
-                if (k === 'ArrowRight') return '→';
-                // Format letter keys
-                if (k === 'KeyJ') return 'J';
-                if (k === 'KeyK') return 'K';
-                if (k === 'KeyL') return 'L';
-                // Format punctuation
-                if (k === 'Comma') return ',';
-                if (k === 'Period') return '.';
-                return k.replace('Numpad', '').replace('Decimal', '.').replace('Comma', ',');
-            }).join('/');
+            // Converts event codes (e.g., ArrowUp, Comma, KeyJ) to display characters or readable names
+            const formatKey = k => {
+                switch (k) {
+                    case 'Comma': return ',';
+                    case 'Period': return '.';
+                    case 'ArrowUp': return '↑';
+                    case 'ArrowDown': return '↓';
+                    case 'ArrowLeft': return '←';
+                    case 'ArrowRight': return '→';
+                    // Handle single key press letters/symbols
+                    default: 
+                        if (k.length === 1 && k.match(/[a-z]/i)) return k.toUpperCase();
+                        return k; // Fallback for generic codes
+                }
+            };
+
+            return keys.map(formatKey).join('/');
         }
     };
 
@@ -236,7 +248,7 @@
 
             // Grab all buttons in the main attack container
             const allButtons = Array.from(container.querySelectorAll('button'));
-            let b1 = null, b2 = null, b3 = null;
+            let b1 = null, b2 = null, b3 = null; // leave, mug, hospitalize
 
             // Filter purely by text content to immune the script against sibling/wrapper injection
             for (const btn of allButtons) {
@@ -262,14 +274,12 @@
         },
 
         isInHospital() {
-            // textContent avoids forcing a CSS layout calculation/reflow
             const bodyText = document.body.textContent || '';
             if (/this person is currently in hospital and cannot be attacked/i.test(bodyText)) return true;
 
             const container = document.querySelector(SELECTORS.mainContainer);
             if (container) {
                 const text = container.textContent.toLowerCase();
-                // scans the page text to see if the target is already hospitalized
                 return /\b(target|opponent|person).{0,30}\b(hospital)/.test(text);
             }
             return false;
@@ -278,7 +288,6 @@
         handleContinue() {
             const { continueAction, fixedTargetId } = Config.data;
 
-            // decides what to do when clicking continue (close window, load next target, regular 'continue' behavior)
             if (continueAction === 'close') {
                 window.close();
                 return true;
@@ -296,10 +305,10 @@
 
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3) {
-                // passes the dialog type so the hint appears outside the dialog buttons
-                UI.addHint(dialogs.b1, UI.formatKeys(Config.data.dialogKeys['1']), false, 'dialog');
-                UI.addHint(dialogs.b2, UI.formatKeys(Config.data.dialogKeys['2']), false, 'dialog');
-                UI.addHint(dialogs.b3, UI.formatKeys(Config.data.dialogKeys['3']), false, 'dialog');
+                // Passes the dialog type so the hint appears outside the dialog buttons
+                UI.addHint(dialogs.b1, UI.formatKeys(Config.data.dialogKeys['1']), false, 'dialog'); // Leave (J)
+                UI.addHint(dialogs.b2, UI.formatKeys(Config.data.dialogKeys['2']), false, 'dialog'); // Mug (K)
+                UI.addHint(dialogs.b3, UI.formatKeys(Config.data.dialogKeys['3']), false, 'dialog'); // Hospitalize (L)
                 return;
             }
 
@@ -312,28 +321,40 @@
                     if (Config.data.continueAction === 'close') hintText += ' \u2192 Close';
                     else if (Config.data.continueAction === 'openFixed') hintText += ' \u2192 Follow-up';
                 }
-                // primary buttons usually look best with standard slot styling
                 UI.addHint(primary, hintText, false, 'slot');
             }
 
+            // Iterate through the 6 slots for visual hints
             for (let i = 1; i <= 6; i++) {
                 const el = document.querySelector(SELECTORS.slots[i]);
                 if (!el) continue;
 
                 let keys = Config.data.weaponSlotKeys[String(i)] || [];
 
+                // Special handling for Fists/Kick (5 & 6) to ensure '.' is included if comma is used
+                if (Config.data.decimalTarget === 'kick' && i === 6) {
+                    const decimalMappedElsewhere = Object.values(Config.data.weaponSlotKeys).some(k => k.includes('Period'));
+                    if (!decimalMappedElsewhere || !keys.includes('Period')) keys.push('Period');
+                } else if (Config.data.decimalTarget === 'punch' && i === 5) {
+                     const decimalMappedElsewhere = Object.values(Config.data.weaponSlotKeys).some(k => k.includes('Period'));
+                    if (!decimalMappedElsewhere || !keys.includes('Period')) keys.push('Period');
+                }
+
                 if (keys.length) UI.addHint(el, UI.formatKeys(keys), false, 'slot');
             }
         },
 
         handleInput(e) {
+            // We use e.code which reports the physical key location (KeyJ, ArrowUp, etc.)
+            let code = e.code; 
+            
             if (this.isTyping(e.target)) return;
 
             // checks for cooldowns to prevent double clicks
             const now = Date.now();
             if (now - this.lastActionTime < CONSTANTS.KEY_COOLDOWN) return;
 
-            let mapping = Config.getKeyMapping(e.code);
+            let mapping = Config.getKeyMapping(code);
             if (!mapping) return;
 
             // checks if the target is in hospital before trying to attack
@@ -343,12 +364,10 @@
                 return;
             }
 
-            // detects if we are in the start or continue phase of the fight
             const primary = document.querySelector(SELECTORS.primaryButton);
             const primaryText = primary ? (primary.innerText || '').toLowerCase() : '';
 
-            // if text is "start" or "continue", we override everything to click this button
-            // we do not override if the text is "attack", so we can still switch weapons during the fight
+            // isPriorityPhase checks for START/CONTINUE buttons
             const isPriorityPhase = primary && (primaryText.includes('start') || primaryText.includes('continue'));
 
             let actionSuccess = false;
@@ -356,6 +375,7 @@
             // handles the end of fight buttons (leave, mug, hosp)
             const dialogs = this.getOverrideButtons();
             if (dialogs && dialogs.b3 && mapping.type === 'dialog') {
+                // Index 1 maps to J/Leave, Index 2 maps to K/Mug, Index 3 maps to L/Hosp
                 const btn = mapping.index === 1 ? dialogs.b1 : mapping.index === 2 ? dialogs.b2 : dialogs.b3;
                 if (btn) {
                     btn.click();
@@ -414,30 +434,34 @@
         menuIds: [],
 
         promptKey(label, currentKeys) {
-            const str = prompt(
-                `Enter keys for "${label}" separated by space/comma.\nUse arrow names (Up/Down/Left/Right) for arrow keys.\n\nCurrent: ${currentKeys.join(' ')}`
-            );
+            let promptText = `Enter keys for "${label}" separated by space/comma.\nUse '.' for Period.\n\nCurrent Keys (Example: J K L):\n${currentKeys.map(k => k.toUpperCase()).join(', ')}\nEnter new codes (e.g., KeyJ, ArrowUp).`;
+            
+            const str = prompt(promptText);
             if (str === null) return null;
 
             return str.split(/[\s,]+/)
                 .map(s => s.trim())
                 .filter(Boolean)
                 .map(s => {
-                    // Handle arrow keys
-                    if (s.toLowerCase() === 'up') return 'ArrowUp';
-                    if (s.toLowerCase() === 'down') return 'ArrowDown';
-                    if (s.toLowerCase() === 'left') return 'ArrowLeft';
-                    if (s.toLowerCase() === 'right') return 'ArrowRight';
-                    // Handle letter keys
-                    if (/^[a-z]$/i.test(s)) return `Key${s.toUpperCase()}`;
-                    // Handle punctuation
-                    if (s === '.') return 'Period';
-                    if (s === ',') return 'Comma';
-                    // Handle existing format
-                    if (s.startsWith('Arrow')) return s;
-                    if (s.startsWith('Key')) return s;
-                    if (s === 'Comma' || s === 'Period') return s;
-                    return null;
+                    // Convert single-character letters to their KeyCode equivalent if they are J, K, L etc.
+                    if (s.length === 1 && s.toLowerCase() === 'j') return 'KeyJ';
+                    if (s.length === 1 && s.toLowerCase() === 'k') return 'KeyK';
+                    if (s.length === 1 && s.toLowerCase() === 'l') return 'KeyL';
+                     // Standard single-character KeyCode conversion for other letters/symbols is complex, best to rely on the user inputting e.code names directly in future use cases.
+
+                    // Handle common special key inputs (Comma, Period)
+                    if (s === '.') return 'period';
+                    if (s === ',') return 'comma';
+                    
+                    // If it starts with "Key", treat it as is (e.g., KeyA, KeyJ)
+                    if (s.toLowerCase().startsWith('key')) return s; 
+
+                    // Handle Arrows and standard numbers/words passed in prompt:
+                    const normalized = s.trim();
+                     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(normalized)) return normalized;
+                    
+                    // Fallback: Assume it's a numeric KeyCode if no match found
+                    return normalized; 
                 })
                 .filter(Boolean);
         },
@@ -446,7 +470,20 @@
             this.menuIds.forEach(id => GM_unregisterMenuCommand(id));
             this.menuIds = [];
 
-            // creates menu items for changing keys and settings
+            ['Leave (J)', 'Mug (K)', 'Hosp (L)'].forEach((label, idx) => {
+                const mapIdx = idx + 1;
+                const id = GM_registerMenuCommand(`Edit ${label} Keys`, async () => {
+                    // Uses the user-friendly labels and indices
+                    const newKeys = this.promptKey(label, Config.data.dialogKeys[mapIdx] || []);
+                    if (newKeys) {
+                        Config.data.dialogKeys[mapIdx] = newKeys;
+                        await Config.save();
+                        AttackController.updateVisuals();
+                    }
+                });
+                this.menuIds.push(id);
+            });
+
             for (let i = 1; i <= 6; i++) {
                 const id = GM_registerMenuCommand(`Edit Slot ${i} Keys`, async () => {
                     const newKeys = this.promptKey(`Weapon Slot ${i}`, Config.data.weaponSlotKeys[i] || []);
@@ -459,27 +496,24 @@
                 this.menuIds.push(id);
             }
 
-            ['Leave (J)', 'Mug (K)', 'Hosp (L)'].forEach((label, idx) => {
-                const mapIdx = idx + 1;
-                const id = GM_registerMenuCommand(`Edit ${label} Keys`, async () => {
-                    const newKeys = this.promptKey(label, Config.data.dialogKeys[mapIdx] || []);
-                    if (newKeys) {
-                        Config.data.dialogKeys[mapIdx] = newKeys;
-                        await Config.save();
-                        AttackController.updateVisuals();
-                    }
-                });
-                this.menuIds.push(id);
-            });
+            const decLabel = `Period/. Key: ${Config.data.decimalTarget.toUpperCase()} (Click to Swap)`;
+            this.menuIds.push(GM_registerMenuCommand(decLabel, async () => {
+                // Toggle between punch/kick
+                Config.data.decimalTarget = Config.data.decimalTarget === 'punch' ? 'kick' : 'punch';
+                await Config.save();
+                this.register(); // Re-registers to update the label text
+                AttackController.updateVisuals();
+            }));
 
             const contLabels = { default: 'Default Click', close: 'Close Tab', openFixed: 'Follow-up Target' };
             const contLabel = `Continue Action: ${contLabels[Config.data.continueAction]} (Cycle)`;
             this.menuIds.push(GM_registerMenuCommand(contLabel, async () => {
+                // Cycle through modes
                 const modes = ['default', 'close', 'openFixed'];
                 const next = modes[(modes.indexOf(Config.data.continueAction) + 1) % modes.length];
                 Config.data.continueAction = next;
                 await Config.save();
-                this.register();
+                this.register(); // Re-registers to update the label text
                 AttackController.updateVisuals();
             }));
 
@@ -498,7 +532,6 @@
     // main startup function
     async function init() {
         const params = new URLSearchParams(location.search);
-        // makes sure we are actually on an attack page before running
         if (!(params.get('sid') === 'attack' && params.has('user2ID'))) return;
 
         await Config.load();
@@ -509,11 +542,11 @@
         document.addEventListener('keydown', (e) => AttackController.handleInput(e), true);
 
         let timeout;
-        // watches for changes in the page to update hints dynamically
         const observer = new MutationObserver(() => {
             if (timeout) clearTimeout(timeout);
             timeout = setTimeout(() => {
                 AttackController.updateVisuals();
+                // Highlight hospital status as an alert
                 if (AttackController.isInHospital()) {
                     const btn = document.querySelector(SELECTORS.primaryButton);
                     if (btn) UI.addHint(btn, "TARGET HOSPITALIZED", true);
@@ -521,7 +554,7 @@
             }, CONSTANTS.DEBOUNCE_TIME);
         });
 
-        // Target the attack container specifically, fallback to body if missing
+        // Target the attack container specifically
         const targetNode = document.querySelector(SELECTORS.mainContainer) || document.body;
 
         observer.observe(targetNode, {
@@ -532,8 +565,7 @@
         });
 
         AttackController.updateVisuals();
-        // Updated to use optional chaining for GM object safety
-        console.log(`[Torn Attack Page Helper - Mac] v${typeof GM !== 'undefined' ? GM.info?.script?.version : '1.5'} Loaded`);
+        console.log(`[Torn Attack Page Helper] v2.0 Loaded (J/K/L & Arrows Optimized)`);
     }
 
     init();
