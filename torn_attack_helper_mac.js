@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper (Mac)
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.5
+// @version      1.5.1
 // @description  Mac-optimized shortcuts (arrows + J/K/L) for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -100,7 +100,7 @@
         getKeyMapping(code) {
             // checks if the fight is finished to switch key logic using the new robust check
             const dialogs = AttackController.getOverrideButtons();
-            const isFightOver = !!(dialogs && dialogs.b3);
+            const isFightOver = !!dialogs;
 
             if (isFightOver) {
                 for (const [idx, keys] of Object.entries(this.data.dialogKeys)) {
