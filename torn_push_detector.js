@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.9.0
+// @version      1.0.0
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,24 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.0.0 — First release for live-war testing. Hardening pass over 0.9.0:
+ *         - fetchFactionChain now returns a discriminated result ({ok,chain}),
+ *           so an API error / rate-limit / network drop can no longer be
+ *           mistaken for "chain concluded" — a false conclusion would corrupt
+ *           the baseline with a truncated chain. Errored cycles are skipped;
+ *           only an explicit "no active chain" concludes.
+ *         - Followers re-render only when the leader publishes new data (via a
+ *           shared broadcast timestamp + value-change listener), never on every
+ *           heartbeat — so typing a manual override is never interrupted. The
+ *           active-input guard also defers renders on the leader tab.
+ *         - Stale-data banner on a card when its latest fetch failed and hasn't
+ *           since succeeded, so an outage mid-war doesn't silently show frozen
+ *           or wrongly-active values.
+ *         - Empty override fields resolve to null predictably (explicit trim).
+ *         Known characteristic: factions with very consistent tempo get tight
+ *         thresholds; small increases may read as pushes — use manual overrides.
+ *         Assumptions validated by simulation, not yet by a real war — this
+ *         release exists to gather that first live-war data.
  * 0.9.0 — Major analyzer rework. Replaced the EWMA baseline (which froze across
  *         idle gaps and self-trained on pushes) with a stable two-population
  *         model:
@@ -179,6 +197,16 @@
       const all = raw ? JSON.parse(raw) : {};
       all[id] = overrides;
       GM_setValue("pushdet_overrides", JSON.stringify(all));
+    },
+    // Broadcast key: the leader bumps this after each successful poll write.
+    // Followers compare against their own last-rendered value and only
+    // re-render when it changes — so a follower never wipes a user's in-progress
+    // input on the 3s heartbeat, only when there's genuinely new data.
+    getDataUpdatedTs() {
+      return GM_getValue("pushdet_data_ts", 0);
+    },
+    markDataUpdated() {
+      GM_setValue("pushdet_data_ts", Date.now());
     },
   };
 
@@ -367,12 +395,18 @@
   //    ANY faction: { chain: { id, current, max, timeout, modifier,
   //    cooldown, start, end } }
   // =========================================================================
+  // Returns one of three distinct outcomes so callers can tell "no chain" from
+  // "couldn't fetch" — critical because a false "concluded" would corrupt the
+  // baseline with a truncated chain:
+  //   { ok: true,  chain: {...} }  -> active chain
+  //   { ok: true,  chain: null }   -> API succeeded, no chain running (real end)
+  //   { ok: false }                -> error/rate-limit/network; caller must skip
   async function fetchFactionChain(factionId, apiKey, attempt = 0) {
     if (!limiter.canCall()) {
       Logger.warn(
         `rate limit guard tripped, skipping faction ${factionId} this cycle`,
       );
-      return null;
+      return { ok: false };
     }
     const url = `${CONFIG.apiBase}/faction/${factionId}/chain?key=${apiKey}`;
     try {
@@ -389,16 +423,17 @@
         Logger.error(
           `chain fetch error (faction ${factionId}): ${explainApiError(data.error)}`,
         );
-        return null;
+        return { ok: false };
       }
-      return data.chain || null;
+      // Success. data.chain present => active; absent/empty => no chain running.
+      return { ok: true, chain: data.chain || null };
     } catch (err) {
       if (attempt < 2) {
         await sleep(1500 * (attempt + 1));
         return fetchFactionChain(factionId, apiKey, attempt + 1);
       }
       Logger.error(`chain fetch failed (faction ${factionId}): ${err}`);
-      return null;
+      return { ok: false };
     }
   }
 
@@ -1055,34 +1090,57 @@
     const watchlist = Storage.getWatchedFactions();
     if (!apiKey || watchlist.length === 0) return;
 
+    let didUpdate = false;
     for (const factionId of watchlist) {
       await ensureFactionName(factionId, apiKey); // cheap, cached, cosmetic
-      const chain = await fetchFactionChain(factionId, apiKey);
+      const result = await fetchFactionChain(factionId, apiKey);
       const cache = RawCache.get(factionId);
       cache.lastPollTime = Date.now();
-      cache.lastChain = chain;
 
       let state = Storage.load(factionId) || freshState();
       const overrides = Storage.getOverrides(factionId);
 
+      // CRITICAL: on an error/rate-limit/network failure, skip this faction
+      // entirely. Do NOT treat it as "no chain" — that would falsely conclude
+      // an ongoing chain and corrupt the baseline with a truncated average.
+      // Record the error time in SHARED state so any tab can show a stale hint.
+      if (!result.ok) {
+        cache.lastError = Date.now();
+        state.lastErrorTs = Date.now();
+        Storage.save(factionId, state);
+        continue;
+      }
+
+      const chain = result.chain; // may be null: API confirms no active chain
+      cache.lastChain = chain;
+
       if (chain && chain.current > 0) {
         // Active chain — update the live signal + status.
         state = updateAnalysis(state, chain, Date.now(), overrides);
-      } else {
-        // No active chain (endpoint returned nothing/zero). If we were tracking
-        // one, it just concluded — fold it into the baseline, then go idle.
-        if (state.liveChainId !== null) {
-          finalizePreviousChain(state, overrides);
-          state.liveChainId = null;
-          state.liveRate = null;
-          state.lastStatus = "Idle";
-          state.resolved = resolveThresholds(state, overrides);
-        }
+      } else if (state.liveChainId !== null) {
+        // API explicitly confirmed no active chain, and we were tracking one —
+        // it has genuinely concluded. Classify it, then go idle.
+        finalizePreviousChain(state, overrides);
+        state.liveChainId = null;
+        state.liveRate = null;
+        state.lastStatus = "Idle";
+        state.resolved = resolveThresholds(state, overrides);
       }
+      state.lastSuccessTs = Date.now(); // a good fetch clears the "stale" condition
       Storage.save(factionId, state);
+      didUpdate = true;
     }
-    Logger.info(`poll cycle complete (${watchlist.length} faction(s) watched)`);
-    UI.refresh();
+    if (didUpdate) {
+      Storage.markDataUpdated(); // broadcast: followers re-render on this change
+      Logger.info(
+        `poll cycle complete (${watchlist.length} faction(s) watched)`,
+      );
+      UI.refresh();
+    } else {
+      Logger.warn(
+        "poll cycle produced no updates (all fetches failed this cycle)",
+      );
+    }
   }
 
   // =========================================================================
@@ -1429,6 +1487,22 @@
       // Per-faction override editor (collapsed within the card).
       const ovEl = this.overrideEditorHtml(id, ov);
 
+      // Stale-data banner: the most recent fetch for this faction errored (and
+      // hasn't since succeeded). During an API/network outage mid-war, the
+      // numbers above may be behind — a concluded chain might still show as
+      // active, or a live rate may be frozen. Warn rather than mislead.
+      let staleHtml = "";
+      if (
+        s &&
+        s.lastErrorTs &&
+        (!s.lastSuccessTs || s.lastErrorTs > s.lastSuccessTs)
+      ) {
+        const ago = this.agoStr(s.lastErrorTs);
+        staleHtml = `<div style="margin-top:4px; font-size:10px; color:#ffb040; background:#2a1e0e; border:1px solid #5a3d1a; border-radius:4px; padding:3px 6px;">
+             ⚠ data may be stale — last fetch failed (${ago}); showing last known values
+           </div>`;
+      }
+
       return `
         <details data-faction="${id}"${open} style="margin-bottom:6px; background:#1e1e1e; border:1px solid #333; border-radius:5px;">
           <summary style="cursor:pointer; list-style:none; padding:6px 8px; display:flex; align-items:center; gap:8px;">
@@ -1438,6 +1512,7 @@
           <div style="padding:0 8px 8px;">
             <div style="font-size:11px; color:#bbb; margin-bottom:2px;">${summary}</div>
             <div style="font-size:10px; color:#777;">${basis}</div>
+            ${staleHtml}
             ${insightHtml}
             ${tightHtml}
             ${ovEl}
@@ -1493,9 +1568,9 @@
         btn.onclick = () => {
           const fid = btn.getAttribute("data-fid");
           const num = (sel) => {
-            const v = parseFloat(
-              body.querySelector(`.${sel}[data-fid="${fid}"]`).value,
-            );
+            const raw = body.querySelector(`.${sel}[data-fid="${fid}"]`).value;
+            if (raw.trim() === "") return null; // explicit: empty field -> no override
+            const v = parseFloat(raw);
             return Number.isFinite(v) ? v : null;
           };
           const mode = (sel) =>
@@ -1526,11 +1601,39 @@
           this.refresh();
         };
       });
+      // When the user finishes editing (blur), flush any refresh we deferred
+      // while they were typing, so the card catches up to the latest data.
+      body.querySelectorAll("input, select").forEach((el) => {
+        el.addEventListener("blur", () => {
+          if (this._deferredRefresh) {
+            // Defer to the next frame so a click on save/clear runs first.
+            setTimeout(() => {
+              if (this._deferredRefresh) this.refresh();
+            }, 150);
+          }
+        });
+      });
     },
 
     refresh() {
       if (!this.panel) return;
       const body = this.panel.querySelector("#pd-body");
+
+      // Don't rewrite the DOM out from under a user actively typing an override
+      // (on ANY tab, including the leader whose 30s poll would otherwise wipe
+      // the field). Defer this render; the next tick or the input's blur will
+      // pick it up. The setup form gets the same protection.
+      const active = document.activeElement;
+      if (
+        active &&
+        this.panel.contains(active) &&
+        (active.tagName === "INPUT" || active.tagName === "SELECT")
+      ) {
+        this._deferredRefresh = true;
+        return;
+      }
+      this._deferredRefresh = false;
+
       const watchlist = Storage.getWatchedFactions();
       if (watchlist.length === 0) {
         body.innerHTML =
@@ -1801,22 +1904,45 @@
   UI.init();
 
   // Only the leader tab polls the API; followers render from shared storage.
-  // A single loop at the heartbeat cadence handles both leadership upkeep and
-  // (leader-only) polling on the slower poll cadence.
+  // A single loop at the heartbeat cadence handles leadership upkeep and
+  // (leader-only) polling. Followers re-render ONLY when the shared data
+  // timestamp changes — never on every heartbeat — so a user typing a manual
+  // override in a follower tab isn't interrupted by a 3s DOM rewrite.
   let lastPollAt = 0;
+  let lastRenderedDataTs = Storage.getDataUpdatedTs();
   async function tick() {
     const leading = TabLeader.tryClaim(); // claim if vacant/stale, else false
     if (leading) {
       TabLeader.beat();
       if (Date.now() - lastPollAt >= CONFIG.pollIntervalMs) {
         lastPollAt = Date.now();
-        await pollAll();
+        await pollAll(); // marks data updated + refreshes this (leader) tab
+        lastRenderedDataTs = Storage.getDataUpdatedTs();
       }
     } else {
-      // Follower: the leader keeps Storage fresh, so just re-render from it.
-      UI.refresh();
+      // Follower: re-render only if the leader has published newer data since
+      // our last render. Otherwise leave the DOM (and any active input) alone.
+      const dataTs = Storage.getDataUpdatedTs();
+      if (dataTs !== lastRenderedDataTs) {
+        lastRenderedDataTs = dataTs;
+        UI.refresh();
+      }
     }
     UI.refreshLeaderBadge(TabLeader.isLeader());
+  }
+
+  // Instant follower sync: when the leader bumps the broadcast key, re-render
+  // immediately (still guarded by the timestamp check inside). This makes
+  // followers update the moment new data lands, without polling for it.
+  if (typeof GM_addValueChangeListener === "function") {
+    GM_addValueChangeListener("pushdet_data_ts", (_n, _o, newVal, remote) => {
+      if (!remote) return; // our own write; already handled
+      const dataTs = typeof newVal === "number" ? newVal : Number(newVal) || 0;
+      if (dataTs !== lastRenderedDataTs && !TabLeader.isLeader()) {
+        lastRenderedDataTs = dataTs;
+        UI.refresh();
+      }
+    });
   }
 
   // Kick once immediately, then on the heartbeat interval.
