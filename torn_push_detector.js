@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      1.0.2
+// @version      1.1.0
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,25 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.0 — War-chain calibration overhaul + storage-key rename (BREAKING).
+ *         BREAKING: all storage keys renamed to a "wpd_" prefix (wpd_apikey,
+ *         wpd_watchlist, wpd_state_<id>, wpd_chaincache_<id>, etc.) so every
+ *         stored value is greppable in the dev console. Existing setup is not
+ *         migrated — re-enter your API key, own faction, and watchlist once.
+ *         Calibration:
+ *         - Baselines now target confirmed WAR chains, pulled from the last 100
+ *           chains (/faction/{id}/chains) and verified via chainreport. Baseline
+ *           becomes usable at 5 war chains; default target is 20.
+ *         - Background trickle: instead of one big burst, a few chainreport
+ *           calls per poll cycle gradually build history toward the target
+ *           without a rate spike. Cached verdicts make this a one-time cost per
+ *           chain. An explicit calibrate still bursts, capped at 60 reports and
+ *           stopping once 20 war chains are confirmed.
+ *         - New per-faction override: "# chains for baseline" — choose how many
+ *           war chains feed the baseline; recomputes from cache, no refetch.
+ *         - Cards show how many war chains back the baseline and flag low
+ *           confidence below 5.
+ *         - Setup form auto-closes shortly after a successful save.
  * 1.0.2 — Two crash fixes + input validation:
  *         - State saved by an older version (pre-two-population model) lacked
  *           the baselineChains/elevatedChains/pushChains arrays, causing
@@ -116,20 +135,25 @@
     liveModel: {
       warmupMinChainMinutes: 3, // don't trust a chain's running-average until it's this old
       warmupMinHits: 15, // ...and has at least this many hits (whichever is later)
-      minBaselineChains: 3, // qualifying concluded chains needed before inferred alerts fire
+      minBaselineChains: 5, // qualifying war chains needed before inferred alerts fire
     },
     calibration: {
-      chainsToSample: 15, // how many past chains to pull for a baseline
-      minChainsForCalibration: 3, // below this, don't trust the seeded baseline
+      chainsListLimit: 100, // /faction/{id}/chains returns up to 100 in one request
+      targetWarChains: 20, // stop checking once we've confirmed this many war chains
+      minChainsForCalibration: 5, // below this, baseline is shown but flagged low-confidence
+      defaultBaselineChains: 20, // how many war chains a baseline uses by default (user-overridable)
       attackLookbackDays: 60, // how far back to search your own attack log for this enemy
       maxPaginatedPages: 5, // hard cap on pages followed via _metadata.links.next
-      maxReportsPerCalibration: 20, // hard cap on chainreport calls in one calibration run
+      maxReportsPerCalibration: 60, // hard cap on chainreport calls in ONE explicit calibrate run
       minWarChainLength: 50, // at/above this length, a chain needs only war hits present
       // (not full bonus coverage) to count — see checkChainQualifies
+      // Background trickle: instead of one big burst, verify a few unchecked
+      // chains per poll cycle so history builds gradually without a rate spike.
+      backgroundReportsPerCycle: 3, // chainreport calls per poll cycle for background calibration
     },
     cache: {
       maxFactions: 10, // LRU cap on cached factions (INCLUDING own); own is pinned
-      maxChainsPerFaction: 30, // per-faction cap; oldest chain evicted when a newer one lands
+      maxChainsPerFaction: 100, // per-faction cap; matches the /chains list size
       ownFactionId: null, // set via setup; this faction is never evicted as a whole
     },
   };
@@ -152,7 +176,7 @@
   // =========================================================================
   const Storage = {
     key(factionId) {
-      return `pushdet_${factionId}`;
+      return `wpd_state_${factionId}`;
     },
     load(factionId) {
       const raw = GM_getValue(this.key(factionId), null);
@@ -173,33 +197,33 @@
       GM_setValue(this.key(factionId), JSON.stringify(state));
     },
     getApiKey() {
-      return GM_getValue("pushdet_apikey", "");
+      return GM_getValue("wpd_apikey", "");
     },
     setApiKey(k) {
-      GM_setValue("pushdet_apikey", k);
+      GM_setValue("wpd_apikey", k);
     },
     getWatchedFactions() {
-      const raw = GM_getValue("pushdet_watchlist", "[]");
+      const raw = GM_getValue("wpd_watchlist", "[]");
       return JSON.parse(raw);
     },
     setWatchedFactions(list) {
-      GM_setValue("pushdet_watchlist", JSON.stringify(list));
+      GM_setValue("wpd_watchlist", JSON.stringify(list));
     },
     getOwnFactionId() {
-      return GM_getValue("pushdet_ownfaction", null);
+      return GM_getValue("wpd_ownfaction", null);
     },
     setOwnFactionId(id) {
-      GM_setValue("pushdet_ownfaction", id || null);
+      GM_setValue("wpd_ownfaction", id || null);
     },
     getUiState() {
-      const raw = GM_getValue("pushdet_uistate", null);
+      const raw = GM_getValue("wpd_uistate", null);
       return raw ? JSON.parse(raw) : {};
     },
     setUiState(state) {
-      GM_setValue("pushdet_uistate", JSON.stringify(state));
+      GM_setValue("wpd_uistate", JSON.stringify(state));
     },
     getFactionNames() {
-      const raw = GM_getValue("pushdet_facnames", null);
+      const raw = GM_getValue("wpd_facnames", null);
       return raw ? JSON.parse(raw) : {};
     },
     getFactionName(id) {
@@ -208,7 +232,7 @@
     setFactionName(id, name) {
       const names = this.getFactionNames();
       names[id] = name;
-      GM_setValue("pushdet_facnames", JSON.stringify(names));
+      GM_setValue("wpd_facnames", JSON.stringify(names));
     },
     // Per-faction user overrides for baseline/thresholds. Shape:
     //   { baseline: number|null,           // manual baseline hits/min
@@ -216,25 +240,25 @@
     //     pushing:  {mode:'abs'|'mult', value:number} | null }
     // Any null field falls back to the inferred value.
     getOverrides(id) {
-      const raw = GM_getValue("pushdet_overrides", null);
+      const raw = GM_getValue("wpd_overrides", null);
       const all = raw ? JSON.parse(raw) : {};
       return all[id] || {};
     },
     setOverrides(id, overrides) {
-      const raw = GM_getValue("pushdet_overrides", null);
+      const raw = GM_getValue("wpd_overrides", null);
       const all = raw ? JSON.parse(raw) : {};
       all[id] = overrides;
-      GM_setValue("pushdet_overrides", JSON.stringify(all));
+      GM_setValue("wpd_overrides", JSON.stringify(all));
     },
     // Broadcast key: the leader bumps this after each successful poll write.
     // Followers compare against their own last-rendered value and only
     // re-render when it changes — so a follower never wipes a user's in-progress
     // input on the 3s heartbeat, only when there's genuinely new data.
     getDataUpdatedTs() {
-      return GM_getValue("pushdet_data_ts", 0);
+      return GM_getValue("wpd_data_ts", 0);
     },
     markDataUpdated() {
-      GM_setValue("pushdet_data_ts", Date.now());
+      GM_setValue("wpd_data_ts", Date.now());
     },
   };
 
@@ -243,8 +267,8 @@
   //     A completed chain's verdict is immutable, so once computed it never
   //     needs re-fetching. Structure in GM storage:
   //
-  //       chaincache_index          -> { <factionId>: lastAccessMs, ... }  (LRU clock)
-  //       chaincache_<factionId>    -> { <chainId>: {rate,durationMin,
+  //       wpd_chaincache_index          -> { <factionId>: lastAccessMs, ... }  (LRU clock)
+  //       wpd_chaincache_<factionId>    -> { <chainId>: {rate,durationMin,
   //                                       warHits,bonuses,qualifies,length}, ... }
   //
   //     Culling is count-based:
@@ -256,9 +280,9 @@
   //     Ongoing chains are never cached — only concluded ones get a verdict.
   // =========================================================================
   const ChainCache = {
-    indexKey: "chaincache_index",
+    indexKey: "wpd_chaincache_index",
     factionKey(id) {
-      return `chaincache_${id}`;
+      return `wpd_chaincache_${id}`;
     },
 
     loadIndex() {
@@ -686,19 +710,27 @@
     }
   }
 
-  // Keep only chains that qualify as war tempo (see fetchChainVerdict).
-  // Cache-first: a chain's verdict is immutable once its chain has concluded,
-  // so cached verdicts are reused and only cache-miss chains hit the API.
-  // Bounded by maxReportsPerCalibration on the API-call side only — cached
-  // hits are free and don't count against that budget.
-  async function filterToWarChains(parsedChains, factionId, apiKey) {
+  // Keep chains that qualify as war tempo (see fetchChainVerdict). Cache-first:
+  // a concluded chain's verdict is immutable, so cached verdicts are reused and
+  // only cache-miss chains hit the API. Two independent stopping conditions:
+  //   * stop early once we've collected `targetWarChains` (no need to check more)
+  //   * cap NEW API calls at `apiCallCap` (protects the rate budget)
+  // Cached hits are free and never count against the API cap, so a re-run after
+  // the cache is warm can scan all 100 chains for zero calls.
+  async function filterToWarChains(parsedChains, factionId, apiKey, opts = {}) {
+    const target = opts.target ?? CONFIG.calibration.targetWarChains;
+    const apiCallCap =
+      opts.apiCallCap ?? CONFIG.calibration.maxReportsPerCalibration;
+
     const warChains = [];
     let dropped = 0,
       cacheHits = 0,
       apiCalls = 0;
-    const newVerdicts = {}; // {chainId: verdict} to persist after the loop
+    const newVerdicts = {};
 
     for (const chain of parsedChains) {
+      if (warChains.length >= target) break; // got enough confirmed war chains
+
       // 1. Cache hit — reuse the stored verdict, no API call.
       const cached = ChainCache.getChain(factionId, chain.id);
       if (cached) {
@@ -714,11 +746,8 @@
         continue;
       }
 
-      // 2. Cache miss — but respect the per-run API budget.
-      if (apiCalls >= CONFIG.calibration.maxReportsPerCalibration) {
-        dropped++; // couldn't verify within budget -> excluded (fails safe)
-        continue;
-      }
+      // 2. Cache miss — respect the per-run API budget.
+      if (apiCalls >= apiCallCap) break; // out of budget; remaining stay unchecked for now
       apiCalls++;
       const verdict = await fetchChainVerdict(chain.id, apiKey);
       if (!verdict) {
@@ -749,20 +778,21 @@
       else dropped++;
     }
 
-    // Persist newly-fetched concluded verdicts in one write; culling handled inside.
     if (Object.keys(newVerdicts).length)
       ChainCache.putChains(factionId, newVerdicts);
-    else ChainCache.touch(factionId); // still bump LRU even on all-cache-hit runs
+    else ChainCache.touch(factionId);
 
     Logger.info(
-      `war-chain filter (faction ${factionId}): kept ${warChains.length}, dropped ${dropped} — ${cacheHits} cache hits, ${apiCalls} API calls`,
+      `war-chain filter (faction ${factionId}): found ${warChains.length}/${target} war chains — ${cacheHits} cache hits, ${apiCalls} API calls, ${dropped} non-war`,
     );
     return warChains;
   }
 
   function parseChainList(rawChains) {
+    // Parse the full list (up to 100) — filtering/stopping happens in
+    // filterToWarChains, which decides how many to actually verify.
     const parsed = [];
-    for (const c of rawChains.slice(0, CONFIG.calibration.chainsToSample)) {
+    for (const c of rawChains.slice(0, CONFIG.calibration.chainsListLimit)) {
       const hits = c.chain; // confirmed field name
       const { start, end } = c;
       if (!hits || !start || !end || end <= start) continue;
@@ -807,16 +837,20 @@
     let qualifyingChains = attackChains; // {id, rate} entries in scope below
 
     if (!result.ok) {
-      // Fall back to their general chain history. Keep only chains that
-      // qualify as war pushes: war-hit count must cover the bonuses reached
-      // (see checkChainQualifies). This excludes farming/outside-hit chains
-      // even when they occurred during a war.
+      // Fall back to their general chain history. Verify up to targetWarChains
+      // war chains, scanning up to maxReportsPerCalibration uncached reports
+      // (cached verdicts are free, so a warm re-run can scan all 100 for zero
+      // calls). Non-war (farming/outside-hit) chains are excluded.
       const rawChains = await fetchPastChains(factionId, apiKey);
       const parsedChains = parseChainList(rawChains);
       qualifyingChains = await filterToWarChains(
         parsedChains,
         factionId,
         apiKey,
+        {
+          target: CONFIG.calibration.targetWarChains,
+          apiCallCap: CONFIG.calibration.maxReportsPerCalibration,
+        },
       );
       result = computeStatsFromRates(qualifyingChains);
       source = "war-chains";
@@ -824,26 +858,23 @@
     const sample = qualifyingChains.slice(0, 3);
 
     const state = Storage.load(factionId) || freshState();
-    if (result.ok) {
-      // Seed the baseline from historical qualifying chains. Store per-chain
-      // rates so live conclusions can keep extending the same baseline.
-      state.baselineChains = qualifyingChains.map((c) => ({
-        chainId: c.id,
-        rate: c.rate,
-      }));
-      if (state.baselineChains.length > CONFIG.cache.maxChainsPerFaction) {
-        state.baselineChains = state.baselineChains.slice(
-          -CONFIG.cache.maxChainsPerFaction,
-        );
-      }
-      recomputeBaseline(state);
-      state.calibrationSource = source;
+    // Seed by classifying each qualifying chain into the right population
+    // (baseline / elevated / push), same path as live + background. Dedup means
+    // re-calibrating never double-counts, and existing learned populations are
+    // preserved rather than wiped.
+    const overrides = Storage.getOverrides(factionId);
+    let added = 0;
+    for (const wc of qualifyingChains) {
+      if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) added++;
+    }
+    if (added || (state.baselineChains || []).length) {
+      state.calibrationSource = state.calibrationSource || source;
       Logger.info(
-        `calibrated faction ${factionId} from ${result.sampleCount} ${source} (${result.meanRate.toFixed(1)} ± ${result.stdDev.toFixed(1)} hits/min avg)`,
+        `calibrated faction ${factionId}: +${added} war chain(s) via ${source} (baseline now ${(state.baselineChains || []).length})`,
       );
     } else {
       Logger.warn(
-        `calibration for faction ${factionId} inconclusive (only ${result.sampleCount} usable ${source} chains) — will build baseline live as chains conclude`,
+        `calibration for faction ${factionId} found no war chains yet — background trickle will keep trying, or set manual thresholds`,
       );
     }
     Storage.save(factionId, state);
@@ -852,11 +883,12 @@
     cache.lastCalibration = {
       ...result,
       source,
+      added,
       timestamp: Date.now(),
       sample,
     };
 
-    return { ...result, source };
+    return { ...result, source, added };
   }
 
   // =========================================================================
@@ -988,23 +1020,42 @@
   // surfaces OBSERVED elevated/push rates (from past above-baseline chains) as
   // a second, empirical reference alongside the σ-inferred thresholds.
   function resolveThresholds(state, overrides) {
+    // How many of the most recent baseline (normal) chains to use. User can
+    // override per faction; defaults to defaultBaselineChains. Recomputes mean/
+    // variance from the cached rates on the fly — no refetch needed.
+    const wantN =
+      typeof overrides.baselineCount === "number" && overrides.baselineCount > 0
+        ? overrides.baselineCount
+        : CONFIG.calibration.defaultBaselineChains;
+    const pool = (state.baselineChains || []).slice(-wantN);
+    const poolRates = pool.map((c) => c.rate);
+    const poolMean = poolRates.length
+      ? poolRates.reduce((a, b) => a + b, 0) / poolRates.length
+      : null;
+    const poolVar = poolRates.length
+      ? poolRates.reduce((a, b) => a + (b - poolMean) ** 2, 0) /
+        poolRates.length
+      : null;
+
     const hasInferredBaseline =
-      state.baselineMean !== null &&
-      state.baselineChains.length >= CONFIG.liveModel.minBaselineChains;
+      poolMean !== null && pool.length >= CONFIG.liveModel.minBaselineChains;
+    const lowConfidence =
+      poolMean !== null &&
+      pool.length < CONFIG.calibration.minChainsForCalibration;
 
     let baseline = null,
       baselineProv = null;
     if (typeof overrides.baseline === "number") {
       baseline = overrides.baseline;
       baselineProv = "manual";
-    } else if (hasInferredBaseline) {
-      baseline = state.baselineMean;
+    } else if (poolMean !== null && hasInferredBaseline) {
+      baseline = poolMean;
       baselineProv = "inferred";
     }
 
     const std =
-      hasInferredBaseline && state.baselineVar !== null
-        ? Math.sqrt(Math.max(state.baselineVar, 0.0001))
+      hasInferredBaseline && poolVar !== null
+        ? Math.sqrt(Math.max(poolVar, 0.0001))
         : null;
 
     const resolve = (ov, sigma) => {
@@ -1033,11 +1084,14 @@
         elevated: elevated.prov,
         pushing: pushing.prov,
       },
+      baselineN: pool.length, // how many chains actually feed the baseline
+      baselineWantN: wantN, // how many were requested
+      lowConfidence, // true when fewer than minChainsForCalibration
       // Empirical references (null until such chains have been observed):
       observedElevated: avgOf(state.elevatedChains),
       observedPush: avgOf(state.pushChains),
-      observedElevatedN: state.elevatedChains.length,
-      observedPushN: state.pushChains.length,
+      observedElevatedN: (state.elevatedChains || []).length,
+      observedPushN: (state.pushChains || []).length,
     };
   }
 
@@ -1189,6 +1243,67 @@
       Logger.warn(
         "poll cycle produced no updates (all fetches failed this cycle)",
       );
+    }
+
+    // Background calibration trickle: spend a tiny budget each cycle verifying
+    // unchecked historical chains, so baselines fill toward the target over
+    // time without a rate spike. Runs after live updates so live polling always
+    // has priority on the rate budget.
+    await backgroundCalibrateTick(apiKey, watchlist);
+  }
+
+  // One low-budget calibration step per poll cycle. Picks the watched faction
+  // furthest from its baseline target and verifies up to backgroundReportsPerCycle
+  // of its still-unchecked chains, folding any war chains into its baseline.
+  async function backgroundCalibrateTick(apiKey, watchlist) {
+    const budget = CONFIG.calibration.backgroundReportsPerCycle;
+    if (budget <= 0 || !limiter.canCall()) return;
+
+    // Find the faction that most needs more baseline data.
+    let pick = null,
+      fewest = Infinity;
+    for (const factionId of watchlist) {
+      const state = Storage.load(factionId);
+      const have = state ? (state.baselineChains || []).length : 0;
+      if (have < CONFIG.calibration.targetWarChains && have < fewest) {
+        fewest = have;
+        pick = factionId;
+      }
+    }
+    if (!pick) return; // everyone's baseline is full enough
+
+    // Pull the chain list (cheap; one call) and find chains we haven't cached
+    // a verdict for yet.
+    const rawChains = await fetchPastChains(pick, apiKey);
+    if (!rawChains.length) return;
+    const parsed = parseChainList(rawChains);
+    const unchecked = parsed.filter((c) => !ChainCache.getChain(pick, c.id));
+    if (!unchecked.length) return;
+
+    // Verify a few, capped by the per-cycle budget. filterToWarChains handles
+    // caching + folding via the same path as an explicit calibrate.
+    const slice = unchecked.slice(0, budget);
+    const warChains = await filterToWarChains(slice, pick, apiKey, {
+      target: Infinity,
+      apiCallCap: budget,
+    });
+
+    if (warChains.length) {
+      const state = Storage.load(pick) || freshState();
+      const overrides = Storage.getOverrides(pick);
+      let added = 0;
+      for (const wc of warChains) {
+        if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) added++;
+      }
+      if (added) {
+        state.calibrationSource = state.calibrationSource || "war-chains";
+        Storage.save(pick, state);
+        Storage.markDataUpdated();
+        Logger.info(
+          `background calibration: +${added} war chain(s) for faction ${pick} (now ${(state.baselineChains || []).length})`,
+        );
+        UI.refresh();
+      }
     }
   }
 
@@ -1360,7 +1475,7 @@
     syncAcrossTabs(panel) {
       if (typeof GM_addValueChangeListener !== "function") return; // not available in all managers
       GM_addValueChangeListener(
-        "pushdet_uistate",
+        "wpd_uistate",
         (_name, _old, newVal, remote) => {
           if (!remote || !newVal) return; // ignore our own writes
           let state;
@@ -1520,6 +1635,7 @@
              ${row("→ Elevated ≥", fmt(r.elevatedAt), "#ffb040", this.provTag(r.provenance.elevated))}
              ${row("→ Push ≥", fmt(r.pushingAt), "#ff5555", this.provTag(r.provenance.pushing))}
              ${obsElev}${obsPush}
+             ${r.provenance.baseline === "inferred" ? `<div style="margin-top:2px; font-size:9px; color:${r.lowConfidence ? "#ffb040" : "#666"};">${r.lowConfidence ? "⚠ low confidence — " : ""}baseline from ${r.baselineN} war chain${r.baselineN === 1 ? "" : "s"}${r.baselineN < r.baselineWantN ? ` (building toward ${r.baselineWantN})` : ""}</div>` : ""}
            </div>`;
       }
 
@@ -1582,6 +1698,9 @@
         <details style="margin-top:6px;" data-ovfor="${id}">
           <summary style="cursor:pointer; font-size:10px; color:#888; list-style:none;">⚙ manual overrides</summary>
           <div style="margin-top:5px; font-size:10px; display:grid; grid-template-columns:auto 1fr; gap:4px 6px; align-items:center;">
+            <label style="color:#999;"># chains for baseline</label>
+            <input class="pd-ov-count" data-fid="${id}" type="number" step="1" min="1" placeholder="${CONFIG.calibration.defaultBaselineChains}" value="${ov.baselineCount ?? ""}" style="${inS}" />
+
             <label style="color:#999;">Baseline</label>
             <input class="pd-ov-base" data-fid="${id}" type="number" step="0.1" placeholder="inferred" value="${ov.baseline ?? ""}" style="${inS}" />
 
@@ -1625,10 +1744,15 @@
           const mode = (sel) =>
             body.querySelector(`.${sel}[data-fid="${fid}"]`).value;
           const baseline = num("pd-ov-base");
+          const baselineCount = num("pd-ov-count");
           const elVal = num("pd-ov-el-val");
           const puVal = num("pd-ov-pu-val");
           Storage.setOverrides(fid, {
             baseline,
+            baselineCount:
+              baselineCount !== null && baselineCount >= 1
+                ? Math.round(baselineCount)
+                : null,
             elevated:
               elVal !== null
                 ? { mode: mode("pd-ov-el-mode"), value: elVal }
@@ -1864,9 +1988,11 @@
 
       msg.style.color = "#5fc46a";
       msg.textContent = "Saved ✓";
+      // Auto-close the setup form shortly after a successful save.
       setTimeout(() => {
         if (msg) msg.textContent = "";
-      }, 2000);
+        this.toggleSetup(false);
+      }, 1200);
 
       // Blur any focused field, then force the render past the typing-guard —
       // this is a deliberate save, so the view must update now.
@@ -1935,7 +2061,7 @@
   //     which the leader keeps fresh.
   // =========================================================================
   const TabLeader = {
-    key: "pushdet_leader",
+    key: "wpd_leader",
     tabId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     heartbeatMs: 3000,
     staleMs: 8000, // > 2 heartbeats: tolerate a missed beat before failover
@@ -2014,7 +2140,7 @@
   // immediately (still guarded by the timestamp check inside). This makes
   // followers update the moment new data lands, without polling for it.
   if (typeof GM_addValueChangeListener === "function") {
-    GM_addValueChangeListener("pushdet_data_ts", (_n, _o, newVal, remote) => {
+    GM_addValueChangeListener("wpd_data_ts", (_n, _o, newVal, remote) => {
       if (!remote) return; // our own write; already handled
       const dataTs = typeof newVal === "number" ? newVal : Number(newVal) || 0;
       if (dataTs !== lastRenderedDataTs && !TabLeader.isLeader()) {
