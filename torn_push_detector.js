@@ -1,15 +1,32 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.1.1
+// @version      0.5.0
 // @author       MrChurch [3654415]
-// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a self-calibrating statistical baseline. No ML, no training data required.
+// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a self-calibrating statistical baseline.
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
 // @connect      api.torn.com
 // ==/UserScript==
+
+/* CHANGELOG
+ * 0.5.0 — Versioning baseline. Consolidates work since 0.1.0:
+ *         - Real-time chain polling with EWMA + rolling z-score push detection
+ *         - Two-source calibration: own attack log (preferred) or war-filtered
+ *           chain history (fallback)
+ *         - War-chain qualification gate (war hits vs. bonuses reached, with a
+ *           length-based relaxation for long chains)
+ *         - Persistent chain-verdict cache (count-based LRU, own faction pinned,
+ *           timestamp-ordered chain eviction, ongoing chains never cached)
+ *         - Draggable panel with position + debug-state persistence, synced
+ *           across tabs
+ *         - Human-readable API error hints; in-panel debug log + raw data view
+ *         - Fixes: multi-faction status rows no longer render as one blob;
+ *           open debug sections survive poll refreshes
+ */
 
 (function () {
   "use strict";
@@ -87,6 +104,13 @@
     },
     setOwnFactionId(id) {
       GM_setValue("pushdet_ownfaction", id || null);
+    },
+    getUiState() {
+      const raw = GM_getValue("pushdet_uistate", null);
+      return raw ? JSON.parse(raw) : {};
+    },
+    setUiState(state) {
+      GM_setValue("pushdet_uistate", JSON.stringify(state));
     },
   };
 
@@ -760,17 +784,25 @@
   const UI = {
     panel: null,
     init() {
+      const saved = Storage.getUiState();
+
       const panel = document.createElement("div");
       panel.id = "push-detector-panel";
+      // Positioned via left/top so drag math is straightforward. Restore the
+      // saved spot if present, else default to the top-right area.
+      const pos = UI.clampToViewport(
+        saved.left ?? window.innerWidth - 360,
+        saved.top ?? 60,
+      );
       panel.style.cssText = `
-        position: fixed; top: 60px; right: 10px; z-index: 9999;
+        position: fixed; left: ${pos.left}px; top: ${pos.top}px; z-index: 9999;
         background: #1b1b1b; color: #eee; font: 12px monospace;
         border: 1px solid #444; border-radius: 6px; padding: 8px 10px;
         min-width: 260px; max-width: 340px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
       `;
       panel.innerHTML = `
-        <div style="font-weight:bold; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center;">
-          <span>War Push Detector</span>
+        <div id="pd-header" style="font-weight:bold; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center; cursor:move; user-select:none;">
+          <span title="Drag to move">⠿ War Push Detector</span>
           <span>
             <button id="pd-setup-btn" style="${UI.btnStyle}" title="Configure API key & watched factions">⚙ setup</button>
             <button id="pd-calibrate-btn" style="${UI.btnStyle}" title="Seed baselines from chain history">↻ calibrate</button>
@@ -791,15 +823,136 @@
         UI.calibrateAll();
       panel.querySelector("#pd-debug-btn").onclick = () => UI.toggleDebug();
       this.panel = panel;
+
+      // Restore debug-open state
+      this.debugOpen = !!saved.debugOpen;
+      panel.querySelector("#pd-debug").style.display = this.debugOpen
+        ? "block"
+        : "none";
+
+      this.enableDrag(panel.querySelector("#pd-header"), panel);
+      this.watchViewportResize(panel);
+      this.syncAcrossTabs(panel);
     },
     btnStyle:
       "font:11px monospace; cursor:pointer; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:3px; padding:1px 5px;",
     debugOpen: false,
+
+    // Keep a proposed left/top within the visible viewport, leaving a small
+    // margin so the panel can't be dragged fully off-screen and lost.
+    clampToViewport(left, top, el) {
+      const margin = 8;
+      const w = el ? el.offsetWidth : 300;
+      const h = el ? el.offsetHeight : 40; // header height is enough to grab
+      const maxLeft =
+        window.innerWidth - Math.min(w, window.innerWidth) - margin;
+      const maxTop =
+        window.innerHeight - Math.min(h, window.innerHeight) - margin;
+      return {
+        left: Math.max(margin, Math.min(left, Math.max(margin, maxLeft))),
+        top: Math.max(margin, Math.min(top, Math.max(margin, maxTop))),
+      };
+    },
+
+    persistPosition(panel) {
+      const state = Storage.getUiState();
+      state.left = parseInt(panel.style.left, 10);
+      state.top = parseInt(panel.style.top, 10);
+      Storage.setUiState(state);
+    },
+
+    enableDrag(handle, panel) {
+      let startX,
+        startY,
+        startLeft,
+        startTop,
+        dragging = false;
+
+      const onMove = (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        const pos = UI.clampToViewport(startLeft + dx, startTop + dy, panel);
+        panel.style.left = pos.left + "px";
+        panel.style.top = pos.top + "px";
+      };
+      const onUp = () => {
+        if (!dragging) return;
+        dragging = false;
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        UI.persistPosition(panel); // save only once, on release
+      };
+      handle.addEventListener("mousedown", (e) => {
+        // Ignore drags that start on the buttons in the header
+        if (e.target.closest("button")) return;
+        dragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = parseInt(panel.style.left, 10);
+        startTop = parseInt(panel.style.top, 10);
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+        e.preventDefault();
+      });
+    },
+
+    // If the window shrinks below the panel's saved spot, pull it back in.
+    watchViewportResize(panel) {
+      window.addEventListener("resize", () => {
+        const pos = UI.clampToViewport(
+          parseInt(panel.style.left, 10),
+          parseInt(panel.style.top, 10),
+          panel,
+        );
+        panel.style.left = pos.left + "px";
+        panel.style.top = pos.top + "px";
+        UI.persistPosition(panel);
+      });
+    },
+
+    // Mirror position/debug-state changes made in OTHER tabs. GM storage is
+    // shared, and GM_addValueChangeListener fires with remote=true when a
+    // different tab writes — so dragging the panel in one tab moves it in all.
+    syncAcrossTabs(panel) {
+      if (typeof GM_addValueChangeListener !== "function") return; // not available in all managers
+      GM_addValueChangeListener(
+        "pushdet_uistate",
+        (_name, _old, newVal, remote) => {
+          if (!remote || !newVal) return; // ignore our own writes
+          let state;
+          try {
+            state = JSON.parse(newVal);
+          } catch {
+            return;
+          }
+          if (typeof state.left === "number" && typeof state.top === "number") {
+            const pos = UI.clampToViewport(state.left, state.top, panel);
+            panel.style.left = pos.left + "px";
+            panel.style.top = pos.top + "px";
+          }
+          if (
+            typeof state.debugOpen === "boolean" &&
+            state.debugOpen !== UI.debugOpen
+          ) {
+            UI.debugOpen = state.debugOpen;
+            panel.querySelector("#pd-debug").style.display = UI.debugOpen
+              ? "block"
+              : "none";
+            if (UI.debugOpen) UI.refreshDebug();
+          }
+        },
+      );
+    },
+
     toggleDebug() {
       this.debugOpen = !this.debugOpen;
       this.panel.querySelector("#pd-debug").style.display = this.debugOpen
         ? "block"
         : "none";
+      const state = Storage.getUiState();
+      state.debugOpen = this.debugOpen;
+      Storage.setUiState(state);
       if (this.debugOpen) this.refreshDebug();
     },
     refresh() {
@@ -812,13 +965,25 @@
       }
       const rows = watchlist.map((id) => {
         const s = Storage.load(id);
-        if (!s) return `${id}: no data yet`;
+        const wrap = (inner) =>
+          `<div style="margin-bottom:6px;">${inner}</div>`;
+
+        if (!s) return wrap(`<div>${id}: no data yet</div>`);
+
         const basis = s.calibratedFrom
           ? `calibrated from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past encounters with this faction" : "of their past war chains"}`
           : s.samples.length < CONFIG.minSamplesBeforeAlerts
             ? `warming up (${s.samples.length}/${CONFIG.minSamplesBeforeAlerts} live samples)`
             : "live baseline only";
-        if (s.samples.length < 1) return `${id}: ${basis}`;
+
+        // No live samples yet — show the id and its calibration basis only.
+        if (s.samples.length < 1) {
+          return wrap(
+            `<div>${id}</div>` +
+              `<div style="color:#888; font-size:10px;">${basis}</div>`,
+          );
+        }
+
         const color =
           s.lastStatus === "PUSHING"
             ? "#ff4444"
@@ -829,10 +994,10 @@
           s.totalHits > 0
             ? Math.round((100 * s.tightRefreshes) / s.totalHits)
             : 0;
-        return `<div style="margin-bottom:3px;">
-          <div style="color:${color}">${id}: ${s.lastStatus} (${s.lastRate?.toFixed(1) ?? "—"} hits/min, z ${s.lastZ?.toFixed(1) ?? "—"}, ${tightPct}% tight refresh)</div>
-          <div style="color:#888; font-size:10px;">${basis}</div>
-        </div>`;
+        return wrap(
+          `<div style="color:${color}">${id}: ${s.lastStatus} (${s.lastRate?.toFixed(1) ?? "—"} hits/min, z ${s.lastZ?.toFixed(1) ?? "—"}, ${tightPct}% tight refresh)</div>` +
+            `<div style="color:#888; font-size:10px;">${basis}</div>`,
+        );
       });
       this.panel.querySelector("#pd-body").innerHTML = rows.join("");
       if (this.debugOpen) this.refreshDebug();
@@ -851,7 +1016,10 @@
       this.panel.querySelector("#pd-debug-status").textContent =
         `last poll: ${lastPollStr} · watching ${watchlist.length} faction(s)`;
 
-      // Log feed — newest first, color-coded
+      // Log feed — newest first, color-coded. Preserve scroll position so a
+      // poll-driven refresh doesn't yank the user back to the top mid-read.
+      const logEl = this.panel.querySelector("#pd-log");
+      const logPrevScroll = logEl.scrollTop;
       const logColor = { error: "#ff6666", warn: "#ffaa33", info: "#7ab8ff" };
       const logHtml =
         Logger.entries
@@ -863,9 +1031,18 @@
             return `<div style="color:${logColor[e.level]}">${time} · ${escapeHtml(e.msg)}</div>`;
           })
           .join("") || '<div style="color:#666;">no log entries yet</div>';
-      this.panel.querySelector("#pd-log").innerHTML = logHtml;
+      logEl.innerHTML = logHtml;
+      logEl.scrollTop = logPrevScroll; // hold the reader's place across refresh
 
-      // Raw per-faction data — native <details> keeps this simple and accessible
+      // Raw per-faction data — native <details> keeps this simple and accessible.
+      // Capture which sections are open (keyed by faction id, stable across
+      // renders) so a refresh from new poll data doesn't collapse them.
+      const rawEl = this.panel.querySelector("#pd-raw");
+      const openFactions = new Set(
+        Array.from(rawEl.querySelectorAll("details[open][data-faction]")).map(
+          (d) => d.getAttribute("data-faction"),
+        ),
+      );
       const rawHtml =
         watchlist
           .map((id) => {
@@ -876,8 +1053,9 @@
             const calibJson = cache.lastCalibration
               ? JSON.stringify(cache.lastCalibration, null, 2)
               : "not calibrated yet";
+            const openAttr = openFactions.has(String(id)) ? " open" : "";
             return `
-          <details style="margin-bottom:4px;">
+          <details data-faction="${id}"${openAttr} style="margin-bottom:4px;">
             <summary style="cursor:pointer; color:#aaa; font-size:10px;">faction ${id} — raw data</summary>
             <div style="font-size:10px; color:#888; margin:3px 0 1px;">last /chain response</div>
             <pre style="background:#111; border-radius:4px; padding:4px 6px; margin:0 0 4px; max-height:140px; overflow:auto; font-size:10px;">${escapeHtml(chainJson)}</pre>
@@ -888,7 +1066,7 @@
           })
           .join("") ||
         '<div style="color:#666; font-size:10px;">no factions watched yet</div>';
-      this.panel.querySelector("#pd-raw").innerHTML = rawHtml;
+      rawEl.innerHTML = rawHtml;
 
       // Cache summary — one line per cached faction, pinned marker for own
       const cacheRows =
