@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.6.0
+// @version      0.7.0
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,12 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 0.7.0 — Moved settings inline: API key, own faction, and watched factions are
+ *         now edited in a collapsible in-panel form with a "save changes" button
+ *         (replaces the old prompt() dialogs); saving applies immediately. Added
+ *         a footer showing rolling calls/min against the budget with a
+ *         green/orange/red status dot and a "last call" timestamp, ticking every
+ *         2s independent of the poll loop.
  * 0.6.0 — Redesigned main panel into per-faction collapsible cards. Each card
  *         shows a live status pill (NORMAL/ELEVATED/PUSHING/READY/NO DATA),
  *         current tempo, the calibrated baseline, and the hits/min thresholds
@@ -258,6 +264,20 @@
     }
     record() {
       this.calls.push(Date.now());
+    }
+
+    // How many calls in the last rolling 60s.
+    ratePerMinute() {
+      const now = Date.now();
+      return this.calls.filter((t) => now - t < 60000).length;
+    }
+    // Timestamp of the most recent call, or null if none yet.
+    lastCallTime() {
+      return this.calls.length ? this.calls[this.calls.length - 1] : null;
+    }
+    // Fraction of the configured budget currently used (0..1+).
+    utilization() {
+      return this.ratePerMinute() / this.max;
     }
   }
   const limiter = new RateLimiter(60); // leave headroom under the 100/min cap
@@ -850,10 +870,23 @@
         <div id="pd-header" style="font-weight:bold; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center; cursor:move; user-select:none;">
           <span title="Drag to move">⠿ War Push Detector</span>
           <span>
-            <button id="pd-setup-btn" style="${UI.btnStyle}" title="Configure API key & watched factions">⚙ setup</button>
+            <button id="pd-setup-btn" style="${UI.btnStyle}" title="Show/hide settings">⚙ setup</button>
             <button id="pd-calibrate-btn" style="${UI.btnStyle}" title="Seed baselines from chain history">↻ calibrate</button>
             <button id="pd-debug-btn" style="${UI.btnStyle}" title="Toggle debug panel">🐞</button>
           </span>
+        </div>
+        <div id="pd-setup" style="display:none; margin-bottom:8px; padding:8px; background:#161616; border:1px solid #333; border-radius:5px;">
+          <label style="display:block; font-size:10px; color:#999; margin-bottom:1px;">API key (Limited access is fine)</label>
+          <input id="pd-in-key" type="password" style="${UI.inputStyle}" placeholder="16-character key" />
+          <label style="display:block; font-size:10px; color:#999; margin:6px 0 1px;">Your own faction ID (pinned in cache)</label>
+          <input id="pd-in-own" type="text" style="${UI.inputStyle}" placeholder="e.g. 9055" />
+          <label style="display:block; font-size:10px; color:#999; margin:6px 0 1px;">Watched faction IDs (comma-separated)</label>
+          <input id="pd-in-watch" type="text" style="${UI.inputStyle}" placeholder="e.g. 16335, 30009" />
+          <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:8px;">
+            <span id="pd-setup-msg" style="flex:1; font-size:10px; color:#5fc46a; align-self:center;"></span>
+            <button id="pd-setup-cancel" style="${UI.btnStyle}">cancel</button>
+            <button id="pd-setup-save" style="${UI.btnStyle} background:#2f5130; border-color:#3f7040;">save changes</button>
+          </div>
         </div>
         <div id="pd-body">Not configured. Click "setup" to begin.</div>
         <div id="pd-debug" style="display:none; margin-top:8px; padding-top:6px; border-top:1px solid #333;">
@@ -862,12 +895,20 @@
           <div id="pd-raw"></div>
           <div id="pd-cache" style="font-size:10px; line-height:1.5;"></div>
         </div>
+        <div id="pd-footer" style="margin-top:8px; padding-top:6px; border-top:1px solid #333; display:flex; align-items:center; gap:6px; font-size:10px; color:#888;">
+          <span id="pd-rate-dot" style="width:8px; height:8px; border-radius:50%; background:#5fc46a; flex:none;"></span>
+          <span id="pd-rate-text" style="flex:1;">0 calls/min</span>
+          <span id="pd-lastcall">last: never</span>
+        </div>
       `;
       document.body.appendChild(panel);
-      panel.querySelector("#pd-setup-btn").onclick = () => UI.promptSetup();
+      panel.querySelector("#pd-setup-btn").onclick = () => UI.toggleSetup();
       panel.querySelector("#pd-calibrate-btn").onclick = () =>
         UI.calibrateAll();
       panel.querySelector("#pd-debug-btn").onclick = () => UI.toggleDebug();
+      panel.querySelector("#pd-setup-save").onclick = () => UI.saveSetup();
+      panel.querySelector("#pd-setup-cancel").onclick = () =>
+        UI.toggleSetup(false);
       this.panel = panel;
 
       // Restore debug-open state
@@ -879,9 +920,16 @@
       this.enableDrag(panel.querySelector("#pd-header"), panel);
       this.watchViewportResize(panel);
       this.syncAcrossTabs(panel);
+
+      // Footer rate indicator ticks independently of polls so it stays live
+      // even between 30s cycles.
+      this.refreshFooter();
+      setInterval(() => this.refreshFooter(), 2000);
     },
     btnStyle:
       "font:11px monospace; cursor:pointer; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:3px; padding:1px 5px;",
+    inputStyle:
+      "width:100%; box-sizing:border-box; font:11px monospace; background:#0e0e0e; color:#eee; border:1px solid #444; border-radius:3px; padding:3px 5px;",
     debugOpen: false,
 
     // Keep a proposed left/top within the visible viewport, leaving a small
@@ -1110,7 +1158,8 @@
       const body = this.panel.querySelector("#pd-body");
       const watchlist = Storage.getWatchedFactions();
       if (watchlist.length === 0) {
-        body.textContent = 'Not configured. Click "setup" to begin.';
+        body.innerHTML =
+          '<div style="color:#999; font-size:11px;">No factions watched. Click <b>⚙ setup</b> to add your API key and faction IDs.</div>';
         return;
       }
       // Preserve which cards are open across the refresh (poll-driven re-render
@@ -1216,31 +1265,79 @@
       }
       this.refresh();
     },
-    promptSetup() {
-      const currentKey = Storage.getApiKey();
-      const key = prompt("Torn API key (Limited access is fine):", currentKey);
-      if (key !== null) Storage.setApiKey(key.trim());
-
-      const currentOwn = Storage.getOwnFactionId() || "";
-      const own = prompt(
-        "Your OWN faction ID (pinned in cache, never evicted):",
-        currentOwn,
-      );
-      if (own !== null) Storage.setOwnFactionId(own.trim() || null);
-
-      const currentList = Storage.getWatchedFactions().join(",");
-      const list = prompt(
-        "Faction ID(s) to watch, comma-separated:",
-        currentList,
-      );
-      if (list !== null) {
-        const ids = list
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        Storage.setWatchedFactions(ids);
+    // Toggle the inline setup form. When opening, populate inputs from stored
+    // values; `force` can explicitly open (true) or close (false).
+    toggleSetup(force) {
+      const form = this.panel.querySelector("#pd-setup");
+      const willOpen =
+        force !== undefined ? force : form.style.display === "none";
+      if (willOpen) {
+        this.panel.querySelector("#pd-in-key").value =
+          Storage.getApiKey() || "";
+        this.panel.querySelector("#pd-in-own").value =
+          Storage.getOwnFactionId() || "";
+        this.panel.querySelector("#pd-in-watch").value =
+          Storage.getWatchedFactions().join(", ");
+        this.panel.querySelector("#pd-setup-msg").textContent = "";
       }
+      form.style.display = willOpen ? "block" : "none";
+    },
+
+    saveSetup() {
+      const key = this.panel.querySelector("#pd-in-key").value.trim();
+      const own = this.panel.querySelector("#pd-in-own").value.trim();
+      const watchRaw = this.panel.querySelector("#pd-in-watch").value;
+      const watch = watchRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      Storage.setApiKey(key);
+      Storage.setOwnFactionId(own || null);
+      Storage.setWatchedFactions(watch);
+      CONFIG.cache.ownFactionId = own || null;
+
+      const msg = this.panel.querySelector("#pd-setup-msg");
+      msg.textContent = "Saved ✓";
+      setTimeout(() => {
+        if (msg) msg.textContent = "";
+      }, 2000);
+
       this.refresh();
+      pollAll(); // apply new settings immediately rather than waiting a cycle
+    },
+
+    // Footer: rolling call rate, color-coded against the budget, plus how long
+    // ago the last API call fired. Independent of the poll loop so it stays
+    // live between cycles.
+    refreshFooter() {
+      if (!this.panel) return;
+      const rate = limiter.ratePerMinute();
+      const util = limiter.utilization();
+      const dot = this.panel.querySelector("#pd-rate-dot");
+      const text = this.panel.querySelector("#pd-rate-text");
+      const last = this.panel.querySelector("#pd-lastcall");
+
+      // Thresholds are against our self-imposed budget (limiter.max = 60),
+      // which already sits under Torn's 100/min hard cap.
+      const color =
+        util >= 0.9 ? "#ff5555" : util >= 0.6 ? "#ffb040" : "#5fc46a";
+      dot.style.background = color;
+      text.textContent = `${rate} calls/min (of ${limiter.max})`;
+      text.style.color = color;
+
+      const lastTs = limiter.lastCallTime();
+      last.textContent = lastTs
+        ? `last: ${this.agoStr(lastTs)}`
+        : "last: never";
+    },
+
+    agoStr(ts) {
+      const sec = Math.round((Date.now() - ts) / 1000);
+      if (sec < 1) return "just now";
+      if (sec < 60) return `${sec}s ago`;
+      const min = Math.round(sec / 60);
+      return `${min}m ago`;
     },
   };
 
