@@ -4,7 +4,7 @@
 // @version      1.5.1
 // @description  Mac-optimized shortcuts (arrows + J/K/L) for attacks to enhance accessibility
 // @author       MrChurch [3654415]
-// @license      MIT
+// @license      CC-BY-NC-SA-4.0
 // @match        https://www.torn.com/page.php?sid=attack*
 // @run-at       document-idle
 // @grant        GM.getValue

@@ -4,7 +4,7 @@
 // @version      1.5
 // @description  Customizable keyboard shortcuts (J,K,L and Arrow Keys) for attacks to enhance accessibility on MacBook layout
 // @author       MrChurch [3654415]
-// @license      MIT
+// @license      CC-BY-NC-SA-4.0
 // @match        https://www.torn.com/page.php?sid=attack*
 // @run-at       document-idle
 // @grant        GM.getValue
