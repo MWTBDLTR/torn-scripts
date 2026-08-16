@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.7.0
+// @version      0.9.0
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,30 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 0.9.0 — Major analyzer rework. Replaced the EWMA baseline (which froze across
+ *         idle gaps and self-trained on pushes) with a stable two-population
+ *         model:
+ *         - BASELINE = average of concluded NORMAL war chains (resting tempo).
+ *           A concluded chain updates the baseline only if it was below the
+ *           elevated line, so pushes never train the baseline to ignore pushes.
+ *         - Live signal = current chain's running average (hits/min since
+ *           chain start), same unit as the baseline, with a warmup floor.
+ *         - Concluded chains above baseline are recorded as OBSERVED elevated/
+ *           push tempo and shown in the card as empirical references.
+ *         - Thresholds: manual override (absolute or ×baseline, per field)
+ *           always wins; else inferred baseline+Nσ. Provenance shown per value.
+ *         - Per-faction manual override editor added to each card.
+ *         - Chain conclusion detected even when the endpoint returns no active
+ *           chain, so the just-finished chain is classified correctly.
+ *         Note: for factions with very consistent tempo (tight variance), even
+ *         small increases can read as a push; use manual overrides to adjust.
+ * 0.8.0 — Fixed multi-tab API amplification: with several Torn tabs open, each
+ *         ran its own poll loop, making Nx the API calls (and each tab's
+ *         in-memory rate limiter was none the wiser). Added cross-tab leader
+ *         election via a shared GM-storage heartbeat — exactly one tab polls;
+ *         the rest render from the shared state it keeps fresh, and take over
+ *         within ~8s if the leader closes. Footer shows "◉ polling" / "○
+ *         following" per tab.
  * 0.7.0 — Moved settings inline: API key, own faction, and watched factions are
  *         now edited in a collapsible in-panel form with a "save changes" button
  *         (replaces the old prompt() dialogs); saving applies immediately. Added
@@ -50,12 +74,15 @@
   const CONFIG = {
     apiBase: "https://api.torn.com/v2",
     pollIntervalMs: 30 * 1000, // chain endpoint is real-time/non-cached; 30s gives fine resolution
-    ewmaAlpha: 0.3, // weight on new samples; higher = reacts faster, noisier
-    zScoreElevated: 2.0, // std-devs above baseline => "Elevated"
-    zScorePushing: 3.5, // std-devs above baseline => "Pushing"
-    minSamplesBeforeAlerts: 5, // don't alert until the baseline has warmed up
-    maxSamplesStored: 1440, // ~12 hrs of history at 30s polling
+    zScoreElevated: 2.0, // std-devs above baseline => "Elevated" (inferred threshold)
+    zScorePushing: 3.5, // std-devs above baseline => "Pushing" (inferred threshold)
     tightTimeoutThreshold: 30, // seconds; refreshing this close to expiry flags as "managed"
+    maxSamplesStored: 1440, // ~12 hrs of history at 30s polling
+    liveModel: {
+      warmupMinChainMinutes: 3, // don't trust a chain's running-average until it's this old
+      warmupMinHits: 15, // ...and has at least this many hits (whichever is later)
+      minBaselineChains: 3, // qualifying concluded chains needed before inferred alerts fire
+    },
     calibration: {
       chainsToSample: 15, // how many past chains to pull for a baseline
       minChainsForCalibration: 3, // below this, don't trust the seeded baseline
@@ -136,6 +163,22 @@
       const names = this.getFactionNames();
       names[id] = name;
       GM_setValue("pushdet_facnames", JSON.stringify(names));
+    },
+    // Per-faction user overrides for baseline/thresholds. Shape:
+    //   { baseline: number|null,           // manual baseline hits/min
+    //     elevated: {mode:'abs'|'mult', value:number} | null,
+    //     pushing:  {mode:'abs'|'mult', value:number} | null }
+    // Any null field falls back to the inferred value.
+    getOverrides(id) {
+      const raw = GM_getValue("pushdet_overrides", null);
+      const all = raw ? JSON.parse(raw) : {};
+      return all[id] || {};
+    },
+    setOverrides(id, overrides) {
+      const raw = GM_getValue("pushdet_overrides", null);
+      const all = raw ? JSON.parse(raw) : {};
+      all[id] = overrides;
+      GM_setValue("pushdet_overrides", JSON.stringify(all));
     },
   };
 
@@ -698,7 +741,7 @@
     const attackChains = groupAttacksByChain(priorAttacks);
     let result = computeStatsFromRates(attackChains);
     let source = "attacks";
-    let sample = attackChains.slice(0, 3);
+    let qualifyingChains = attackChains; // {id, rate} entries in scope below
 
     if (!result.ok) {
       // Fall back to their general chain history. Keep only chains that
@@ -707,28 +750,37 @@
       // even when they occurred during a war.
       const rawChains = await fetchPastChains(factionId, apiKey);
       const parsedChains = parseChainList(rawChains);
-      const warChains = await filterToWarChains(
+      qualifyingChains = await filterToWarChains(
         parsedChains,
         factionId,
         apiKey,
       );
-      result = computeStatsFromRates(warChains);
+      result = computeStatsFromRates(qualifyingChains);
       source = "war-chains";
-      sample = warChains.slice(0, 3);
     }
+    const sample = qualifyingChains.slice(0, 3);
 
-    const state = freshState();
+    const state = Storage.load(factionId) || freshState();
     if (result.ok) {
-      state.ewmaRate = result.meanRate;
-      state.ewmaVar = result.variance;
-      state.calibratedFrom = result.sampleCount;
+      // Seed the baseline from historical qualifying chains. Store per-chain
+      // rates so live conclusions can keep extending the same baseline.
+      state.baselineChains = qualifyingChains.map((c) => ({
+        chainId: c.id,
+        rate: c.rate,
+      }));
+      if (state.baselineChains.length > CONFIG.cache.maxChainsPerFaction) {
+        state.baselineChains = state.baselineChains.slice(
+          -CONFIG.cache.maxChainsPerFaction,
+        );
+      }
+      recomputeBaseline(state);
       state.calibrationSource = source;
       Logger.info(
-        `calibrated faction ${factionId} from ${result.sampleCount} ${source} (${result.meanRate.toFixed(1)} ± ${result.stdDev.toFixed(1)} hits/min)`,
+        `calibrated faction ${factionId} from ${result.sampleCount} ${source} (${result.meanRate.toFixed(1)} ± ${result.stdDev.toFixed(1)} hits/min avg)`,
       );
     } else {
       Logger.warn(
-        `calibration for faction ${factionId} inconclusive (only ${result.sampleCount} usable ${source} groups)`,
+        `calibration for faction ${factionId} inconclusive (only ${result.sampleCount} usable ${source} chains) — will build baseline live as chains conclude`,
       );
     }
     Storage.save(factionId, state);
@@ -745,79 +797,254 @@
   }
 
   // =========================================================================
-  // 5. ANALYZER — EWMA baseline + rolling z-score, per faction
-  //    No training data needed: the baseline calibrates itself from that
-  //    faction's own recent behavior.
+  // 5. ANALYZER — stable baseline + running-average live signal
+  //
+  //   Model (chain-average, the only unit the API supports for enemies):
+  //     * BASELINE = mean/variance of COMPLETED qualifying war-chain average
+  //       rates (hits / durationMin). Updated only when a chain concludes and
+  //       passes the war-chain gate. The in-progress chain is NEVER in its own
+  //       baseline — so a push can't train the baseline to ignore itself.
+  //     * LIVE SIGNAL = the current chain's running average
+  //       (current hits / minutes since chain start), same unit as baseline.
+  //       Trusted for alerts only after a warmup floor (time AND hits), since a
+  //       fresh chain's running average is dominated by the opening bonus flurry.
+  //     * THRESHOLDS = user override if set, else inferred (baseline + Nσ).
+  //       Manual always wins; inference is still computed for display.
+  //
+  //   This replaces the old EWMA, which conflated "what's normal" with "what's
+  //   happening now" — freezing across idle gaps and self-training on pushes.
   // =========================================================================
   function freshState() {
     return {
-      samples: [], // [{t, current, timeout, chainId}]
-      ewmaRate: null, // running mean of hits-per-minute
-      ewmaVar: null, // running variance of that rate
-      lastStatus: "Normal",
-      tightRefreshes: 0, // count of hits landed under tightTimeoutThreshold
+      // Baseline population: concluded chains that were NORMAL (below elevated).
+      // Pushes are deliberately excluded so they can't train the baseline to
+      // consider pushing normal.
+      baselineChains: [], // [{rate, chainId}]
+      baselineMean: null,
+      baselineVar: null,
+      // Observed above-baseline populations — what elevated/push ACTUALLY looked
+      // like for this faction, as opposed to the σ-inferred thresholds.
+      elevatedChains: [], // [{rate, chainId}] concluded chains in the elevated band
+      pushChains: [], // [{rate, chainId}] concluded chains at/above push
+      calibrationSource: null, // 'attacks', 'war-chains', 'live', or null
+
+      // Live (current chain):
+      liveChainId: null,
+      liveChainStart: null,
+      liveCurrent: 0,
+      liveRate: null,
+      tightRefreshes: 0,
       totalHits: 0,
-      calibratedFrom: null, // number of past chains/attack-groups used to seed the baseline, if any
-      calibrationSource: null, // 'attacks' (best) or 'chains' (fallback), or null if uncalibrated
+
+      lastStatus: "Normal",
+      lastPollTs: null,
     };
   }
 
-  function updateAnalysis(state, chain, now) {
-    const sample = {
-      t: now,
-      current: chain.current,
-      timeout: chain.timeout,
-      chainId: chain.id,
+  // Recompute baseline mean/variance from the stored NORMAL concluded chains.
+  function recomputeBaseline(state) {
+    const rates = state.baselineChains.map((c) => c.rate);
+    if (rates.length === 0) {
+      state.baselineMean = null;
+      state.baselineVar = null;
+      return;
+    }
+    const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
+    const variance =
+      rates.reduce((a, b) => a + (b - mean) ** 2, 0) / rates.length;
+    state.baselineMean = mean;
+    state.baselineVar = variance;
+  }
+
+  const avgOf = (chains) =>
+    chains.length
+      ? chains.reduce((a, c) => a + c.rate, 0) / chains.length
+      : null;
+
+  // Route a concluded chain into the right population based on the thresholds
+  // AS THEY STAND BEFORE this chain is added (so a chain never classifies
+  // itself). Only NORMAL chains update the baseline; elevated/push chains are
+  // recorded separately as observed above-baseline tempo, and never lower the
+  // baseline they're meant to be measured against.
+  function ingestConcludedChain(state, chainId, rate, overrides) {
+    const dedup = (arr) => arr.some((c) => c.chainId === chainId);
+    if (
+      dedup(state.baselineChains) ||
+      dedup(state.elevatedChains) ||
+      dedup(state.pushChains)
+    )
+      return false;
+
+    const bounded = (arr) => {
+      if (arr.length > CONFIG.cache.maxChainsPerFaction) arr.shift();
     };
-    const prev = state.samples[state.samples.length - 1];
-    state.samples.push(sample);
-    if (state.samples.length > CONFIG.maxSamplesStored) state.samples.shift();
+    const pre = resolveThresholds(state, overrides || {}); // thresholds BEFORE this chain
 
-    if (!prev) return state;
-
-    // A new chain (different id, or current reset lower) invalidates the delta —
-    // don't let a chain break/restart look like a negative attack rate.
-    const sameChain = prev.chainId === chain.id;
-    const hitsDelta = sameChain ? chain.current - prev.current : 0;
-    const dtMin = (now - prev.t) / 60000;
-    if (dtMin <= 0 || hitsDelta < 0) return state;
-
-    if (hitsDelta > 0) {
-      state.totalHits += hitsDelta;
-      // A hit landing with little time left on the timeout suggests active,
-      // deliberate chain management rather than casual/incidental hits.
-      if (chain.timeout <= CONFIG.tightTimeoutThreshold) state.tightRefreshes++;
-    }
-
-    const rate = hitsDelta / dtMin; // hits per minute
-
-    if (state.ewmaRate === null) {
-      state.ewmaRate = rate;
-      state.ewmaVar = 0;
+    let bucket;
+    if (pre && pre.pushingAt !== null && rate >= pre.pushingAt) {
+      state.pushChains.push({ chainId, rate });
+      bounded(state.pushChains);
+      bucket = "push";
+    } else if (pre && pre.elevatedAt !== null && rate >= pre.elevatedAt) {
+      state.elevatedChains.push({ chainId, rate });
+      bounded(state.elevatedChains);
+      bucket = "elevated";
     } else {
-      const delta = rate - state.ewmaRate;
-      state.ewmaRate = state.ewmaRate + CONFIG.ewmaAlpha * delta;
-      state.ewmaVar =
-        (1 - CONFIG.ewmaAlpha) *
-        (state.ewmaVar + CONFIG.ewmaAlpha * delta * delta);
+      // Normal (or no thresholds yet) -> this is resting tempo; update baseline.
+      state.baselineChains.push({ chainId, rate });
+      bounded(state.baselineChains);
+      recomputeBaseline(state);
+      if (!state.calibrationSource) state.calibrationSource = "live";
+      bucket = "baseline";
+    }
+    return bucket;
+  }
+
+  // Resolve effective baseline + thresholds, honoring user overrides. Also
+  // surfaces OBSERVED elevated/push rates (from past above-baseline chains) as
+  // a second, empirical reference alongside the σ-inferred thresholds.
+  function resolveThresholds(state, overrides) {
+    const hasInferredBaseline =
+      state.baselineMean !== null &&
+      state.baselineChains.length >= CONFIG.liveModel.minBaselineChains;
+
+    let baseline = null,
+      baselineProv = null;
+    if (typeof overrides.baseline === "number") {
+      baseline = overrides.baseline;
+      baselineProv = "manual";
+    } else if (hasInferredBaseline) {
+      baseline = state.baselineMean;
+      baselineProv = "inferred";
     }
 
-    const std = Math.sqrt(Math.max(state.ewmaVar, 0.0001));
-    const z = (rate - state.ewmaRate) / std;
+    const std =
+      hasInferredBaseline && state.baselineVar !== null
+        ? Math.sqrt(Math.max(state.baselineVar, 0.0001))
+        : null;
 
+    const resolve = (ov, sigma) => {
+      if (ov && ov.mode === "abs")
+        return { value: ov.value, prov: "manual-abs" };
+      if (ov && ov.mode === "mult" && baseline !== null)
+        return { value: baseline * ov.value, prov: "manual-×" };
+      if (baseline !== null && std !== null)
+        return { value: baseline + sigma * std, prov: "inferred" };
+      return { value: null, prov: null };
+    };
+
+    const elevated = resolve(overrides.elevated, CONFIG.zScoreElevated);
+    const pushing = resolve(overrides.pushing, CONFIG.zScorePushing);
+
+    if (baseline === null && elevated.value === null && pushing.value === null)
+      return null;
+
+    return {
+      baseline,
+      std,
+      elevatedAt: elevated.value,
+      pushingAt: pushing.value,
+      provenance: {
+        baseline: baselineProv,
+        elevated: elevated.prov,
+        pushing: pushing.prov,
+      },
+      // Empirical references (null until such chains have been observed):
+      observedElevated: avgOf(state.elevatedChains),
+      observedPush: avgOf(state.pushChains),
+      observedElevatedN: state.elevatedChains.length,
+      observedPushN: state.pushChains.length,
+    };
+  }
+
+  // Process one live /chain reading. Handles chain transitions (conclusion +
+  // new chain), updates the running-average live signal, and sets status by
+  // comparing it against the resolved thresholds.
+  function updateAnalysis(state, chain, nowMs, overrides) {
+    const nowSec = Math.floor(nowMs / 1000);
+
+    // --- Chain transition: the chain we were tracking is no longer current ---
+    if (state.liveChainId !== null && state.liveChainId !== chain.id) {
+      // The previous chain concluded. Route its average into the right
+      // population (baseline only if it was normal — see ingestConcludedChain).
+      finalizePreviousChain(state, overrides);
+    }
+
+    // --- Start tracking a new chain ---
+    if (state.liveChainId !== chain.id) {
+      state.liveChainId = chain.id;
+      state.liveChainStart = chain.start || nowSec;
+      state.liveCurrent = chain.current;
+      state.tightRefreshes = 0;
+      state.totalHits = 0;
+      state.liveRate = null;
+    } else {
+      // Same chain — accrue hit delta for tight-refresh tracking.
+      const delta = chain.current - state.liveCurrent;
+      if (delta > 0) {
+        state.totalHits += delta;
+        if (chain.timeout <= CONFIG.tightTimeoutThreshold)
+          state.tightRefreshes++;
+      }
+      state.liveCurrent = chain.current;
+    }
+
+    // --- Live running-average signal (same unit as baseline) ---
+    const elapsedMin = Math.max((nowSec - state.liveChainStart) / 60, 0);
+    const warmedUp =
+      elapsedMin >= CONFIG.liveModel.warmupMinChainMinutes &&
+      chain.current >= CONFIG.liveModel.warmupMinHits;
+    state.liveRate = elapsedMin > 0 ? chain.current / elapsedMin : null;
+
+    // --- Status: compare live running-average to resolved thresholds ---
     let status = "Normal";
-    const hasBasis =
-      state.calibratedFrom ||
-      state.samples.length >= CONFIG.minSamplesBeforeAlerts;
-    if (hasBasis) {
-      if (z >= CONFIG.zScorePushing) status = "PUSHING";
-      else if (z >= CONFIG.zScoreElevated) status = "Elevated";
+    const thresholds = resolveThresholds(state, overrides || {});
+    if (thresholds && warmedUp && state.liveRate !== null) {
+      if (
+        thresholds.pushingAt !== null &&
+        state.liveRate >= thresholds.pushingAt
+      )
+        status = "PUSHING";
+      else if (
+        thresholds.elevatedAt !== null &&
+        state.liveRate >= thresholds.elevatedAt
+      )
+        status = "Elevated";
+    } else if (!warmedUp && state.liveRate !== null) {
+      status = "Warming";
     }
 
     state.lastStatus = status;
-    state.lastRate = rate;
-    state.lastZ = z;
+    state.lastPollTs = nowMs;
+    // Snapshot resolved values for the card (avoids recomputing in the UI).
+    state.resolved = thresholds;
+    state.warmedUp = warmedUp;
+    state.elapsedMin = elapsedMin;
     return state;
+  }
+
+  // Fold the just-concluded live chain into the right population if it looks
+  // like war tempo. Classification (baseline vs. elevated vs. push) happens
+  // inside ingestConcludedChain against the pre-existing thresholds, so a push
+  // chain won't pollute the baseline. Heuristic length gate mirrors the
+  // report-based war-chain gate (we don't have the report here).
+  function finalizePreviousChain(state, overrides) {
+    if (state.liveChainStart === null || state.liveCurrent <= 0) return;
+    const durMin = Math.max((Date.now() / 1000 - state.liveChainStart) / 60, 0);
+    if (durMin <= 0) return;
+    if (state.liveCurrent < CONFIG.calibration.minWarChainLength) return; // too short to trust
+    const rate = state.liveCurrent / durMin;
+    const bucket = ingestConcludedChain(
+      state,
+      state.liveChainId,
+      rate,
+      overrides,
+    );
+    if (bucket) {
+      Logger.info(
+        `concluded chain ${state.liveChainId} (${rate.toFixed(1)} hits/min avg) recorded as ${bucket}`,
+      );
+    }
   }
 
   // =========================================================================
@@ -834,10 +1061,24 @@
       const cache = RawCache.get(factionId);
       cache.lastPollTime = Date.now();
       cache.lastChain = chain;
-      if (!chain) continue; // no chain running, or call failed — skip this cycle
 
       let state = Storage.load(factionId) || freshState();
-      state = updateAnalysis(state, chain, Date.now());
+      const overrides = Storage.getOverrides(factionId);
+
+      if (chain && chain.current > 0) {
+        // Active chain — update the live signal + status.
+        state = updateAnalysis(state, chain, Date.now(), overrides);
+      } else {
+        // No active chain (endpoint returned nothing/zero). If we were tracking
+        // one, it just concluded — fold it into the baseline, then go idle.
+        if (state.liveChainId !== null) {
+          finalizePreviousChain(state, overrides);
+          state.liveChainId = null;
+          state.liveRate = null;
+          state.lastStatus = "Idle";
+          state.resolved = resolveThresholds(state, overrides);
+        }
+      }
       Storage.save(factionId, state);
     }
     Logger.info(`poll cycle complete (${watchlist.length} faction(s) watched)`);
@@ -898,6 +1139,7 @@
         <div id="pd-footer" style="margin-top:8px; padding-top:6px; border-top:1px solid #333; display:flex; align-items:center; gap:6px; font-size:10px; color:#888;">
           <span id="pd-rate-dot" style="width:8px; height:8px; border-radius:50%; background:#5fc46a; flex:none;"></span>
           <span id="pd-rate-text" style="flex:1;">0 calls/min</span>
+          <span id="pd-leader" style="flex:none;" title="Polling tab: only one tab polls the API"></span>
           <span id="pd-lastcall">last: never</span>
         </div>
       `;
@@ -1050,81 +1292,127 @@
       if (this.debugOpen) this.refreshDebug();
     },
 
-    // Translate the internal EWMA/z-score model into human-meaningful numbers:
-    // current tempo, the calibrated baseline, and the hits/min at which the
-    // faction would cross into Elevated / Pushing. Returns null when there's no
-    // baseline yet (can't compute thresholds).
-    computeInsight(s) {
-      if (s.ewmaRate === null || s.ewmaVar === null) return null;
-      const std = Math.sqrt(Math.max(s.ewmaVar, 0.0001));
-      return {
-        baseline: s.ewmaRate,
-        std,
-        elevatedAt: s.ewmaRate + CONFIG.zScoreElevated * std,
-        pushingAt: s.ewmaRate + CONFIG.zScorePushing * std,
-        current: s.lastRate ?? null,
-        z: s.lastZ ?? null,
-      };
-    },
-
     statusColor(status) {
       return status === "PUSHING"
         ? "#ff5555"
         : status === "Elevated"
           ? "#ffb040"
-          : "#5fc46a";
+          : status === "Warming"
+            ? "#7ab8ff"
+            : status === "Idle"
+              ? "#888"
+              : "#5fc46a"; // Normal
+    },
+
+    // Short human tag for a threshold's provenance.
+    provTag(prov) {
+      return prov === "manual" || prov === "manual-abs"
+        ? '<span style="color:#c090ff;">manual</span>'
+        : prov === "manual-×"
+          ? '<span style="color:#c090ff;">manual ×</span>'
+          : prov === "inferred"
+            ? '<span style="color:#777;">inferred</span>'
+            : "";
     },
 
     // Build one collapsible faction card. Open/closed state is restored by the
     // caller via the data-faction/open attributes (survives poll refreshes).
     factionCard(id, openSet) {
       const s = Storage.load(id);
+      const ov = Storage.getOverrides(id);
       const label = escapeHtml(factionLabel(id));
       const open = openSet.has(String(id)) ? " open" : "";
+      const r = s?.resolved || (s ? resolveThresholds(s, ov) : null);
 
-      // Header status pill + summary line depend on how far along this faction is.
+      // Header pill + one-line summary reflect current state.
       let pill, pillColor, summary;
-      if (!s || s.samples.length < 1) {
-        pill = s?.calibratedFrom ? "READY" : "NO DATA";
+      if (!s) {
+        pill = "NO DATA";
         pillColor = "#888";
-        summary = s?.calibratedFrom
-          ? `Calibrated, waiting for a live chain`
-          : `Awaiting first chain data`;
+        summary = "Awaiting first chain data";
+      } else if (s.lastStatus === "Idle" || s.liveChainId === null) {
+        pill = "IDLE";
+        pillColor = "#888";
+        summary =
+          r && r.baseline !== null
+            ? `No active chain · baseline ${r.baseline.toFixed(1)} hits/min`
+            : "No active chain · no baseline yet";
       } else {
-        pill = s.lastStatus.toUpperCase();
+        pill = (
+          s.lastStatus === "Warming" ? "WARMING" : s.lastStatus
+        ).toUpperCase();
         pillColor = this.statusColor(s.lastStatus);
-        summary = `${s.lastRate?.toFixed(1) ?? "—"} hits/min now`;
+        summary =
+          s.liveRate !== null
+            ? `${s.liveRate.toFixed(1)} hits/min this chain (${s.liveCurrent} hits, ${s.elapsedMin?.toFixed(0) ?? "?"}m)`
+            : "Chain starting…";
       }
 
-      // Body: calibration basis + tempo insight table.
-      const basis = s?.calibratedFrom
-        ? `Baseline from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past war(s) vs. you" : "past war chains"}`
-        : s && s.samples.length < CONFIG.minSamplesBeforeAlerts
-          ? `Warming up — ${s.samples.length}/${CONFIG.minSamplesBeforeAlerts} live samples before alerts`
-          : s
-            ? "Live baseline (no historical calibration)"
+      // Basis line: where the baseline comes from.
+      const chainCount = s?.baselineChains?.length || 0;
+      let basis;
+      if (!s || chainCount === 0) {
+        basis =
+          ov.baseline != null || ov.elevated || ov.pushing
+            ? "Using manual thresholds (no historical data)"
+            : "No baseline — will build as chains conclude, or set manual values below";
+      } else {
+        const srcTxt =
+          s.calibrationSource === "attacks"
+            ? "past war(s) vs. you"
+            : s.calibrationSource === "live"
+              ? "observed concluded chains"
+              : "past war chains";
+        basis = `Baseline from ${chainCount} ${srcTxt}`;
+      }
+
+      // Insight table — only when we have something to compare against.
+      let insightHtml = "";
+      if (r) {
+        const row = (lbl, val, color, tag) =>
+          `<div style="display:flex; justify-content:space-between; padding:1px 0; gap:8px;">
+             <span style="color:#999;">${lbl}${tag ? ` ${tag}` : ""}</span>
+             <span style="color:${color || "#ddd"}; font-variant-numeric:tabular-nums; white-space:nowrap;">${val}</span>
+           </div>`;
+        const curColor =
+          s.lastStatus === "Normal" ||
+          s.lastStatus === "Idle" ||
+          s.lastStatus === "Warming"
+            ? "#ddd"
+            : this.statusColor(s.lastStatus);
+        const curVal =
+          s.liveRate !== null
+            ? `${s.liveRate.toFixed(1)} hits/min${s.lastStatus === "Warming" ? " (warming)" : ""}`
+            : "—";
+        const fmt = (v) =>
+          v !== null && v !== undefined ? `${v.toFixed(1)} hits/min` : "—";
+
+        // Observed rows appear only when we've actually seen above-baseline chains.
+        const obsElev =
+          r.observedElevated !== null
+            ? row(
+                `Seen elevated (${r.observedElevatedN})`,
+                `~${r.observedElevated.toFixed(1)} hits/min`,
+                "#ffb040",
+                '<span style="color:#777;">observed</span>',
+              )
+            : "";
+        const obsPush =
+          r.observedPush !== null
+            ? row(
+                `Seen pushing (${r.observedPushN})`,
+                `~${r.observedPush.toFixed(1)} hits/min`,
+                "#ff5555",
+                '<span style="color:#777;">observed</span>',
+              )
             : "";
 
-      let insightHtml = "";
-      const insight = s ? this.computeInsight(s) : null;
-      if (insight) {
-        const row = (lbl, val, color) =>
-          `<div style="display:flex; justify-content:space-between; padding:1px 0;">
-             <span style="color:#999;">${lbl}</span>
-             <span style="color:${color || "#ddd"}; font-variant-numeric:tabular-nums;">${val}</span>
-           </div>`;
-        const cur =
-          insight.current !== null
-            ? `${insight.current.toFixed(1)} hits/min`
-            : "—";
-        const curColor =
-          s.lastStatus === "Normal" ? "#ddd" : this.statusColor(s.lastStatus);
         insightHtml = `<div style="margin-top:5px; padding:5px 6px; background:#141414; border-radius:4px; font-size:11px;">
-             ${row("Current tempo", cur, curColor)}
-             ${row("Typical (baseline)", `${insight.baseline.toFixed(1)} hits/min`)}
-             ${row("→ Elevated above", `${insight.elevatedAt.toFixed(1)} hits/min`, "#ffb040")}
-             ${row("→ Push above", `${insight.pushingAt.toFixed(1)} hits/min`, "#ff5555")}
-             ${insight.z !== null ? row("Deviation", `${insight.z >= 0 ? "+" : ""}${insight.z.toFixed(1)}σ`) : ""}
+             ${row("Current (this chain)", curVal, curColor)}
+             ${row("Baseline", fmt(r.baseline), "#ddd", this.provTag(r.provenance.baseline))}
+             ${row("→ Elevated ≥", fmt(r.elevatedAt), "#ffb040", this.provTag(r.provenance.elevated))}
+             ${row("→ Push ≥", fmt(r.pushingAt), "#ff5555", this.provTag(r.provenance.pushing))}
+             ${obsElev}${obsPush}
            </div>`;
       }
 
@@ -1138,6 +1426,9 @@
            </div>`;
       }
 
+      // Per-faction override editor (collapsed within the card).
+      const ovEl = this.overrideEditorHtml(id, ov);
+
       return `
         <details data-faction="${id}"${open} style="margin-bottom:6px; background:#1e1e1e; border:1px solid #333; border-radius:5px;">
           <summary style="cursor:pointer; list-style:none; padding:6px 8px; display:flex; align-items:center; gap:8px;">
@@ -1149,8 +1440,92 @@
             <div style="font-size:10px; color:#777;">${basis}</div>
             ${insightHtml}
             ${tightHtml}
+            ${ovEl}
           </div>
         </details>`;
+    },
+
+    // Collapsible manual-override editor inside a faction card. Values persist
+    // per faction; blank fields fall back to inference.
+    overrideEditorHtml(id, ov) {
+      const inS =
+        "width:64px; box-sizing:border-box; font:11px monospace; background:#0e0e0e; color:#eee; border:1px solid #444; border-radius:3px; padding:2px 4px;";
+      const selS =
+        "font:11px monospace; background:#0e0e0e; color:#eee; border:1px solid #444; border-radius:3px; padding:2px;";
+      const elMode = ov.elevated?.mode || "abs";
+      const puMode = ov.pushing?.mode || "abs";
+      return `
+        <details style="margin-top:6px;" data-ovfor="${id}">
+          <summary style="cursor:pointer; font-size:10px; color:#888; list-style:none;">⚙ manual overrides</summary>
+          <div style="margin-top:5px; font-size:10px; display:grid; grid-template-columns:auto 1fr; gap:4px 6px; align-items:center;">
+            <label style="color:#999;">Baseline</label>
+            <input class="pd-ov-base" data-fid="${id}" type="number" step="0.1" placeholder="inferred" value="${ov.baseline ?? ""}" style="${inS}" />
+
+            <label style="color:#999;">Elevated</label>
+            <span>
+              <input class="pd-ov-el-val" data-fid="${id}" type="number" step="0.1" placeholder="auto" value="${ov.elevated?.value ?? ""}" style="${inS}" />
+              <select class="pd-ov-el-mode" data-fid="${id}" style="${selS}">
+                <option value="abs"${elMode === "abs" ? " selected" : ""}>hits/min</option>
+                <option value="mult"${elMode === "mult" ? " selected" : ""}>× base</option>
+              </select>
+            </span>
+
+            <label style="color:#999;">Push</label>
+            <span>
+              <input class="pd-ov-pu-val" data-fid="${id}" type="number" step="0.1" placeholder="auto" value="${ov.pushing?.value ?? ""}" style="${inS}" />
+              <select class="pd-ov-pu-mode" data-fid="${id}" style="${selS}">
+                <option value="abs"${puMode === "abs" ? " selected" : ""}>hits/min</option>
+                <option value="mult"${puMode === "mult" ? " selected" : ""}>× base</option>
+              </select>
+            </span>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:6px;">
+            <button class="pd-ov-clear" data-fid="${id}" style="${UI.btnStyle}">clear</button>
+            <button class="pd-ov-save" data-fid="${id}" style="${UI.btnStyle} background:#2f5130; border-color:#3f7040;">save</button>
+          </div>
+        </details>`;
+    },
+
+    // Wire override editor buttons after each render (delegated by data-fid).
+    bindOverrideEditors() {
+      const body = this.panel.querySelector("#pd-body");
+      body.querySelectorAll(".pd-ov-save").forEach((btn) => {
+        btn.onclick = () => {
+          const fid = btn.getAttribute("data-fid");
+          const num = (sel) => {
+            const v = parseFloat(
+              body.querySelector(`.${sel}[data-fid="${fid}"]`).value,
+            );
+            return Number.isFinite(v) ? v : null;
+          };
+          const mode = (sel) =>
+            body.querySelector(`.${sel}[data-fid="${fid}"]`).value;
+          const baseline = num("pd-ov-base");
+          const elVal = num("pd-ov-el-val");
+          const puVal = num("pd-ov-pu-val");
+          Storage.setOverrides(fid, {
+            baseline,
+            elevated:
+              elVal !== null
+                ? { mode: mode("pd-ov-el-mode"), value: elVal }
+                : null,
+            pushing:
+              puVal !== null
+                ? { mode: mode("pd-ov-pu-mode"), value: puVal }
+                : null,
+          });
+          Logger.info(`overrides saved for faction ${fid}`);
+          this.refresh();
+        };
+      });
+      body.querySelectorAll(".pd-ov-clear").forEach((btn) => {
+        btn.onclick = () => {
+          const fid = btn.getAttribute("data-fid");
+          Storage.setOverrides(fid, {});
+          Logger.info(`overrides cleared for faction ${fid}`);
+          this.refresh();
+        };
+      });
     },
 
     refresh() {
@@ -1163,15 +1538,27 @@
         return;
       }
       // Preserve which cards are open across the refresh (poll-driven re-render
-      // must not collapse a card the user opened).
+      // must not collapse a card the user opened). Track both faction cards and
+      // their nested override editors.
       const openSet = new Set(
-        Array.from(body.querySelectorAll("details[open][data-faction]")).map(
+        Array.from(body.querySelectorAll("details[data-faction][open]")).map(
           (d) => d.getAttribute("data-faction"),
+        ),
+      );
+      const openOv = new Set(
+        Array.from(body.querySelectorAll("details[data-ovfor][open]")).map(
+          (d) => d.getAttribute("data-ovfor"),
         ),
       );
       body.innerHTML = watchlist
         .map((id) => this.factionCard(id, openSet))
         .join("");
+      // Restore nested override-editor open state.
+      openOv.forEach((fid) => {
+        const el = body.querySelector(`details[data-ovfor="${fid}"]`);
+        if (el) el.open = true;
+      });
+      this.bindOverrideEditors();
       if (this.debugOpen) this.refreshDebug();
     },
     refreshDebug() {
@@ -1304,7 +1691,9 @@
       }, 2000);
 
       this.refresh();
-      pollAll(); // apply new settings immediately rather than waiting a cycle
+      // Apply immediately only if this tab is the poller; otherwise the leader
+      // will pick up the new settings from shared storage on its next tick.
+      if (TabLeader.isLeader()) pollAll();
     },
 
     // Footer: rolling call rate, color-coded against the budget, plus how long
@@ -1339,12 +1728,101 @@
       const min = Math.round(sec / 60);
       return `${min}m ago`;
     },
+
+    // Small footer badge showing whether THIS tab is the polling leader.
+    // A follower tab shows "following" — it's not making API calls, it's
+    // rendering from the shared state the leader keeps fresh.
+    refreshLeaderBadge(isLeader) {
+      if (!this.panel) return;
+      const el = this.panel.querySelector("#pd-leader");
+      if (!el) return;
+      el.textContent = isLeader ? "◉ polling" : "○ following";
+      el.style.color = isLeader ? "#5fc46a" : "#777";
+    },
+  };
+
+  // =========================================================================
+  // 7b. TAB LEADER ELECTION — ensures only ONE tab polls the API, so N open
+  //     tabs make 1x the calls, not Nx. The rate limiter is per-tab (in-memory),
+  //     so without this, 3 tabs = 3x the real API load with each tab's limiter
+  //     none the wiser — a fast way to blow Torn's 100/min IP/key cap.
+  //
+  //     Mechanism: a shared heartbeat in GM storage. The leader writes
+  //     {id, ts} every few seconds. Any tab whose heartbeat is stale takes
+  //     over. Followers don't poll — they just re-render from shared storage,
+  //     which the leader keeps fresh.
+  // =========================================================================
+  const TabLeader = {
+    key: "pushdet_leader",
+    tabId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    heartbeatMs: 3000,
+    staleMs: 8000, // > 2 heartbeats: tolerate a missed beat before failover
+
+    read() {
+      const raw = GM_getValue(this.key, null);
+      try {
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    },
+    isLeader() {
+      const cur = this.read();
+      return cur && cur.id === this.tabId;
+    },
+    // Claim leadership if vacant or stale. Returns true if we (now) lead.
+    tryClaim() {
+      const cur = this.read();
+      const now = Date.now();
+      if (!cur || now - cur.ts > this.staleMs || cur.id === this.tabId) {
+        GM_setValue(this.key, JSON.stringify({ id: this.tabId, ts: now }));
+        return this.isLeader(); // re-read guards against a race with another tab
+      }
+      return false;
+    },
+    // Leader-only: refresh the heartbeat timestamp.
+    beat() {
+      if (this.isLeader()) {
+        GM_setValue(
+          this.key,
+          JSON.stringify({ id: this.tabId, ts: Date.now() }),
+        );
+      }
+    },
+    // Release leadership on unload so a new leader is elected promptly.
+    release() {
+      if (this.isLeader()) GM_deleteValue(this.key);
+    },
   };
 
   // =========================================================================
   // 8. BOOT
   // =========================================================================
   UI.init();
-  pollAll();
-  setInterval(pollAll, CONFIG.pollIntervalMs);
+
+  // Only the leader tab polls the API; followers render from shared storage.
+  // A single loop at the heartbeat cadence handles both leadership upkeep and
+  // (leader-only) polling on the slower poll cadence.
+  let lastPollAt = 0;
+  async function tick() {
+    const leading = TabLeader.tryClaim(); // claim if vacant/stale, else false
+    if (leading) {
+      TabLeader.beat();
+      if (Date.now() - lastPollAt >= CONFIG.pollIntervalMs) {
+        lastPollAt = Date.now();
+        await pollAll();
+      }
+    } else {
+      // Follower: the leader keeps Storage fresh, so just re-render from it.
+      UI.refresh();
+    }
+    UI.refreshLeaderBadge(TabLeader.isLeader());
+  }
+
+  // Kick once immediately, then on the heartbeat interval.
+  tick();
+  setInterval(tick, TabLeader.heartbeatMs);
+
+  // Hand off cleanly so another tab takes over without waiting for staleness.
+  window.addEventListener("beforeunload", () => TabLeader.release());
 })();
