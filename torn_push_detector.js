@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      1.0.1
+// @version      1.0.2
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,17 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.0.2 — Two crash fixes + input validation:
+ *         - State saved by an older version (pre-two-population model) lacked
+ *           the baselineChains/elevatedChains/pushChains arrays, causing
+ *           "arr is undefined" / "chains is undefined" crashes on load. Loaded
+ *           state is now migrated over fresh defaults so every field exists;
+ *           the array-touching functions are also defensively guarded.
+ *         - Setup now validates inputs: the API key must be 16 alphanumeric
+ *           chars (catches pasting the wrong thing into the key field, which
+ *           produced malformed requests and a CORS/NetworkError cascade), and
+ *           faction IDs must be numeric. Invalid input shows an error and does
+ *           not save.
  * 1.0.1 — Fix: saving setup (or overrides, or calibrating) left the panel stuck
  *         on "not configured". The active-input guard added in 1.0.0 to prevent
  *         poll-driven renders from wiping a field was also blocking the render
@@ -145,7 +156,18 @@
     },
     load(factionId) {
       const raw = GM_getValue(this.key(factionId), null);
-      return raw ? JSON.parse(raw) : null;
+      if (!raw) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+      // Migrate: backfill any fields missing from state saved by an older
+      // version (e.g. the two-population arrays added in 0.9.0). Merging over
+      // freshState() guarantees every expected field exists, so downstream code
+      // never hits an undefined array. Loaded values win over defaults.
+      return migrateState(parsed);
     },
     save(factionId, state) {
       GM_setValue(this.key(factionId), JSON.stringify(state));
@@ -882,9 +904,25 @@
     };
   }
 
+  // Merge a loaded (possibly older-format) state over fresh defaults so every
+  // expected field exists. Arrays that were saved as the wrong type (or by a
+  // version that didn't have them) are reset to []; scalars keep their loaded
+  // value when present. This is what makes old stored state safe to load after
+  // the two-population rework.
+  function migrateState(loaded) {
+    const base = freshState();
+    if (!loaded || typeof loaded !== "object") return base;
+    const merged = { ...base, ...loaded };
+    // Guarantee the population arrays are real arrays.
+    for (const k of ["baselineChains", "elevatedChains", "pushChains"]) {
+      if (!Array.isArray(merged[k])) merged[k] = [];
+    }
+    return merged;
+  }
+
   // Recompute baseline mean/variance from the stored NORMAL concluded chains.
   function recomputeBaseline(state) {
-    const rates = state.baselineChains.map((c) => c.rate);
+    const rates = (state.baselineChains || []).map((c) => c.rate);
     if (rates.length === 0) {
       state.baselineMean = null;
       state.baselineVar = null;
@@ -898,7 +936,7 @@
   }
 
   const avgOf = (chains) =>
-    chains.length
+    Array.isArray(chains) && chains.length
       ? chains.reduce((a, c) => a + c.rate, 0) / chains.length
       : null;
 
@@ -908,6 +946,11 @@
   // recorded separately as observed above-baseline tempo, and never lower the
   // baseline they're meant to be measured against.
   function ingestConcludedChain(state, chainId, rate, overrides) {
+    // Defensive: ensure the population arrays exist (old-format state that
+    // slipped past migration, or a hand-constructed state).
+    if (!Array.isArray(state.baselineChains)) state.baselineChains = [];
+    if (!Array.isArray(state.elevatedChains)) state.elevatedChains = [];
+    if (!Array.isArray(state.pushChains)) state.pushChains = [];
     const dedup = (arr) => arr.some((c) => c.chainId === chainId);
     if (
       dedup(state.baselineChains) ||
@@ -1794,13 +1837,32 @@
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const msg = this.panel.querySelector("#pd-setup-msg");
+
+      // Validate before saving. A Torn API key is exactly 16 alphanumeric
+      // characters — catch the common mistake of pasting the wrong thing
+      // (e.g. the whole userscript) into the key field, which would otherwise
+      // fire malformed requests and cascade into CORS/network errors.
+      if (key && !/^[A-Za-z0-9]{16}$/.test(key)) {
+        msg.style.color = "#ff6666";
+        msg.textContent =
+          "Key must be 16 letters/numbers — check you pasted the API key, not something else.";
+        return;
+      }
+      // Faction IDs should be numeric.
+      const badId = [own, ...watch].find((id) => id && !/^\d+$/.test(id));
+      if (badId) {
+        msg.style.color = "#ff6666";
+        msg.textContent = `"${badId}" isn't a valid faction ID (numbers only).`;
+        return;
+      }
 
       Storage.setApiKey(key);
       Storage.setOwnFactionId(own || null);
       Storage.setWatchedFactions(watch);
       CONFIG.cache.ownFactionId = own || null;
 
-      const msg = this.panel.querySelector("#pd-setup-msg");
+      msg.style.color = "#5fc46a";
       msg.textContent = "Saved ✓";
       setTimeout(() => {
         if (msg) msg.textContent = "";
