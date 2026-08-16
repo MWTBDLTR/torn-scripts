@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.7
+// @version      1.8
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -80,6 +80,27 @@
       text: (el.innerText || el.textContent || "").trim().slice(0, 40),
       visible: el.offsetParent !== null,
     };
+  }
+
+  // reads an element's text excluding any .tah-hint span WE injected into it.
+  // getOverrideButtons() needs an exact match against "leave"/"mug"/
+  // "hospitalize", but UI.addHint() appends the hint as a child of that same
+  // button - so btn.textContent picks up our own hint text (e.g. "Leave" ->
+  // "Leave1") right after the first render that labels it, permanently
+  // breaking the exact match until the next clearHints() pass. That pass
+  // happens right as the hint becomes visible, i.e. exactly when the user is
+  // about to press the key it's advertising.
+  function getOwnText(el) {
+    let text = "";
+    for (const node of el.childNodes) {
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        node.classList.contains("tah-hint")
+      )
+        continue;
+      text += node.textContent;
+    }
+    return text.toLowerCase().trim();
   }
 
   // resolves the primary action button and, when debug logging is on, warns if
@@ -348,7 +369,7 @@
 
       // Filter purely by text content to immune the script against sibling/wrapper injection
       for (const btn of allButtons) {
-        const text = (btn.textContent || "").toLowerCase().trim();
+        const text = getOwnText(btn);
         if (text === "leave") b1 = btn;
         else if (text === "mug") b2 = btn;
         else if (text === "hospitalize") b3 = btn;
