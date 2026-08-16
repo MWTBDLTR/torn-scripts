@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.1.0
-// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a self-calibrating statistical baseline. No ML, no training data required.
+// @version      0.1.1
 // @author       MrChurch [3654415]
+// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a self-calibrating statistical baseline. No ML, no training data required.
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @connect      api.torn.com
 // ==/UserScript==
 
@@ -30,8 +31,29 @@
       minChainsForCalibration: 3, // below this, don't trust the seeded baseline
       attackLookbackDays: 60, // how far back to search your own attack log for this enemy
       maxPaginatedPages: 5, // hard cap on pages followed via _metadata.links.next
+      maxReportsPerCalibration: 20, // hard cap on chainreport calls in one calibration run
+      minWarChainLength: 50, // at/above this length, a chain needs only war hits present
+      // (not full bonus coverage) to count — see checkChainQualifies
+    },
+    cache: {
+      maxFactions: 10, // LRU cap on cached factions (INCLUDING own); own is pinned
+      maxChainsPerFaction: 30, // per-faction cap; oldest chain evicted when a newer one lands
+      ownFactionId: null, // set via setup; this faction is never evicted as a whole
     },
   };
+
+  // Chain bonus hits land at these lengths. A "war push" ideally lands each
+  // bonus on the warring faction, so a war chain must have at least as many
+  // war hits as bonuses it reached — UNLESS the chain is long enough
+  // (minWarChainLength) that its rate is good data on its own, in which case
+  // any war hits present are enough (some factions fumble landing bonuses on
+  // the war target but are still genuinely war-chaining).
+  const BONUS_THRESHOLDS = [
+    10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000,
+  ];
+  function bonusesReached(chainLength) {
+    return BONUS_THRESHOLDS.filter((t) => chainLength >= t).length;
+  }
 
   // =========================================================================
   // 2. STORAGE — thin wrapper, one JSON blob per faction
@@ -59,6 +81,122 @@
     },
     setWatchedFactions(list) {
       GM_setValue("pushdet_watchlist", JSON.stringify(list));
+    },
+    getOwnFactionId() {
+      return GM_getValue("pushdet_ownfaction", null);
+    },
+    setOwnFactionId(id) {
+      GM_setValue("pushdet_ownfaction", id || null);
+    },
+  };
+
+  // =========================================================================
+  // 2b. CHAIN CACHE — persistent store of per-chain qualification verdicts.
+  //     A completed chain's verdict is immutable, so once computed it never
+  //     needs re-fetching. Structure in GM storage:
+  //
+  //       chaincache_index          -> { <factionId>: lastAccessMs, ... }  (LRU clock)
+  //       chaincache_<factionId>    -> { <chainId>: {rate,durationMin,
+  //                                       warHits,bonuses,qualifies,length}, ... }
+  //
+  //     Culling is count-based:
+  //       * At most cache.maxFactions factions kept (LRU). The own faction is
+  //         pinned and never evicted as a whole — only its oldest chains are
+  //         trimmed like any other faction.
+  //       * At most cache.maxChainsPerFaction chains per faction; when a newer
+  //         chain lands, the oldest (lowest chain id) is dropped.
+  //     Ongoing chains are never cached — only concluded ones get a verdict.
+  // =========================================================================
+  const ChainCache = {
+    indexKey: "chaincache_index",
+    factionKey(id) {
+      return `chaincache_${id}`;
+    },
+
+    loadIndex() {
+      const raw = GM_getValue(this.indexKey, null);
+      return raw ? JSON.parse(raw) : {};
+    },
+    saveIndex(idx) {
+      GM_setValue(this.indexKey, JSON.stringify(idx));
+    },
+
+    loadFaction(factionId) {
+      const raw = GM_getValue(this.factionKey(factionId), null);
+      return raw ? JSON.parse(raw) : {};
+    },
+    saveFaction(factionId, chains) {
+      GM_setValue(this.factionKey(factionId), JSON.stringify(chains));
+    },
+    dropFaction(factionId) {
+      GM_deleteValue(this.factionKey(factionId));
+      const idx = this.loadIndex();
+      delete idx[factionId];
+      this.saveIndex(idx);
+    },
+
+    // Return the cached verdict for one chain, or null if not present.
+    getChain(factionId, chainId) {
+      const chains = this.loadFaction(factionId);
+      return chains[chainId] || null;
+    },
+
+    // Store a batch of verdicts for a faction, then trim to the per-faction
+    // chain cap (drop lowest chain ids first — chain ids increase over time).
+    putChains(factionId, verdictsById) {
+      const chains = this.loadFaction(factionId);
+      Object.assign(chains, verdictsById);
+
+      // Evict oldest by chain START TIME, not by id. Chain ids are assigned
+      // game-wide and are non-consecutive for any one faction, so while they
+      // happen to be time-monotonic, `start` is the explicit, correct key.
+      // Chains missing a start (shouldn't happen) sort oldest and go first.
+      const ids = Object.keys(chains).sort(
+        (a, b) => (chains[a].start || 0) - (chains[b].start || 0),
+      );
+      const overflow = ids.length - CONFIG.cache.maxChainsPerFaction;
+      if (overflow > 0) {
+        for (let i = 0; i < overflow; i++) delete chains[ids[i]];
+      }
+      this.saveFaction(factionId, chains);
+      this.touch(factionId); // bump LRU + enforce faction cap
+    },
+
+    // Mark a faction as just-used and enforce the faction-count cap via LRU,
+    // never evicting the pinned own faction.
+    touch(factionId) {
+      const idx = this.loadIndex();
+      idx[factionId] = Date.now();
+      this.saveIndex(idx);
+
+      const own = String(Storage.getOwnFactionId() || "");
+      const evictable = Object.keys(idx).filter((id) => id !== own);
+      const overflow =
+        evictable.length + (own && idx[own] ? 1 : 0) - CONFIG.cache.maxFactions;
+      if (overflow > 0) {
+        // Oldest-first among evictable (non-own) factions
+        evictable.sort((a, b) => idx[a] - idx[b]);
+        for (let i = 0; i < overflow && i < evictable.length; i++) {
+          this.dropFaction(evictable[i]);
+        }
+      }
+    },
+
+    // Debug/inspection helper: summary counts without loading every blob body.
+    summary() {
+      const idx = this.loadIndex();
+      const own = String(Storage.getOwnFactionId() || "");
+      return Object.keys(idx)
+        .sort((a, b) => idx[b] - idx[a])
+        .map((id) => {
+          const count = Object.keys(this.loadFaction(id)).length;
+          return {
+            factionId: id,
+            chains: count,
+            pinned: id === own,
+            lastAccess: idx[id],
+          };
+        });
     },
   };
 
@@ -143,7 +281,7 @@
           return fetchFactionChain(factionId, apiKey, attempt + 1);
         }
         Logger.error(
-          `chain fetch error (faction ${factionId}): ${JSON.stringify(data.error)}`,
+          `chain fetch error (faction ${factionId}): ${explainApiError(data.error)}`,
         );
         return null;
       }
@@ -160,6 +298,24 @@
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // Human-readable hints for the Torn API error codes most likely to bite
+  // this tool — surfaced in logs so a failure is actionable, not just a code.
+  const API_ERROR_HINTS = {
+    2: "API key is invalid or malformed.",
+    5: "Rate limited — the key is temporarily blocked for too many requests.",
+    7:
+      "Selection is private for this key — usually means the faction leader " +
+      "hasn't granted \"AA\" (API Access) permission, or the key's access " +
+      "level doesn't include this selection.",
+    16: "Key access level is too low for this selection.",
+  };
+  function explainApiError(err) {
+    const hint = API_ERROR_HINTS[err.code];
+    return hint
+      ? `${err.error} (code ${err.code}) — ${hint}`
+      : `${err.error} (code ${err.code})`;
   }
 
   function escapeHtml(str) {
@@ -194,7 +350,12 @@
   // Generic pager: follows _metadata.links.next up to maxPages, sharing the
   // same rate-limit budget as everything else. Fails soft — returns
   // whatever was collected if a later page errors out.
-  async function fetchPaginated(initialUrl, dataKey, maxPages) {
+  async function fetchPaginated(
+    initialUrl,
+    dataKey,
+    maxPages,
+    label = dataKey,
+  ) {
     let url = initialUrl;
     let all = [];
     let pages = 0;
@@ -205,14 +366,14 @@
         const res = await fetch(url);
         const data = await res.json();
         if (data.error) {
-          Logger.error(`paginated fetch error: ${JSON.stringify(data.error)}`);
+          Logger.error(`${label} fetch error: ${explainApiError(data.error)}`);
           break;
         }
         all = all.concat(data[dataKey] || []);
         url = data._metadata?.links?.next || null;
         pages++;
       } catch (err) {
-        Logger.error(`paginated fetch failed: ${err}`);
+        Logger.error(`${label} fetch failed: ${err}`);
         break;
       }
     }
@@ -239,6 +400,7 @@
       url,
       "attacks",
       CONFIG.calibration.maxPaginatedPages,
+      `attacks history vs faction ${targetFactionId}`,
     );
     return attacks.filter(
       (a) =>
@@ -276,7 +438,131 @@
   // --- Source (b): the faction's own list of past chains (any opponent) ---
   async function fetchPastChains(factionId, apiKey) {
     const url = `${CONFIG.apiBase}/faction/${factionId}/chains?key=${apiKey}`;
-    return fetchPaginated(url, "chains", CONFIG.calibration.maxPaginatedPages);
+    return fetchPaginated(
+      url,
+      "chains",
+      CONFIG.calibration.maxPaginatedPages,
+      `chain history for faction ${factionId}`,
+    );
+  }
+
+  // --- War-chain qualification via chainreport ---
+  // Two-part gate on whether a past chain counts as war tempo:
+  //   * Long chains (length >= minWarChainLength): keep if ANY war hits are
+  //     present. The length alone gives reliable rate data, and some factions
+  //     genuinely war-chain without landing every bonus on the war target.
+  //   * Short chains (below that): keep only if war hits >= bonuses reached,
+  //     i.e. the bonuses were landed on the warring faction. With little data,
+  //     a short chain that didn't bonus the target is treated as farming.
+  // Either way, zero war hits => not a war chain (pure farming, even during a
+  // war).
+  //
+  // Fetches the report and returns { qualifies, warHits, bonuses, length,
+  // ended } or null if unreadable. `ended` gates caching upstream: an ongoing
+  // chain (no end timestamp) must not be cached, since its verdict isn't final.
+  async function fetchChainVerdict(chainId, apiKey) {
+    if (!limiter.canCall()) return null;
+    const url = `${CONFIG.apiBase}/faction/${chainId}/chainreport?key=${apiKey}`;
+    try {
+      limiter.record();
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.error) {
+        Logger.error(
+          `chainreport ${chainId} error: ${explainApiError(data.error)}`,
+        );
+        return null;
+      }
+      const report = data.chainreport;
+      const d = report?.details;
+      if (!d || !d.chain) return null;
+      const warHits = d.war ?? 0;
+      const length = d.chain;
+      const bonuses = bonusesReached(length);
+      const qualifies =
+        length >= CONFIG.calibration.minWarChainLength
+          ? warHits > 0 // long: any war hits present is enough
+          : warHits >= bonuses; // short: bonuses must have been landed on the target
+      const ended = !!report.end && report.end > 0;
+      return { qualifies, warHits, bonuses, length, ended };
+    } catch (err) {
+      Logger.error(`chainreport ${chainId} failed: ${err}`);
+      return null;
+    }
+  }
+
+  // Keep only chains that qualify as war tempo (see fetchChainVerdict).
+  // Cache-first: a chain's verdict is immutable once its chain has concluded,
+  // so cached verdicts are reused and only cache-miss chains hit the API.
+  // Bounded by maxReportsPerCalibration on the API-call side only — cached
+  // hits are free and don't count against that budget.
+  async function filterToWarChains(parsedChains, factionId, apiKey) {
+    const warChains = [];
+    let dropped = 0,
+      cacheHits = 0,
+      apiCalls = 0;
+    const newVerdicts = {}; // {chainId: verdict} to persist after the loop
+
+    for (const chain of parsedChains) {
+      // 1. Cache hit — reuse the stored verdict, no API call.
+      const cached = ChainCache.getChain(factionId, chain.id);
+      if (cached) {
+        cacheHits++;
+        if (cached.qualifies)
+          warChains.push({
+            ...chain,
+            warHits: cached.warHits,
+            bonuses: cached.bonuses,
+            cached: true,
+          });
+        else dropped++;
+        continue;
+      }
+
+      // 2. Cache miss — but respect the per-run API budget.
+      if (apiCalls >= CONFIG.calibration.maxReportsPerCalibration) {
+        dropped++; // couldn't verify within budget -> excluded (fails safe)
+        continue;
+      }
+      apiCalls++;
+      const verdict = await fetchChainVerdict(chain.id, apiKey);
+      if (!verdict) {
+        dropped++;
+        continue;
+      }
+
+      // 3. Only cache CONCLUDED chains — an ongoing chain's verdict isn't final.
+      if (verdict.ended) {
+        newVerdicts[chain.id] = {
+          rate: chain.rate,
+          durationMin: chain.durationMin,
+          warHits: verdict.warHits,
+          bonuses: verdict.bonuses,
+          qualifies: verdict.qualifies,
+          length: verdict.length,
+          start: chain.start,
+          end: chain.end, // start is the cache eviction key
+        };
+      }
+
+      if (verdict.qualifies)
+        warChains.push({
+          ...chain,
+          warHits: verdict.warHits,
+          bonuses: verdict.bonuses,
+        });
+      else dropped++;
+    }
+
+    // Persist newly-fetched concluded verdicts in one write; culling handled inside.
+    if (Object.keys(newVerdicts).length)
+      ChainCache.putChains(factionId, newVerdicts);
+    else ChainCache.touch(factionId); // still bump LRU even on all-cache-hit runs
+
+    Logger.info(
+      `war-chain filter (faction ${factionId}): kept ${warChains.length}, dropped ${dropped} — ${cacheHits} cache hits, ${apiCalls} API calls`,
+    );
+    return warChains;
   }
 
   function parseChainList(rawChains) {
@@ -287,7 +573,14 @@
       if (!hits || !start || !end || end <= start) continue;
       const durationMin = (end - start) / 60;
       if (durationMin <= 0) continue;
-      parsed.push({ id: c.id, hits, durationMin, rate: hits / durationMin });
+      parsed.push({
+        id: c.id,
+        hits,
+        durationMin,
+        rate: hits / durationMin,
+        start,
+        end,
+      });
     }
     return parsed;
   }
@@ -319,12 +612,20 @@
     let sample = attackChains.slice(0, 3);
 
     if (!result.ok) {
-      // Fall back to their general chain history against anyone.
+      // Fall back to their general chain history. Keep only chains that
+      // qualify as war pushes: war-hit count must cover the bonuses reached
+      // (see checkChainQualifies). This excludes farming/outside-hit chains
+      // even when they occurred during a war.
       const rawChains = await fetchPastChains(factionId, apiKey);
       const parsedChains = parseChainList(rawChains);
-      result = computeStatsFromRates(parsedChains);
-      source = "chains";
-      sample = parsedChains.slice(0, 3);
+      const warChains = await filterToWarChains(
+        parsedChains,
+        factionId,
+        apiKey,
+      );
+      result = computeStatsFromRates(warChains);
+      source = "war-chains";
+      sample = warChains.slice(0, 3);
     }
 
     const state = freshState();
@@ -481,6 +782,7 @@
           <div id="pd-debug-status" style="color:#999; font-size:10px; margin-bottom:4px;"></div>
           <div id="pd-log" style="max-height:120px; overflow-y:auto; font-size:10px; line-height:1.5; margin-bottom:6px; background:#111; border-radius:4px; padding:4px 6px;"></div>
           <div id="pd-raw"></div>
+          <div id="pd-cache" style="font-size:10px; line-height:1.5;"></div>
         </div>
       `;
       document.body.appendChild(panel);
@@ -512,7 +814,7 @@
         const s = Storage.load(id);
         if (!s) return `${id}: no data yet`;
         const basis = s.calibratedFrom
-          ? `calibrated from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past encounters with this faction" : "of their past chains"}`
+          ? `calibrated from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past encounters with this faction" : "of their past war chains"}`
           : s.samples.length < CONFIG.minSamplesBeforeAlerts
             ? `warming up (${s.samples.length}/${CONFIG.minSamplesBeforeAlerts} live samples)`
             : "live baseline only";
@@ -587,6 +889,17 @@
           .join("") ||
         '<div style="color:#666; font-size:10px;">no factions watched yet</div>';
       this.panel.querySelector("#pd-raw").innerHTML = rawHtml;
+
+      // Cache summary — one line per cached faction, pinned marker for own
+      const cacheRows =
+        ChainCache.summary()
+          .map(
+            (c) =>
+              `<div style="color:#999;">${c.pinned ? "📌 " : ""}faction ${c.factionId}: ${c.chains} chain(s) cached</div>`,
+          )
+          .join("") || '<div style="color:#666;">cache empty</div>';
+      this.panel.querySelector("#pd-cache").innerHTML =
+        `<div style="color:#888; font-size:10px; margin:6px 0 2px;">chain cache (${ChainCache.summary().length}/${CONFIG.cache.maxFactions} factions)</div>${cacheRows}`;
     },
     async calibrateAll() {
       const apiKey = Storage.getApiKey();
@@ -606,6 +919,13 @@
       const currentKey = Storage.getApiKey();
       const key = prompt("Torn API key (Limited access is fine):", currentKey);
       if (key !== null) Storage.setApiKey(key.trim());
+
+      const currentOwn = Storage.getOwnFactionId() || "";
+      const own = prompt(
+        "Your OWN faction ID (pinned in cache, never evicted):",
+        currentOwn,
+      );
+      if (own !== null) Storage.setOwnFactionId(own.trim() || null);
 
       const currentList = Storage.getWatchedFactions().join(",");
       const list = prompt(
