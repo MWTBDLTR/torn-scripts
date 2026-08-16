@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      1.0.0
+// @version      1.0.1
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,12 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.0.1 — Fix: saving setup (or overrides, or calibrating) left the panel stuck
+ *         on "not configured". The active-input guard added in 1.0.0 to prevent
+ *         poll-driven renders from wiping a field was also blocking the render
+ *         triggered BY the save click (the input still held focus). Deliberate
+ *         user actions now force the render past the guard and blur the field
+ *         first; background polls stay guarded as before.
  * 1.0.0 — First release for live-war testing. Hardening pass over 0.9.0:
  *         - fetchFactionChain now returns a discriminated result ({ok,chain}),
  *           so an API error / rate-limit / network drop can no longer be
@@ -1590,7 +1596,9 @@
                 : null,
           });
           Logger.info(`overrides saved for faction ${fid}`);
-          this.refresh();
+          if (document.activeElement && document.activeElement.blur)
+            document.activeElement.blur();
+          this.refresh(true);
         };
       });
       body.querySelectorAll(".pd-ov-clear").forEach((btn) => {
@@ -1598,7 +1606,9 @@
           const fid = btn.getAttribute("data-fid");
           Storage.setOverrides(fid, {});
           Logger.info(`overrides cleared for faction ${fid}`);
-          this.refresh();
+          if (document.activeElement && document.activeElement.blur)
+            document.activeElement.blur();
+          this.refresh(true);
         };
       });
       // When the user finishes editing (blur), flush any refresh we deferred
@@ -1615,22 +1625,25 @@
       });
     },
 
-    refresh() {
+    refresh(force) {
       if (!this.panel) return;
       const body = this.panel.querySelector("#pd-body");
 
       // Don't rewrite the DOM out from under a user actively typing an override
       // (on ANY tab, including the leader whose 30s poll would otherwise wipe
       // the field). Defer this render; the next tick or the input's blur will
-      // pick it up. The setup form gets the same protection.
-      const active = document.activeElement;
-      if (
-        active &&
-        this.panel.contains(active) &&
-        (active.tagName === "INPUT" || active.tagName === "SELECT")
-      ) {
-        this._deferredRefresh = true;
-        return;
+      // pick it up. `force` bypasses this for deliberate user actions (save,
+      // clear, calibrate) that SHOULD update the view immediately.
+      if (!force) {
+        const active = document.activeElement;
+        if (
+          active &&
+          this.panel.contains(active) &&
+          (active.tagName === "INPUT" || active.tagName === "SELECT")
+        ) {
+          this._deferredRefresh = true;
+          return;
+        }
       }
       this._deferredRefresh = false;
 
@@ -1753,7 +1766,7 @@
       for (const factionId of watchlist) {
         await calibrateFaction(factionId, apiKey); // logs its own result via Logger
       }
-      this.refresh();
+      this.refresh(true);
     },
     // Toggle the inline setup form. When opening, populate inputs from stored
     // values; `force` can explicitly open (true) or close (false).
@@ -1793,7 +1806,11 @@
         if (msg) msg.textContent = "";
       }, 2000);
 
-      this.refresh();
+      // Blur any focused field, then force the render past the typing-guard —
+      // this is a deliberate save, so the view must update now.
+      if (document.activeElement && document.activeElement.blur)
+        document.activeElement.blur();
+      this.refresh(true);
       // Apply immediately only if this tab is the poller; otherwise the leader
       // will pick up the new settings from shared storage on its next tick.
       if (TabLeader.isLeader()) pollAll();
