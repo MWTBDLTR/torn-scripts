@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      0.5.0
+// @version      0.6.0
 // @author       MrChurch [3654415]
-// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a self-calibrating statistical baseline.
+// @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -13,6 +13,13 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 0.6.0 — Redesigned main panel into per-faction collapsible cards. Each card
+ *         shows a live status pill (NORMAL/ELEVATED/PUSHING/READY/NO DATA),
+ *         current tempo, the calibrated baseline, and the hits/min thresholds
+ *         at which the faction would cross into Elevated/Pushing — translating
+ *         the internal z-score model into plain numbers. Adds persistent
+ *         faction-name lookup (basic selection) so cards show names, not just
+ *         ids. Card open/closed state survives poll refreshes.
  * 0.5.0 — Versioning baseline. Consolidates work since 0.1.0:
  *         - Real-time chain polling with EWMA + rolling z-score push detection
  *         - Two-source calibration: own attack log (preferred) or war-filtered
@@ -111,6 +118,18 @@
     },
     setUiState(state) {
       GM_setValue("pushdet_uistate", JSON.stringify(state));
+    },
+    getFactionNames() {
+      const raw = GM_getValue("pushdet_facnames", null);
+      return raw ? JSON.parse(raw) : {};
+    },
+    getFactionName(id) {
+      return this.getFactionNames()[id] || null;
+    },
+    setFactionName(id, name) {
+      const names = this.getFactionNames();
+      names[id] = name;
+      GM_setValue("pushdet_facnames", JSON.stringify(names));
     },
   };
 
@@ -322,6 +341,32 @@
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // Fetch and cache a faction's name (basic selection). Names change rarely,
+  // so this is stored persistently and only fetched on a miss — one call per
+  // faction, ever, in practice. Non-fatal: on failure we just keep showing the
+  // id until a later attempt succeeds.
+  async function ensureFactionName(factionId, apiKey) {
+    if (Storage.getFactionName(factionId)) return; // already known
+    if (!limiter.canCall()) return;
+    const url = `${CONFIG.apiBase}/faction/${factionId}/basic?key=${apiKey}`;
+    try {
+      limiter.record();
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.error) return; // silent — name is a nicety, not core
+      const name = data.basic?.name;
+      if (name) Storage.setFactionName(factionId, name);
+    } catch {
+      /* ignore — cosmetic */
+    }
+  }
+
+  // Display label: "Name [id]" when we have a name, else just the id.
+  function factionLabel(factionId) {
+    const name = Storage.getFactionName(factionId);
+    return name ? `${name} [${factionId}]` : `Faction ${factionId}`;
   }
 
   // Human-readable hints for the Torn API error codes most likely to bite
@@ -764,6 +809,7 @@
     if (!apiKey || watchlist.length === 0) return;
 
     for (const factionId of watchlist) {
+      await ensureFactionName(factionId, apiKey); // cheap, cached, cosmetic
       const chain = await fetchFactionChain(factionId, apiKey);
       const cache = RawCache.get(factionId);
       cache.lastPollTime = Date.now();
@@ -955,51 +1001,128 @@
       Storage.setUiState(state);
       if (this.debugOpen) this.refreshDebug();
     },
+
+    // Translate the internal EWMA/z-score model into human-meaningful numbers:
+    // current tempo, the calibrated baseline, and the hits/min at which the
+    // faction would cross into Elevated / Pushing. Returns null when there's no
+    // baseline yet (can't compute thresholds).
+    computeInsight(s) {
+      if (s.ewmaRate === null || s.ewmaVar === null) return null;
+      const std = Math.sqrt(Math.max(s.ewmaVar, 0.0001));
+      return {
+        baseline: s.ewmaRate,
+        std,
+        elevatedAt: s.ewmaRate + CONFIG.zScoreElevated * std,
+        pushingAt: s.ewmaRate + CONFIG.zScorePushing * std,
+        current: s.lastRate ?? null,
+        z: s.lastZ ?? null,
+      };
+    },
+
+    statusColor(status) {
+      return status === "PUSHING"
+        ? "#ff5555"
+        : status === "Elevated"
+          ? "#ffb040"
+          : "#5fc46a";
+    },
+
+    // Build one collapsible faction card. Open/closed state is restored by the
+    // caller via the data-faction/open attributes (survives poll refreshes).
+    factionCard(id, openSet) {
+      const s = Storage.load(id);
+      const label = escapeHtml(factionLabel(id));
+      const open = openSet.has(String(id)) ? " open" : "";
+
+      // Header status pill + summary line depend on how far along this faction is.
+      let pill, pillColor, summary;
+      if (!s || s.samples.length < 1) {
+        pill = s?.calibratedFrom ? "READY" : "NO DATA";
+        pillColor = "#888";
+        summary = s?.calibratedFrom
+          ? `Calibrated, waiting for a live chain`
+          : `Awaiting first chain data`;
+      } else {
+        pill = s.lastStatus.toUpperCase();
+        pillColor = this.statusColor(s.lastStatus);
+        summary = `${s.lastRate?.toFixed(1) ?? "—"} hits/min now`;
+      }
+
+      // Body: calibration basis + tempo insight table.
+      const basis = s?.calibratedFrom
+        ? `Baseline from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past war(s) vs. you" : "past war chains"}`
+        : s && s.samples.length < CONFIG.minSamplesBeforeAlerts
+          ? `Warming up — ${s.samples.length}/${CONFIG.minSamplesBeforeAlerts} live samples before alerts`
+          : s
+            ? "Live baseline (no historical calibration)"
+            : "";
+
+      let insightHtml = "";
+      const insight = s ? this.computeInsight(s) : null;
+      if (insight) {
+        const row = (lbl, val, color) =>
+          `<div style="display:flex; justify-content:space-between; padding:1px 0;">
+             <span style="color:#999;">${lbl}</span>
+             <span style="color:${color || "#ddd"}; font-variant-numeric:tabular-nums;">${val}</span>
+           </div>`;
+        const cur =
+          insight.current !== null
+            ? `${insight.current.toFixed(1)} hits/min`
+            : "—";
+        const curColor =
+          s.lastStatus === "Normal" ? "#ddd" : this.statusColor(s.lastStatus);
+        insightHtml = `<div style="margin-top:5px; padding:5px 6px; background:#141414; border-radius:4px; font-size:11px;">
+             ${row("Current tempo", cur, curColor)}
+             ${row("Typical (baseline)", `${insight.baseline.toFixed(1)} hits/min`)}
+             ${row("→ Elevated above", `${insight.elevatedAt.toFixed(1)} hits/min`, "#ffb040")}
+             ${row("→ Push above", `${insight.pushingAt.toFixed(1)} hits/min`, "#ff5555")}
+             ${insight.z !== null ? row("Deviation", `${insight.z >= 0 ? "+" : ""}${insight.z.toFixed(1)}σ`) : ""}
+           </div>`;
+      }
+
+      // Chain-management signal (tight refreshes) — only meaningful with hits.
+      let tightHtml = "";
+      if (s && s.totalHits > 0) {
+        const tightPct = Math.round((100 * s.tightRefreshes) / s.totalHits);
+        tightHtml = `<div style="margin-top:4px; font-size:10px; color:#888;">
+             ${tightPct}% of hits landed with &lt;${CONFIG.tightTimeoutThreshold}s left
+             ${tightPct >= 50 ? '<span style="color:#ffb040;">— actively managed</span>' : ""}
+           </div>`;
+      }
+
+      return `
+        <details data-faction="${id}"${open} style="margin-bottom:6px; background:#1e1e1e; border:1px solid #333; border-radius:5px;">
+          <summary style="cursor:pointer; list-style:none; padding:6px 8px; display:flex; align-items:center; gap:8px;">
+            <span style="flex:1; font-weight:bold; color:#eee;">${label}</span>
+            <span style="font-size:9px; letter-spacing:.5px; color:#111; background:${pillColor}; padding:1px 6px; border-radius:8px; font-weight:bold;">${pill}</span>
+          </summary>
+          <div style="padding:0 8px 8px;">
+            <div style="font-size:11px; color:#bbb; margin-bottom:2px;">${summary}</div>
+            <div style="font-size:10px; color:#777;">${basis}</div>
+            ${insightHtml}
+            ${tightHtml}
+          </div>
+        </details>`;
+    },
+
     refresh() {
       if (!this.panel) return;
+      const body = this.panel.querySelector("#pd-body");
       const watchlist = Storage.getWatchedFactions();
       if (watchlist.length === 0) {
-        this.panel.querySelector("#pd-body").textContent =
-          'Not configured. Click "setup" to begin.';
+        body.textContent = 'Not configured. Click "setup" to begin.';
         return;
       }
-      const rows = watchlist.map((id) => {
-        const s = Storage.load(id);
-        const wrap = (inner) =>
-          `<div style="margin-bottom:6px;">${inner}</div>`;
-
-        if (!s) return wrap(`<div>${id}: no data yet</div>`);
-
-        const basis = s.calibratedFrom
-          ? `calibrated from ${s.calibratedFrom} ${s.calibrationSource === "attacks" ? "past encounters with this faction" : "of their past war chains"}`
-          : s.samples.length < CONFIG.minSamplesBeforeAlerts
-            ? `warming up (${s.samples.length}/${CONFIG.minSamplesBeforeAlerts} live samples)`
-            : "live baseline only";
-
-        // No live samples yet — show the id and its calibration basis only.
-        if (s.samples.length < 1) {
-          return wrap(
-            `<div>${id}</div>` +
-              `<div style="color:#888; font-size:10px;">${basis}</div>`,
-          );
-        }
-
-        const color =
-          s.lastStatus === "PUSHING"
-            ? "#ff4444"
-            : s.lastStatus === "Elevated"
-              ? "#ffaa33"
-              : "#66cc66";
-        const tightPct =
-          s.totalHits > 0
-            ? Math.round((100 * s.tightRefreshes) / s.totalHits)
-            : 0;
-        return wrap(
-          `<div style="color:${color}">${id}: ${s.lastStatus} (${s.lastRate?.toFixed(1) ?? "—"} hits/min, z ${s.lastZ?.toFixed(1) ?? "—"}, ${tightPct}% tight refresh)</div>` +
-            `<div style="color:#888; font-size:10px;">${basis}</div>`,
-        );
-      });
-      this.panel.querySelector("#pd-body").innerHTML = rows.join("");
+      // Preserve which cards are open across the refresh (poll-driven re-render
+      // must not collapse a card the user opened).
+      const openSet = new Set(
+        Array.from(body.querySelectorAll("details[open][data-faction]")).map(
+          (d) => d.getAttribute("data-faction"),
+        ),
+      );
+      body.innerHTML = watchlist
+        .map((id) => this.factionCard(id, openSet))
+        .join("");
       if (this.debugOpen) this.refreshDebug();
     },
     refreshDebug() {
