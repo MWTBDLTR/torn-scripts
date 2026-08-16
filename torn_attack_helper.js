@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Attack Page Helper
 // @namespace    https://github.com/MWTBDLTR/torn-scripts/
-// @version      1.6
+// @version      1.7
 // @description  Customizable numpad shortcuts for attacks to enhance accessibility
 // @author       MrChurch [3654415]
 // @license      MIT
@@ -66,6 +66,49 @@
     return null;
   }
 
+  // summarizes an element for console logging - used to identify, without
+  // guessing, exactly what a selector resolved to when a shortcut appears to
+  // do nothing (e.g. another script's injected element winning a selector
+  // match over Torn's real button)
+  function describeElement(el) {
+    if (!el) return null;
+    return {
+      tag: el.tagName,
+      id: el.id || null,
+      class: el.className || null,
+      dataTest: el.getAttribute ? el.getAttribute("data-test") : null,
+      text: (el.innerText || el.textContent || "").trim().slice(0, 40),
+      visible: el.offsetParent !== null,
+    };
+  }
+
+  // resolves the primary action button and, when debug logging is on, warns if
+  // more than one element matches [data-test="attack-button"] - a collision
+  // means some other script's element is competing for our selector, and we
+  // may be clicking the wrong thing with no visible error
+  function resolvePrimaryButton(logLabel) {
+    if (Config.data.debugLogging) {
+      const collisions = document.querySelectorAll(
+        '[data-test="attack-button"]',
+      );
+      if (collisions.length > 1) {
+        console.warn(
+          `[Torn Attack Page Helper] ${logLabel}: ${collisions.length} elements match [data-test="attack-button"] - likely a selector collision with another script. Candidates:`,
+          Array.from(collisions).map(describeElement),
+        );
+      }
+    }
+
+    const el = querySelectorFallback(SELECTORS.primaryButton);
+    if (Config.data.debugLogging) {
+      console.log(
+        `[Torn Attack Page Helper] ${logLabel}: primary button resolved to`,
+        describeElement(el),
+      );
+    }
+    return el;
+  }
+
   // handles saving and loading settings, checking both tamper/grease monkey and local storage
   const Storage = {
     async get(key, defaultVal) {
@@ -114,6 +157,11 @@
       },
       continueAction: "default", // 'default', 'close', 'openFixed'
       fixedTargetId: CONSTANTS.DEFAULT_TARGET,
+      // logs which DOM element every keypress resolves/clicks to, and warns on
+      // selector collisions - added to diagnose shortcuts going silently inert
+      // when other page scripts (e.g. loadout/scouter overlays) inject elements
+      // into the same container we query. Default on until confirmed stable.
+      debugLogging: true,
     },
 
     async load() {
@@ -395,7 +443,7 @@
         return;
       }
 
-      const primary = querySelectorFallback(SELECTORS.primaryButton);
+      const primary = resolvePrimaryButton("updateVisuals");
       if (primary) {
         const text = (primary.innerText || "").toLowerCase();
         let hintText = "Any";
@@ -441,6 +489,14 @@
       const dialogs = this.getOverrideButtons();
 
       let mapping = Config.getKeyMapping(e.code, dialogs);
+      if (Config.data.debugLogging) {
+        console.log(
+          `[Torn Attack Page Helper] handleInput: key=${e.code} mapping=`,
+          mapping,
+          "dialogsPresent=",
+          !!(dialogs && (dialogs.b1 || dialogs.b2 || dialogs.b3)),
+        );
+      }
       if (!mapping) return;
 
       // checks if the target is in hospital before trying to attack
@@ -466,7 +522,7 @@
       }
 
       // detects if we are in the start or continue phase of the fight
-      const primary = querySelectorFallback(SELECTORS.primaryButton);
+      const primary = resolvePrimaryButton("handleInput");
       const primaryText = primary
         ? (primary.innerText || "").toLowerCase()
         : "";
@@ -491,6 +547,12 @@
             : mapping.index === 2
               ? dialogs.b2
               : dialogs.b3;
+        if (Config.data.debugLogging) {
+          console.log(
+            "[Torn Attack Page Helper] handleInput: dialog button resolved to",
+            describeElement(btn),
+          );
+        }
         if (btn) {
           btn.click();
           actionSuccess = true;
@@ -521,9 +583,19 @@
       // handles weapon swapping during the fight
       else if (mapping.type === "weapon") {
         const el = document.querySelector(SELECTORS.slots[mapping.slot]);
+        if (Config.data.debugLogging) {
+          console.log(
+            `[Torn Attack Page Helper] handleInput: weapon slot ${mapping.slot} resolved to`,
+            describeElement(el),
+          );
+        }
         if (el && el.offsetParent !== null) {
           el.click();
           actionSuccess = true;
+        } else if (Config.data.debugLogging && el) {
+          console.warn(
+            `[Torn Attack Page Helper] handleInput: weapon slot ${mapping.slot} found but not visible (offsetParent null) - click skipped. Another script may be hiding/overlaying it.`,
+          );
         }
       }
 
@@ -643,6 +715,15 @@
         }),
       );
 
+      const debugLabel = `Debug Logging: ${Config.data.debugLogging ? "ON" : "OFF"} (Click to Toggle)`;
+      this.menuIds.push(
+        GM_registerMenuCommand(debugLabel, async () => {
+          Config.data.debugLogging = !Config.data.debugLogging;
+          await Config.save();
+          this.register();
+        }),
+      );
+
       const followupLabel = `Set Follow-up ID (Current: ${Config.data.fixedTargetId || "Default"})`;
       this.menuIds.push(
         GM_registerMenuCommand(followupLabel, async () => {
@@ -697,7 +778,7 @@
       timeout = setTimeout(() => {
         AttackController.updateVisuals();
         if (AttackController.isInHospital()) {
-          const btn = querySelectorFallback(SELECTORS.primaryButton);
+          const btn = resolvePrimaryButton("hospitalCheck");
           if (btn) UI.addHint(btn, "TARGET HOSPITALIZED", true);
         }
       }, CONSTANTS.DEBOUNCE_TIME);
