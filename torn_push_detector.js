@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector
 // @namespace    church-tools
-// @version      1.1.0
+// @version      1.1.2
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,9 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.2 — chain verification for source a so as to avoid bad data influencing
+ *         the chain count baseline.
+ * 1.1.1 — Show progress toward the target war-chain count in the background.
  * 1.1.0 — War-chain calibration overhaul + storage-key rename (BREAKING).
  *         BREAKING: all storage keys renamed to a "wpd_" prefix (wpd_apikey,
  *         wpd_watchlist, wpd_state_<id>, wpd_chaincache_<id>, etc.) so every
@@ -579,7 +582,10 @@
     let all = [];
     let pages = 0;
     while (url && pages < maxPages) {
-      if (!limiter.canCall()) break;
+      if (!limiter.canCall()) {
+        Logger.warn(`${label} pagination stopped — rate budget exhausted (${all.length}/${dataKey} items collected)`);
+        break;
+      }
       try {
         limiter.record();
         const res = await fetch(url);
@@ -647,6 +653,7 @@
       parsed.push({
         id: chainId,
         hits: group.length,
+        totalHits: null, // filled by calibrateFaction via chainreport
         durationMin,
         rate: group.length / durationMin,
       });
@@ -663,6 +670,54 @@
       CONFIG.calibration.maxPaginatedPages,
       `chain history for faction ${factionId}`,
     );
+  }
+
+  // Verify that a set of attack chains are actual war tempo (not farming).
+  // Cross-references the faction's past-chains list to get total hit counts,
+  // then fetches chainreports for any unmatched chains. Returns a Map of
+  // chainId -> total hits, plus metadata about how many were newly verified.
+  async function verifyWarChains(attackChains, factionId, apiKey) {
+    const map = new Map(); // chainId -> {length, source}
+    let verifiedByCrossRef = 0;
+    let verifiedByReport = 0;
+
+    // 1. Cross-reference with their past-chains list (Source b).
+    //    Past-chains includes `.id` and `.chain` (total hits) per entry.
+    const rawChains = await fetchPastChains(factionId, apiKey);
+    for (const c of rawChains) {
+      if (c.id <= 0 || !c.chain) continue;
+      map.set(String(c.id), { length: c.chain, source: "cross-ref" });
+    }
+
+    // Mark all cross-referenced chains that overlap with our attack IDs.
+    for (const ac of attackChains) {
+      const entry = map.get(String(ac.id));
+      if (entry && entry.length >= CONFIG.calibration.minWarChainLength) {
+        verifiedByCrossRef++;
+      }
+    }
+
+    // 2. For attack chains not in the cross-ref list, verify via chainreport.
+    //    These are likely partial-window observations (we saw them during the
+    //    war but they don't appear fully in their recent history).
+    const apiCallCap = Math.max(50, CONFIG.calibration.maxReportsPerCalibration - verifiedByCrossRef);
+    for (const ac of attackChains) {
+      if (map.has(String(ac.id))) continue; // already verified above
+      if (apiCallCap <= 0) break;
+      apiCallCap--;
+      const verdict = await fetchChainVerdict(ac.id, apiKey);
+      if (verdict && verdict.qualifies && verdict.length >= CONFIG.calibration.minWarChainLength) {
+        verifiedByReport++;
+        map.set(String(ac.id), { length: verdict.length, source: "chainreport" });
+      }
+    }
+
+    return {
+      warHits: (id) => map.get(String(id))?.length >> 0,
+      allVerified: map.size,
+      verifiedByCrossRef,
+      verifiedByReport,
+    };
   }
 
   // --- War-chain qualification via chainreport ---
@@ -832,15 +887,54 @@
     // Try the higher-quality source first: this faction's actual attacks on you.
     const priorAttacks = await fetchIncomingAttacksFrom(factionId, apiKey);
     const attackChains = groupAttacksByChain(priorAttacks);
-    let result = computeStatsFromRates(attackChains);
-    let source = "attacks";
-    let qualifyingChains = attackChains; // {id, rate} entries in scope below
 
-    if (!result.ok) {
-      // Fall back to their general chain history. Verify up to targetWarChains
-      // war chains, scanning up to maxReportsPerCalibration uncached reports
-      // (cached verdicts are free, so a warm re-run can scan all 100 for zero
-      // calls). Non-war (farming/outside-hit) chains are excluded.
+    let qualifyingChains;
+    let result;
+    let source = "attacks";
+    let farmFiltered = 0; // chains rejected as likely farming during Source (a)
+
+    if (attackChains.length >= CONFIG.calibration.minChainsForCalibration) {
+      // Verify these ranked-attack chains are actual war tempo, not farming.
+      // During a ranked war period, a faction could be farming weaker opponents
+      // while we catch fragmentary attacks — those should NOT seed the baseline.
+      const verify = await verifyWarChains(attackChains, factionId, apiKey);
+      qualifyingChains = attackChains.filter((c) => {
+        const hits = verify.warHits(c.id);
+        return hits && hits >= CONFIG.calibration.minWarChainLength;
+      });
+      // Attach verified hit counts for downstream use.
+      for (const c of qualifyingChains) {
+        c.totalHits = verify.warHits(c.id);
+      }
+      farmFiltered = attackChains.length - qualifyingChains.length;
+
+      if (qualifyingChains.length >= CONFIG.calibration.minChainsForCalibration) {
+        result = computeStatsFromRates(qualifyingChains);
+        Logger.info(
+          `calibration verification for ${factionId}: ${qualifyingChains.length} of ${attackChains.length} ranked chains verified as war tempo (${farmFiltered} filtered)`,
+        );
+      } else {
+        // Not enough verified war chains — fall back to Source (b).
+        const rawChains = await fetchPastChains(factionId, apiKey);
+        const parsedChains = parseChainList(rawChains);
+        qualifyingChains = await filterToWarChains(
+          parsedChains,
+          factionId,
+          apiKey,
+          {
+            target: CONFIG.calibration.targetWarChains,
+            apiCallCap: CONFIG.calibration.maxReportsPerCalibration,
+          },
+        );
+        source = "war-chains";
+      }
+    } else if (attackChains.length > 0) {
+      // Few attack chains — insufficient to seed a baseline on its own.
+      Logger.warn(
+        `calibration for faction ${factionId}: only ${attackChains.length} ranked attacks found (need >= ${CONFIG.calibration.minChainsForCalibration}) — falling back to chain history`,
+      );
+    } else {
+      // No prior attacks at all — use Source (b).
       const rawChains = await fetchPastChains(factionId, apiKey);
       const parsedChains = parseChainList(rawChains);
       qualifyingChains = await filterToWarChains(
@@ -852,9 +946,13 @@
           apiCallCap: CONFIG.calibration.maxReportsPerCalibration,
         },
       );
-      result = computeStatsFromRates(qualifyingChains);
       source = "war-chains";
     }
+
+    if (!result && qualifyingChains.length) {
+      result = computeStatsFromRates(qualifyingChains);
+    }
+
     const sample = qualifyingChains.slice(0, 3);
 
     const state = Storage.load(factionId) || freshState();
@@ -867,14 +965,21 @@
     for (const wc of qualifyingChains) {
       if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) added++;
     }
-    if (added || (state.baselineChains || []).length) {
+    const existingBaseline = (state.baselineChains || []).length;
+    if (added || existingBaseline) {
       state.calibrationSource = state.calibrationSource || source;
       Logger.info(
-        `calibrated faction ${factionId}: +${added} war chain(s) via ${source} (baseline now ${(state.baselineChains || []).length})`,
+        `calibrated faction ${factionId}: +${added} war chain(s) via ${source} (baseline now ${existingBaseline})`,
+      );
+    } else if (qualifyingChains.length === 0) {
+      // Distinguish "no data found" from "data found but none qualified".
+      Logger.warn(
+        `calibration for faction ${factionId}: no qualifying war chains — ${source} returned ${qualifyingChains.length} candidates; background trickle will keep trying, or set manual thresholds`,
       );
     } else {
-      Logger.warn(
-        `calibration for faction ${factionId} found no war chains yet — background trickle will keep trying, or set manual thresholds`,
+      // qualifyingChains > 0 but all were deduped
+      Logger.info(
+        `calibration for faction ${factionId}: found ${qualifyingChains.length} war chains but all already seen (dedup) — baseline unchanged at ${existingBaseline}`,
       );
     }
     Storage.save(factionId, state);
@@ -1272,6 +1377,16 @@
     }
     if (!pick) return; // everyone's baseline is full enough
 
+2    // Load the state for progress tracking.
+    const pickState = Storage.load(pick);
+    const pickCount = pickState ? (pickState.baselineChains || []).length : 0;
+
+    // Show progress toward the target war-chain count.
+    UI.showTask(
+      `Background: ${factionLabel(pick)} — ${pickCount}/${CONFIG.calibration.targetWarChains} war chains`,
+    );
+    UI.refresh();
+
     // Pull the chain list (cheap; one call) and find chains we haven't cached
     // a verdict for yet.
     const rawChains = await fetchPastChains(pick, apiKey);
@@ -1304,6 +1419,10 @@
         );
         UI.refresh();
       }
+    } else {
+      // No new war chains this tick — clear the task so the bar disappears.
+      UI.clearTask();
+      UI.refresh();
     }
   }
 
@@ -1312,6 +1431,33 @@
   // =========================================================================
   const UI = {
     panel: null,
+
+    // -----------------------------------------------------------------------
+    // 7a. TASK INDICATOR — shows what the script is currently doing so the
+    //     user never has to wonder "why is nothing updating?"
+    // -----------------------------------------------------------------------
+    _task: { msg: "", progress: null, total: null },
+
+    showTask(msg, progress = null, total = null) {
+      this._task = { msg, progress, total };
+    },
+
+    clearTask() {
+      this._task = { msg: "", progress: null, total: null };
+    },
+
+    _renderTaskBar() {
+      const el = document.getElementById("pd-task");
+      if (!el) return;
+      if (!this._task.msg) {
+        // No active task — hide the bar cleanly
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "flex";
+      const msgEl = document.getElementById("pd-task-msg");
+      if (msgEl) msgEl.textContent = this._task.msg;
+    },
     init() {
       const saved = Storage.getUiState();
 
@@ -1351,6 +1497,12 @@
             <button id="pd-setup-save" style="${UI.btnStyle} background:#2f5130; border-color:#3f7040;">save changes</button>
           </div>
         </div>
+        <!-- Current task indicator — shown during calibration, polling, etc. -->
+        <div id="pd-task" style="display:none; margin-bottom:6px; padding:4px 8px; background:#1a2030; border:1px solid #254060; border-radius:4px; font-size:10px; color:#7ab8ff; display:flex; align-items:center; gap:6px;">
+          <span id="pd-task-spinner" style="display:inline-block; width:8px; height:8px; border:1.5px solid #7ab8ff; border-top-color:transparent; border-radius:50%; animation: pd-spin 0.7s linear infinite; flex:none;"></span>
+          <span id="pd-task-msg" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
+        </div>
+        <style> @keyframes pd-spin { to { transform: rotate(360deg); } } </style>
         <div id="pd-body">Not configured. Click "setup" to begin.</div>
         <div id="pd-debug" style="display:none; margin-top:8px; padding-top:6px; border-top:1px solid #333;">
           <div id="pd-debug-status" style="color:#999; font-size:10px; margin-bottom:4px;"></div>
@@ -1794,6 +1946,10 @@
 
     refresh(force) {
       if (!this.panel) return;
+
+      // Render the task indicator first so it's always up to date.
+      this._renderTaskBar();
+
       const body = this.panel.querySelector("#pd-body");
 
       // Don't rewrite the DOM out from under a user actively typing an override
@@ -1928,11 +2084,20 @@
         alert("Set up an API key and at least one faction ID first.");
         return;
       }
-      this.panel.querySelector("#pd-body").textContent =
-        "Calibrating from chain history...";
+      let progress = 0;
+      const total = watchlist.length;
+      this.showTask("Calibrating", 0, total);
       for (const factionId of watchlist) {
         await calibrateFaction(factionId, apiKey); // logs its own result via Logger
+        progress++;
+        this.showTask(
+          `Calibrating ${factionLabel(factionId)}…`,
+          Math.round((progress / total) * 100),
+        );
+        // Yield to the event loop so the task bar can visibly update between factions.
+        await new Promise((r) => setTimeout(r, 50));
       }
+      this.clearTask();
       this.refresh(true);
     },
     // Toggle the inline setup form. When opening, populate inputs from stored
@@ -2063,7 +2228,11 @@
   const TabLeader = {
     key: "wpd_leader",
     tabId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    heartbeatMs: 3000,
+    // Add a small random offset to the heartbeat so that tabs opening
+    // simultaneously are unlikely to synchronize and both try to claim at
+    // the same time. Without this, two tabs within ~100ms of each other
+    // share the same interval cadence and race on every beat.
+    heartbeatMs: 3000 + Math.random() * 1000,
     staleMs: 8000, // > 2 heartbeats: tolerate a missed beat before failover
 
     read() {
