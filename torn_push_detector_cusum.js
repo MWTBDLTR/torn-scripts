@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector TEST
 // @namespace    church-tools
-// @version      1.1.7
+// @version      1.1.8
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
