@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector TEST
 // @namespace    church-tools
-// @version      1.1.5
+// @version      1.1.6
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,7 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.6 - Added "⚠ recalc" button to clear the chain cache and immediately recalculate stats from scratch
  * 1.1.5 - optimized canCall() to avoid repeated array filtering and redundant GM_getValue reads
  *       - and string-parsing within getOverrides() and setOverrides() bypassed by caching the parsed object in memory
  * 1.1.4 — add maxBaselineChainLength to exclude massive chaining events from resting tempo baselines
@@ -1213,7 +1214,6 @@
     if (durMin <= 0) return;
     if (state.liveCurrent < CONFIG.calibration.minWarChainLength) return; // too short to trust
     if (state.liveCurrent > CONFIG.calibration.maxBaselineChainLength) return; // exclude massive chaining events
-    
     const rate = state.liveCurrent / durMin;
     const bucket = ingestConcludedChain(
       state,
@@ -1423,6 +1423,7 @@
           <span>
             <button id="pd-setup-btn" style="${UI.btnStyle}" title="Show/hide settings">⚙ setup</button>
             <button id="pd-calibrate-btn" style="${UI.btnStyle}" title="Seed baselines from chain history">↻ calibrate</button>
+            <button id="pd-recalc-btn" style="${UI.btnStyle}" title="Clear cache and recalculate stats">⚠ recalc</button>
             <button id="pd-debug-btn" style="${UI.btnStyle}" title="Toggle debug panel">🐞</button>
           </span>
         </div>
@@ -1463,6 +1464,8 @@
       panel.querySelector("#pd-setup-btn").onclick = () => UI.toggleSetup();
       panel.querySelector("#pd-calibrate-btn").onclick = () =>
         UI.calibrateAll();
+      panel.querySelector("#pd-recalc-btn").onclick = () =>
+        UI.clearCacheAndRecalculate();
       panel.querySelector("#pd-debug-btn").onclick = () => UI.toggleDebug();
       panel.querySelector("#pd-setup-save").onclick = () => UI.saveSetup();
       panel.querySelector("#pd-setup-cancel").onclick = () =>
@@ -1703,16 +1706,24 @@
         const fmt = (v) =>
           v !== null && v !== undefined ? `${v.toFixed(1)} hits/min` : "—";
 
-        const cusumColor = s.cusumScore > 0 ? (s.cusumScore >= r.pushingAt ? "#ff5555" : (s.cusumScore >= r.elevatedAt ? "#ffb040" : "#7ab8ff")) : "#ddd";
-        const cusumScoreText = typeof s.cusumScore === 'number' ? s.cusumScore.toFixed(1) : "0.0";
+        const cusumColor =
+          s.cusumScore > 0
+            ? s.cusumScore >= r.pushingAt
+              ? "#ff5555"
+              : s.cusumScore >= r.elevatedAt
+                ? "#ffb040"
+                : "#7ab8ff"
+            : "#ddd";
+        const cusumScoreText =
+          typeof s.cusumScore === "number" ? s.cusumScore.toFixed(1) : "0.0";
 
         insightHtml = `<div style="margin-top:5px; padding:5px 6px; background:#141414; border-radius:4px; font-size:11px;">
              ${row("Current (this chain)", curVal, curColor)}
              ${row("Baseline Median", fmt(r.baseline), "#ddd", this.provTag(r.provenance.baseline))}
              <div style="height:1px; background:#333; margin:4px 0;"></div>
              ${row("CUSUM Score (Push Anomaly)", cusumScoreText, cusumColor)}
-             ${row("→ Elevated Alarm at Score ≥", (r.elevatedAt ? r.elevatedAt.toFixed(1) : "—"), "#ffb040", this.provTag(r.provenance.elevated))}
-             ${row("→ Push Alarm at Score ≥", (r.pushingAt ? r.pushingAt.toFixed(1) : "—"), "#ff5555", this.provTag(r.provenance.pushing))}
+             ${row("→ Elevated Alarm at Score ≥", r.elevatedAt ? r.elevatedAt.toFixed(1) : "—", "#ffb040", this.provTag(r.provenance.elevated))}
+             ${row("→ Push Alarm at Score ≥", r.pushingAt ? r.pushingAt.toFixed(1) : "—", "#ff5555", this.provTag(r.provenance.pushing))}
              ${r.provenance.baseline === "inferred" ? `<div style="margin-top:2px; font-size:9px; color:${r.lowConfidence ? "#ffb040" : "#666"};">${r.lowConfidence ? "⚠ low confidence — " : ""}baseline from ${r.baselineN} war chain${r.baselineN === 1 ? "" : "s"}${r.baselineN < r.baselineWantN ? ` (building toward ${r.baselineWantN})` : ""}</div>` : ""}
            </div>`;
       }
@@ -2025,6 +2036,45 @@
       }
       this.clearTask();
       this.refresh(true);
+    },
+    async clearCacheAndRecalculate() {
+      if (
+        !confirm(
+          "This will clear all cached chain verdicts and wipe historical baselines. Proceed with recalculation?",
+        )
+      )
+        return;
+
+      const apiKey = Storage.getApiKey();
+      const watchlist = Storage.getWatchedFactions();
+      if (!apiKey || watchlist.length === 0) {
+        alert("Set up an API key and at least one faction ID first.");
+        return;
+      }
+
+      // 1. Wipe the Chain Cache completely
+      const cacheIndex = ChainCache.loadIndex();
+      for (const id of Object.keys(cacheIndex)) {
+        ChainCache.dropFaction(id);
+      }
+
+      // 2. Wipe existing history and baselines for watched factions
+      for (const id of watchlist) {
+        const state = Storage.load(id);
+        if (state) {
+          state.historyChains = [];
+          state.baselineMedian = null;
+          state.baselineMad = null;
+          state.calibrationSource = null;
+          Storage.save(id, state);
+        }
+      }
+
+      Logger.info("Cache and history wiped. Beginning fresh recalculation...");
+      this.refresh(true);
+
+      // 3. Rerun calibration
+      await this.calibrateAll();
     },
     // Toggle the inline setup form. When opening, populate inputs from stored
     // values; `force` can explicitly open (true) or close (false).
