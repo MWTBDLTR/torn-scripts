@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector TEST
 // @namespace    church-tools
-// @version      1.1.4
+// @version      1.1.5
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,8 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.5 - optimized canCall() to avoid repeated array filtering and redundant GM_getValue reads
+ *       - and string-parsing within getOverrides() and setOverrides() bypassed by caching the parsed object in memory
  * 1.1.4 — add maxBaselineChainLength to exclude massive chaining events from resting tempo baselines
  *       - add chainID to debug panel for easier cross-reference with chainreport
  * 1.1.3 — refactor to CUSUM statistical method for testing
@@ -137,19 +139,20 @@
       names[id] = name;
       GM_setValue("wpd_facnames", JSON.stringify(names));
     },
-    // Per-faction user overrides for baseline/thresholds. Shape:
-    //   { baseline: number|null,           // manual baseline hits/min
-    //     elevated: {mode:'abs'|'mult', value:number} | null,
-    //     pushing:  {mode:'abs'|'mult', value:number} | null }
-    // Any null field falls back to the inferred value.
+
+    _overridesCache: null,
+    _getOverridesData() {
+      if (this._overridesCache === null) {
+        const raw = GM_getValue("wpd_overrides", null);
+        this._overridesCache = raw ? JSON.parse(raw) : {};
+      }
+      return this._overridesCache;
+    },
     getOverrides(id) {
-      const raw = GM_getValue("wpd_overrides", null);
-      const all = raw ? JSON.parse(raw) : {};
-      return all[id] || {};
+      return this._getOverridesData()[id] || {};
     },
     setOverrides(id, overrides) {
-      const raw = GM_getValue("wpd_overrides", null);
-      const all = raw ? JSON.parse(raw) : {};
+      const all = this._getOverridesData();
       all[id] = overrides;
       GM_setValue("wpd_overrides", JSON.stringify(all));
     },
@@ -284,8 +287,10 @@
       this.calls = [];
     }
     canCall() {
-      const now = Date.now();
-      this.calls = this.calls.filter((t) => now - t < 60000);
+      const cutoff = Date.now() - 60000;
+      while (this.calls.length > 0 && this.calls[0] < cutoff) {
+        this.calls.shift();
+      }
       return this.calls.length < this.max;
     }
     record() {
