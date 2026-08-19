@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector TEST
 // @namespace    church-tools
-// @version      1.1.3
+// @version      1.1.4
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,8 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.4 — add maxBaselineChainLength to exclude massive chaining events from resting tempo baselines
+ *       - add chainID to debug panel for easier cross-reference with chainreport
  * 1.1.3 — refactor to CUSUM statistical method for testing
  */
 
@@ -46,6 +48,7 @@
       maxPaginatedPages: 5, // hard cap on pages followed via _metadata.links.next
       maxReportsPerCalibration: 60, // hard cap on chainreport calls in ONE explicit calibrate run
       minWarChainLength: 50, // at/above this length, a chain needs only war hits present
+      maxBaselineChainLength: 10000, // exclude massive chaining events from resting tempo baselines
       // (not full bonus coverage) to count — see checkChainQualifies
       // Background trickle: instead of one big burst, verify a few unchecked
       // chains per poll cycle so history builds gradually without a rate spike.
@@ -759,7 +762,14 @@
     for (const c of rawChains.slice(0, CONFIG.calibration.chainsListLimit)) {
       const hits = c.chain; // confirmed field name
       const { start, end } = c;
-      if (!hits || !start || !end || end <= start) continue;
+      if (
+        !hits ||
+        hits > CONFIG.calibration.maxBaselineChainLength ||
+        !start ||
+        !end ||
+        end <= start
+      )
+        continue;
       const durationMin = (end - start) / 60;
       if (durationMin <= 0) continue;
       parsed.push({
@@ -809,7 +819,11 @@
       const verify = await verifyWarChains(attackChains, factionId, apiKey);
       qualifyingChains = attackChains.filter((c) => {
         const hits = verify.warHits(c.id);
-        return hits && hits >= CONFIG.calibration.minWarChainLength;
+        return (
+          hits &&
+          hits >= CONFIG.calibration.minWarChainLength &&
+          hits <= CONFIG.calibration.maxBaselineChainLength
+        );
       });
       // Attach verified hit counts for downstream use.
       for (const c of qualifyingChains) {
@@ -873,14 +887,18 @@
     // preserved rather than wiped.
     const overrides = Storage.getOverrides(factionId);
     let added = 0;
+    const addedIds = [];
     for (const wc of qualifyingChains) {
-      if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) added++;
+      if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) {
+        added++;
+        addedIds.push(wc.id);
+      }
     }
     const existingBaseline = (state.historyChains || []).length;
     if (added || existingBaseline) {
       state.calibrationSource = state.calibrationSource || source;
       Logger.info(
-        `calibrated faction ${factionId}: +${added} war chain(s) via ${source} (baseline now ${existingBaseline})`,
+        `calibrated faction ${factionId}: +${added} war chain(s) ${addedIds.length ? `[IDs: ${addedIds.join(", ")}] ` : ""}via ${source} (baseline now ${existingBaseline})`,
       );
     } else if (qualifyingChains.length === 0) {
       // Distinguish "no data found" from "data found but none qualified".
@@ -1189,6 +1207,8 @@
     const durMin = Math.max((Date.now() / 1000 - state.liveChainStart) / 60, 0);
     if (durMin <= 0) return;
     if (state.liveCurrent < CONFIG.calibration.minWarChainLength) return; // too short to trust
+    if (state.liveCurrent > CONFIG.calibration.maxBaselineChainLength) return; // exclude massive chaining events
+    
     const rate = state.liveCurrent / durMin;
     const bucket = ingestConcludedChain(
       state,
@@ -1320,15 +1340,19 @@
       const state = Storage.load(pick) || freshState();
       const overrides = Storage.getOverrides(pick);
       let added = 0;
+      const addedIds = [];
       for (const wc of warChains) {
-        if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) added++;
+        if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) {
+          added++;
+          addedIds.push(wc.id);
+        }
       }
       if (added) {
         state.calibrationSource = state.calibrationSource || "war-chains";
         Storage.save(pick, state);
         Storage.markDataUpdated();
         Logger.info(
-          `background calibration: +${added} war chain(s) for faction ${pick} (now ${(state.historyChains || []).length})`,
+          `background calibration: +${added} war chain(s) [IDs: ${addedIds.join(", ")}] for faction ${pick} (now ${(state.historyChains || []).length})`,
         );
         UI.refresh();
       }
