@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Torn War Push Detector
+// @name         Torn War Push Detector TEST
 // @namespace    church-tools
 // @version      1.1.3
 // @author       MrChurch [3654415]
