@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn War Push Detector TEST
 // @namespace    church-tools
-// @version      1.1.6
+// @version      1.1.7
 // @author       MrChurch [3654415]
 // @description  Detects enemy faction attack-tempo spikes during ranked wars using real-time chain data and a statistical baseline.
 // @match        https://www.torn.com/*
@@ -13,6 +13,10 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.7 - Implemented concurrent polling via Promise.all for faster cycle times
+ *       - Replaced DOM innerHTML wiping with targeted ID element updates (fixes focus loss)
+ *       - Added in-memory JSON state caching to prevent excessive synchronous GM_getValue reads
+ *       - Optimized rate limiter sliding window with index tracking
  * 1.1.6 - Added "⚠ recalc" button to clear the chain cache and immediately recalculate stats from scratch
  * 1.1.5 - optimized canCall() to avoid repeated array filtering and redundant GM_getValue reads
  *       - and string-parsing within getOverrides() and setOverrides() bypassed by caching the parsed object in memory
@@ -25,51 +29,42 @@
   ("use strict");
 
   // =========================================================================
-  // 1. CONFIG — the only section you should need to touch
+  // 1. CONFIG
   // =========================================================================
   const CONFIG = {
     apiBase: "https://api.torn.com/v2",
-    pollIntervalMs: 30 * 1000, // chain endpoint is real-time/non-cached; 30s gives fine resolution
+    pollIntervalMs: 30 * 1000,
     cusum: {
-      slackMultiplier: 0.5, // K value: allow deviation up to 0.5 * MAD before accumulating
-      elevatedThresholdMulti: 1.5, // H_elev: Alarm when accumulated extra hits > 1.5 * baseline rate
-      pushThresholdMulti: 3.0, // H_push: Alarm when accumulated extra hits > 3.0 * baseline rate
+      slackMultiplier: 0.5,
+      elevatedThresholdMulti: 1.5,
+      pushThresholdMulti: 3.0,
     },
-    tightTimeoutThreshold: 30, // seconds; refreshing this close to expiry flags as "managed"
-    maxSamplesStored: 1440, // ~12 hrs of history at 30s polling
+    tightTimeoutThreshold: 30,
+    maxSamplesStored: 1440,
     liveModel: {
-      warmupMinChainMinutes: 1, // Reduced for CUSUM as it naturally absorbs early noise
+      warmupMinChainMinutes: 1,
       warmupMinHits: 5,
-      minBaselineChains: 5, // qualifying war chains needed before inferred alerts fire
+      minBaselineChains: 5,
     },
     calibration: {
-      chainsListLimit: 100, // /faction/{id}/chains returns up to 100 in one request
-      targetWarChains: 20, // stop checking once we've confirmed this many war chains
-      minChainsForCalibration: 5, // below this, baseline is shown but flagged low-confidence
-      defaultBaselineChains: 20, // how many war chains a baseline uses by default (user-overridable)
-      attackLookbackDays: 60, // how far back to search your own attack log for this enemy
-      maxPaginatedPages: 5, // hard cap on pages followed via _metadata.links.next
-      maxReportsPerCalibration: 60, // hard cap on chainreport calls in ONE explicit calibrate run
-      minWarChainLength: 50, // at/above this length, a chain needs only war hits present
-      maxBaselineChainLength: 10000, // exclude massive chaining events from resting tempo baselines
-      // (not full bonus coverage) to count — see checkChainQualifies
-      // Background trickle: instead of one big burst, verify a few unchecked
-      // chains per poll cycle so history builds gradually without a rate spike.
-      backgroundReportsPerCycle: 3, // chainreport calls per poll cycle for background calibration
+      chainsListLimit: 100,
+      targetWarChains: 20,
+      minChainsForCalibration: 5,
+      defaultBaselineChains: 20,
+      attackLookbackDays: 60,
+      maxPaginatedPages: 5,
+      maxReportsPerCalibration: 60,
+      minWarChainLength: 50,
+      maxBaselineChainLength: 10000,
+      backgroundReportsPerCycle: 3,
     },
     cache: {
-      maxFactions: 10, // LRU cap on cached factions (INCLUDING own); own is pinned
-      maxChainsPerFaction: 100, // per-faction cap; matches the /chains list size
-      ownFactionId: null, // set via setup; this faction is never evicted as a whole
+      maxFactions: 10,
+      maxChainsPerFaction: 100,
+      ownFactionId: null,
     },
   };
 
-  // Chain bonus hits land at these lengths. A "war push" ideally lands each
-  // bonus on the warring faction, so a war chain must have at least as many
-  // war hits as bonuses it reached — UNLESS the chain is long enough
-  // (minWarChainLength) that its rate is good data on its own, in which case
-  // any war hits present are enough (some factions fumble landing bonuses on
-  // the war target but are still genuinely war-chaining).
   const BONUS_THRESHOLDS = [
     10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000,
   ];
@@ -78,13 +73,16 @@
   }
 
   // =========================================================================
-  // 2. STORAGE — thin wrapper, one JSON blob per faction
+  // 2. STORAGE — Cached memory wrappers
   // =========================================================================
   const Storage = {
+    _stateCache: new Map(),
     key(factionId) {
       return `wpd_state_${factionId}`;
     },
     load(factionId) {
+      if (this._stateCache.has(factionId))
+        return this._stateCache.get(factionId);
       const raw = GM_getValue(this.key(factionId), null);
       if (!raw) return null;
       let parsed;
@@ -93,14 +91,16 @@
       } catch {
         return null;
       }
-      // Migrate: backfill any fields missing from state saved by an older
-      // version (e.g. the two-population arrays added in 0.9.0). Merging over
-      // freshState() guarantees every expected field exists, so downstream code
-      // never hits an undefined array. Loaded values win over defaults.
-      return migrateState(parsed);
+      const migrated = migrateState(parsed);
+      this._stateCache.set(factionId, migrated);
+      return migrated;
     },
     save(factionId, state) {
+      this._stateCache.set(factionId, state);
       GM_setValue(this.key(factionId), JSON.stringify(state));
+    },
+    clearCache() {
+      this._stateCache.clear();
     },
     getApiKey() {
       return GM_getValue("wpd_apikey", "");
@@ -157,10 +157,6 @@
       all[id] = overrides;
       GM_setValue("wpd_overrides", JSON.stringify(all));
     },
-    // Broadcast key: the leader bumps this after each successful poll write.
-    // Followers compare against their own last-rendered value and only
-    // re-render when it changes — so a follower never wipes a user's in-progress
-    // input on the 3s heartbeat, only when there's genuinely new data.
     getDataUpdatedTs() {
       return GM_getValue("wpd_data_ts", 0);
     },
@@ -169,29 +165,11 @@
     },
   };
 
-  // =========================================================================
-  // 2b. CHAIN CACHE — persistent store of per-chain qualification verdicts.
-  //     A completed chain's verdict is immutable, so once computed it never
-  //     needs re-fetching. Structure in GM storage:
-  //
-  //       wpd_chaincache_index          -> { <factionId>: lastAccessMs, ... }  (LRU clock)
-  //       wpd_chaincache_<factionId>    -> { <chainId>: {rate,durationMin,
-  //                                       warHits,bonuses,qualifies,length}, ... }
-  //
-  //     Culling is count-based:
-  //       * At most cache.maxFactions factions kept (LRU). The own faction is
-  //         pinned and never evicted as a whole — only its oldest chains are
-  //         trimmed like any other faction.
-  //       * At most cache.maxChainsPerFaction chains per faction; when a newer
-  //         chain lands, the oldest (lowest chain id) is dropped.
-  //     Ongoing chains are never cached — only concluded ones get a verdict.
-  // =========================================================================
   const ChainCache = {
     indexKey: "wpd_chaincache_index",
     factionKey(id) {
       return `wpd_chaincache_${id}`;
     },
-
     loadIndex() {
       const raw = GM_getValue(this.indexKey, null);
       return raw ? JSON.parse(raw) : {};
@@ -199,7 +177,6 @@
     saveIndex(idx) {
       GM_setValue(this.indexKey, JSON.stringify(idx));
     },
-
     loadFaction(factionId) {
       const raw = GM_getValue(this.factionKey(factionId), null);
       return raw ? JSON.parse(raw) : {};
@@ -213,23 +190,13 @@
       delete idx[factionId];
       this.saveIndex(idx);
     },
-
-    // Return the cached verdict for one chain, or null if not present.
     getChain(factionId, chainId) {
       const chains = this.loadFaction(factionId);
       return chains[chainId] || null;
     },
-
-    // Store a batch of verdicts for a faction, then trim to the per-faction
-    // chain cap (drop lowest chain ids first — chain ids increase over time).
     putChains(factionId, verdictsById) {
       const chains = this.loadFaction(factionId);
       Object.assign(chains, verdictsById);
-
-      // Evict oldest by chain START TIME, not by id. Chain ids are assigned
-      // game-wide and are non-consecutive for any one faction, so while they
-      // happen to be time-monotonic, `start` is the explicit, correct key.
-      // Chains missing a start (shouldn't happen) sort oldest and go first.
       const ids = Object.keys(chains).sort(
         (a, b) => (chains[a].start || 0) - (chains[b].start || 0),
       );
@@ -238,30 +205,22 @@
         for (let i = 0; i < overflow; i++) delete chains[ids[i]];
       }
       this.saveFaction(factionId, chains);
-      this.touch(factionId); // bump LRU + enforce faction cap
+      this.touch(factionId);
     },
-
-    // Mark a faction as just-used and enforce the faction-count cap via LRU,
-    // never evicting the pinned own faction.
     touch(factionId) {
       const idx = this.loadIndex();
       idx[factionId] = Date.now();
       this.saveIndex(idx);
-
       const own = String(Storage.getOwnFactionId() || "");
       const evictable = Object.keys(idx).filter((id) => id !== own);
       const overflow =
         evictable.length + (own && idx[own] ? 1 : 0) - CONFIG.cache.maxFactions;
       if (overflow > 0) {
-        // Oldest-first among evictable (non-own) factions
         evictable.sort((a, b) => idx[a] - idx[b]);
-        for (let i = 0; i < overflow && i < evictable.length; i++) {
+        for (let i = 0; i < overflow && i < evictable.length; i++)
           this.dropFaction(evictable[i]);
-        }
       }
     },
-
-    // Debug/inspection helper: summary counts without loading every blob body.
     summary() {
       const idx = this.loadIndex();
       const own = String(Storage.getOwnFactionId() || "");
@@ -280,45 +239,49 @@
   };
 
   // =========================================================================
-  // 3. RATE LIMITER — simple token bucket, keeps us well under 100/min
+  // 3. RATE LIMITER — Optimized Pointer Array
   // =========================================================================
   class RateLimiter {
     constructor(maxPerMinute) {
       this.max = maxPerMinute;
       this.calls = [];
+      this.head = 0;
     }
     canCall() {
       const cutoff = Date.now() - 60000;
-      while (this.calls.length > 0 && this.calls[0] < cutoff) {
-        this.calls.shift();
+      while (this.head < this.calls.length && this.calls[this.head] < cutoff) {
+        this.head++;
       }
-      return this.calls.length < this.max;
+      if (this.head > 50) {
+        this.calls = this.calls.slice(this.head);
+        this.head = 0;
+      }
+      return this.calls.length - this.head < this.max;
     }
     record() {
       this.calls.push(Date.now());
     }
-
-    // How many calls in the last rolling 60s.
     ratePerMinute() {
-      const now = Date.now();
-      return this.calls.filter((t) => now - t < 60000).length;
+      const cutoff = Date.now() - 60000;
+      let count = 0;
+      for (let i = this.head; i < this.calls.length; i++) {
+        if (this.calls[i] >= cutoff) count++;
+      }
+      return count;
     }
-    // Timestamp of the most recent call, or null if none yet.
     lastCallTime() {
-      return this.calls.length ? this.calls[this.calls.length - 1] : null;
+      return this.calls.length > this.head
+        ? this.calls[this.calls.length - 1]
+        : null;
     }
-    // Fraction of the configured budget currently used (0..1+).
     utilization() {
       return this.ratePerMinute() / this.max;
     }
   }
-  const limiter = new RateLimiter(60); // leave headroom under the 100/min cap
+  const limiter = new RateLimiter(60);
 
-  // =========================================================================
-  // 3b. LOGGER — feeds both the browser console and the in-panel debug view
-  // =========================================================================
   const Logger = {
-    entries: [], // [{t, level, msg}]
+    entries: [],
     maxEntries: 50,
     log(level, msg) {
       this.entries.push({ t: Date.now(), level, msg });
@@ -338,10 +301,6 @@
     },
   };
 
-  // =========================================================================
-  // 3c. RAW CACHE — last raw API response per faction, for the debug panel
-  //     only. Not persisted — purely in-memory, resets on page reload.
-  // =========================================================================
   const RawCache = {
     data: new Map(),
     get(factionId) {
@@ -351,17 +310,8 @@
   };
 
   // =========================================================================
-  // 4. API LAYER — fetch + retry/backoff, never throws uncaught
-  //    v2 /faction/{id}/chain returns real-time (non-cached) chain state for
-  //    ANY faction: { chain: { id, current, max, timeout, modifier,
-  //    cooldown, start, end } }
+  // 4. API LAYER
   // =========================================================================
-  // Returns one of three distinct outcomes so callers can tell "no chain" from
-  // "couldn't fetch" — critical because a false "concluded" would corrupt the
-  // baseline with a truncated chain:
-  //   { ok: true,  chain: {...} }  -> active chain
-  //   { ok: true,  chain: null }   -> API succeeded, no chain running (real end)
-  //   { ok: false }                -> error/rate-limit/network; caller must skip
   async function fetchFactionChain(factionId, apiKey, attempt = 0) {
     if (!limiter.canCall()) {
       Logger.warn(
@@ -374,9 +324,7 @@
       limiter.record();
       const res = await fetch(url);
       const data = await res.json();
-
       if (data.error) {
-        // Torn API error codes: back off on rate-limit (5), don't retry on bad key (2)
         if (data.error.code === 5 && attempt < 2) {
           await sleep(2000 * (attempt + 1));
           return fetchFactionChain(factionId, apiKey, attempt + 1);
@@ -386,7 +334,6 @@
         );
         return { ok: false };
       }
-      // Success. data.chain present => active; absent/empty => no chain running.
       return { ok: true, chain: data.chain || null };
     } catch (err) {
       if (attempt < 2) {
@@ -402,41 +349,29 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  // Fetch and cache a faction's name (basic selection). Names change rarely,
-  // so this is stored persistently and only fetched on a miss — one call per
-  // faction, ever, in practice. Non-fatal: on failure we just keep showing the
-  // id until a later attempt succeeds.
   async function ensureFactionName(factionId, apiKey) {
-    if (Storage.getFactionName(factionId)) return; // already known
+    if (Storage.getFactionName(factionId)) return;
     if (!limiter.canCall()) return;
     const url = `${CONFIG.apiBase}/faction/${factionId}/basic?key=${apiKey}`;
     try {
       limiter.record();
       const res = await fetch(url);
       const data = await res.json();
-      if (data.error) return; // silent — name is a nicety, not core
+      if (data.error) return;
       const name = data.basic?.name;
       if (name) Storage.setFactionName(factionId, name);
-    } catch {
-      /* ignore — cosmetic */
-    }
+    } catch {}
   }
 
-  // Display label: "Name [id]" when we have a name, else just the id.
   function factionLabel(factionId) {
     const name = Storage.getFactionName(factionId);
     return name ? `${name} [${factionId}]` : `Faction ${factionId}`;
   }
 
-  // Human-readable hints for the Torn API error codes most likely to bite
-  // this tool — surfaced in logs so a failure is actionable, not just a code.
   const API_ERROR_HINTS = {
     2: "API key is invalid or malformed.",
     5: "Rate limited — the key is temporarily blocked for too many requests.",
-    7:
-      "Selection is private for this key — usually means the faction leader " +
-      "hasn't granted \"AA\" (API Access) permission, or the key's access " +
-      "level doesn't include this selection.",
+    7: "Selection is private for this key.",
     16: "Key access level is too low for this selection.",
   };
   function explainApiError(err) {
@@ -461,23 +396,8 @@
   }
 
   // =========================================================================
-  // 4b. CALIBRATION — seeds a faction's EWMA baseline from history, so a
-  //     newly-watched faction doesn't have to cold-start with no basis for
-  //     comparison. Two sources, tried in order of quality:
-  //
-  //     (a) YOUR OWN faction/attacks log, filtered to incoming hits from
-  //         this specific enemy during ranked wars. Real per-attack
-  //         timestamps grouped by chain — the best available signal, but
-  //         only exists if you've fought this faction before.
-  //     (b) faction/{id}/chains — that faction's own list of past chains
-  //         (against anyone). Coarser (one avg rate per chain, no per-hit
-  //         detail) but works for any faction, including one you've never
-  //         warred.
+  // 4b. CALIBRATION
   // =========================================================================
-
-  // Generic pager: follows _metadata.links.next up to maxPages, sharing the
-  // same rate-limit budget as everything else. Fails soft — returns
-  // whatever was collected if a later page errors out.
   async function fetchPaginated(
     initialUrl,
     dataKey,
@@ -513,18 +433,16 @@
     return all;
   }
 
-  // --- Source (a): this specific enemy's incoming attacks against you ---
   async function fetchIncomingAttacksFrom(targetFactionId, apiKey) {
     const now = Math.floor(Date.now() / 1000);
     const fromTs = now - CONFIG.calibration.attackLookbackDays * 86400;
     const params = new URLSearchParams({
-      filters: "incoming", // schema says array[string]; single value works for URLSearchParams —
-      // switch to params.append('filters', ...) per-value if the API needs repeats
-      limit: "100", // API max per page
+      filters: "incoming",
+      limit: "100",
       sort: "DESC",
       to: String(now),
       from: String(fromTs),
-      timestamp: String(now), // bypasses cache so calibration reflects the latest data
+      timestamp: String(now),
       comment: "PushDetector-calibration",
       key: apiKey,
     });
@@ -551,7 +469,7 @@
     }
     const parsed = [];
     for (const [chainId, group] of byChain) {
-      if (group.length < 2) continue; // need at least 2 hits to get a duration
+      if (group.length < 2) continue;
       const starts = group.map((a) => a.started);
       const ends = group.map((a) => a.ended);
       const start = Math.min(...starts);
@@ -561,7 +479,7 @@
       parsed.push({
         id: chainId,
         hits: group.length,
-        totalHits: null, // filled by calibrateFaction via chainreport
+        totalHits: null,
         durationMin,
         rate: group.length / durationMin,
       });
@@ -569,7 +487,6 @@
     return parsed;
   }
 
-  // --- Source (b): the faction's own list of past chains (any opponent) ---
   async function fetchPastChains(factionId, apiKey) {
     const url = `${CONFIG.apiBase}/faction/${factionId}/chains?key=${apiKey}`;
     return fetchPaginated(
@@ -580,40 +497,29 @@
     );
   }
 
-  // Verify that a set of attack chains are actual war tempo (not farming).
-  // Cross-references the faction's past-chains list to get total hit counts,
-  // then fetches chainreports for any unmatched chains. Returns a Map of
-  // chainId -> total hits, plus metadata about how many were newly verified.
   async function verifyWarChains(attackChains, factionId, apiKey) {
-    const map = new Map(); // chainId -> {length, source}
+    const map = new Map();
     let verifiedByCrossRef = 0;
     let verifiedByReport = 0;
 
-    // 1. Cross-reference with their past-chains list (Source b).
-    //    Past-chains includes `.id` and `.chain` (total hits) per entry.
     const rawChains = await fetchPastChains(factionId, apiKey);
     for (const c of rawChains) {
       if (c.id <= 0 || !c.chain) continue;
       map.set(String(c.id), { length: c.chain, source: "cross-ref" });
     }
 
-    // Mark all cross-referenced chains that overlap with our attack IDs.
     for (const ac of attackChains) {
       const entry = map.get(String(ac.id));
-      if (entry && entry.length >= CONFIG.calibration.minWarChainLength) {
+      if (entry && entry.length >= CONFIG.calibration.minWarChainLength)
         verifiedByCrossRef++;
-      }
     }
 
-    // 2. For attack chains not in the cross-ref list, verify via chainreport.
-    //    These are likely partial-window observations (we saw them during the
-    //    war but they don't appear fully in their recent history).
     const apiCallCap = Math.max(
       50,
       CONFIG.calibration.maxReportsPerCalibration - verifiedByCrossRef,
     );
     for (const ac of attackChains) {
-      if (map.has(String(ac.id))) continue; // already verified above
+      if (map.has(String(ac.id))) continue;
       if (apiCallCap <= 0) break;
       apiCallCap--;
       const verdict = await fetchChainVerdict(ac.id, apiKey);
@@ -638,20 +544,6 @@
     };
   }
 
-  // --- War-chain qualification via chainreport ---
-  // Two-part gate on whether a past chain counts as war tempo:
-  //   * Long chains (length >= minWarChainLength): keep if ANY war hits are
-  //     present. The length alone gives reliable rate data, and some factions
-  //     genuinely war-chain without landing every bonus on the war target.
-  //   * Short chains (below that): keep only if war hits >= bonuses reached,
-  //     i.e. the bonuses were landed on the warring faction. With little data,
-  //     a short chain that didn't bonus the target is treated as farming.
-  // Either way, zero war hits => not a war chain (pure farming, even during a
-  // war).
-  //
-  // Fetches the report and returns { qualifies, warHits, bonuses, length,
-  // ended } or null if unreadable. `ended` gates caching upstream: an ongoing
-  // chain (no end timestamp) must not be cached, since its verdict isn't final.
   async function fetchChainVerdict(chainId, apiKey) {
     if (!limiter.canCall()) return null;
     const url = `${CONFIG.apiBase}/faction/${chainId}/chainreport?key=${apiKey}`;
@@ -673,8 +565,8 @@
       const bonuses = bonusesReached(length);
       const qualifies =
         length >= CONFIG.calibration.minWarChainLength
-          ? warHits > 0 // long: any war hits present is enough
-          : warHits >= bonuses; // short: bonuses must have been landed on the target
+          ? warHits > 0
+          : warHits >= bonuses;
       const ended = !!report.end && report.end > 0;
       return { qualifies, warHits, bonuses, length, ended };
     } catch (err) {
@@ -683,18 +575,10 @@
     }
   }
 
-  // Keep chains that qualify as war tempo (see fetchChainVerdict). Cache-first:
-  // a concluded chain's verdict is immutable, so cached verdicts are reused and
-  // only cache-miss chains hit the API. Two independent stopping conditions:
-  //   * stop early once we've collected `targetWarChains` (no need to check more)
-  //   * cap NEW API calls at `apiCallCap` (protects the rate budget)
-  // Cached hits are free and never count against the API cap, so a re-run after
-  // the cache is warm can scan all 100 chains for zero calls.
   async function filterToWarChains(parsedChains, factionId, apiKey, opts = {}) {
     const target = opts.target ?? CONFIG.calibration.targetWarChains;
     const apiCallCap =
       opts.apiCallCap ?? CONFIG.calibration.maxReportsPerCalibration;
-
     const warChains = [];
     let dropped = 0,
       cacheHits = 0,
@@ -702,9 +586,7 @@
     const newVerdicts = {};
 
     for (const chain of parsedChains) {
-      if (warChains.length >= target) break; // got enough confirmed war chains
-
-      // 1. Cache hit — reuse the stored verdict, no API call.
+      if (warChains.length >= target) break;
       const cached = ChainCache.getChain(factionId, chain.id);
       if (cached) {
         cacheHits++;
@@ -718,9 +600,7 @@
         else dropped++;
         continue;
       }
-
-      // 2. Cache miss — respect the per-run API budget.
-      if (apiCalls >= apiCallCap) break; // out of budget; remaining stay unchecked for now
+      if (apiCalls >= apiCallCap) break;
       apiCalls++;
       const verdict = await fetchChainVerdict(chain.id, apiKey);
       if (!verdict) {
@@ -728,7 +608,6 @@
         continue;
       }
 
-      // 3. Only cache CONCLUDED chains — an ongoing chain's verdict isn't final.
       if (verdict.ended) {
         newVerdicts[chain.id] = {
           rate: chain.rate,
@@ -738,7 +617,7 @@
           qualifies: verdict.qualifies,
           length: verdict.length,
           start: chain.start,
-          end: chain.end, // start is the cache eviction key
+          end: chain.end,
         };
       }
 
@@ -762,11 +641,9 @@
   }
 
   function parseChainList(rawChains) {
-    // Parse the full list (up to 100) — filtering/stopping happens in
-    // filterToWarChains, which decides how many to actually verify.
     const parsed = [];
     for (const c of rawChains.slice(0, CONFIG.calibration.chainsListLimit)) {
-      const hits = c.chain; // confirmed field name
+      const hits = c.chain;
       const { start, end } = c;
       if (
         !hits ||
@@ -790,38 +667,16 @@
     return parsed;
   }
 
-  // --- Shared: turn a list of {rate} into mean/variance ---
-  function computeStatsFromRates(parsed) {
-    if (parsed.length < CONFIG.calibration.minChainsForCalibration) {
-      return { ok: false, sampleCount: parsed.length };
-    }
-    const rates = parsed.map((p) => p.rate);
-    const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
-    const variance =
-      rates.reduce((a, b) => a + (b - mean) ** 2, 0) / rates.length;
-    return {
-      ok: true,
-      sampleCount: parsed.length,
-      meanRate: mean,
-      variance,
-      stdDev: Math.sqrt(variance),
-    };
-  }
-
   async function calibrateFaction(factionId, apiKey) {
-    // Try the higher-quality source first: this faction's actual attacks on you.
     const priorAttacks = await fetchIncomingAttacksFrom(factionId, apiKey);
     const attackChains = groupAttacksByChain(priorAttacks);
 
     let qualifyingChains;
     let result;
     let source = "attacks";
-    let farmFiltered = 0; // chains rejected as likely farming during Source (a)
+    let farmFiltered = 0;
 
     if (attackChains.length >= CONFIG.calibration.minChainsForCalibration) {
-      // Verify these ranked-attack chains are actual war tempo, not farming.
-      // During a ranked war period, a faction could be farming weaker opponents
-      // while we catch fragmentary attacks — those should NOT seed the baseline.
       const verify = await verifyWarChains(attackChains, factionId, apiKey);
       qualifyingChains = attackChains.filter((c) => {
         const hits = verify.warHits(c.id);
@@ -831,10 +686,7 @@
           hits <= CONFIG.calibration.maxBaselineChainLength
         );
       });
-      // Attach verified hit counts for downstream use.
-      for (const c of qualifyingChains) {
-        c.totalHits = verify.warHits(c.id);
-      }
+      for (const c of qualifyingChains) c.totalHits = verify.warHits(c.id);
       farmFiltered = attackChains.length - qualifyingChains.length;
 
       if (
@@ -845,7 +697,6 @@
           `calibration verification for ${factionId}: ${qualifyingChains.length} of ${attackChains.length} ranked chains verified as war tempo (${farmFiltered} filtered)`,
         );
       } else {
-        // Not enough verified war chains — fall back to Source (b).
         const rawChains = await fetchPastChains(factionId, apiKey);
         const parsedChains = parseChainList(rawChains);
         qualifyingChains = await filterToWarChains(
@@ -860,12 +711,22 @@
         source = "war-chains";
       }
     } else if (attackChains.length > 0) {
-      // Few attack chains — insufficient to seed a baseline on its own.
       Logger.warn(
         `calibration for faction ${factionId}: only ${attackChains.length} ranked attacks found (need >= ${CONFIG.calibration.minChainsForCalibration}) — falling back to chain history`,
       );
+      const rawChains = await fetchPastChains(factionId, apiKey);
+      const parsedChains = parseChainList(rawChains);
+      qualifyingChains = await filterToWarChains(
+        parsedChains,
+        factionId,
+        apiKey,
+        {
+          target: CONFIG.calibration.targetWarChains,
+          apiCallCap: CONFIG.calibration.maxReportsPerCalibration,
+        },
+      );
+      source = "war-chains";
     } else {
-      // No prior attacks at all — use Source (b).
       const rawChains = await fetchPastChains(factionId, apiKey);
       const parsedChains = parseChainList(rawChains);
       qualifyingChains = await filterToWarChains(
@@ -880,20 +741,15 @@
       source = "war-chains";
     }
 
-    if (!result && qualifyingChains.length) {
+    if (!result && qualifyingChains.length)
       result = computeStatsFromRates(qualifyingChains);
-    }
 
     const sample = qualifyingChains.slice(0, 3);
-
     const state = Storage.load(factionId) || freshState();
-    // Seed by classifying each qualifying chain into the right population
-    // (baseline / elevated / push), same path as live + background. Dedup means
-    // re-calibrating never double-counts, and existing learned populations are
-    // preserved rather than wiped.
     const overrides = Storage.getOverrides(factionId);
     let added = 0;
     const addedIds = [];
+
     for (const wc of qualifyingChains) {
       if (ingestConcludedChain(state, wc.id, wc.rate, overrides)) {
         added++;
@@ -907,12 +763,10 @@
         `calibrated faction ${factionId}: +${added} war chain(s) ${addedIds.length ? `[IDs: ${addedIds.join(", ")}] ` : ""}via ${source} (baseline now ${existingBaseline})`,
       );
     } else if (qualifyingChains.length === 0) {
-      // Distinguish "no data found" from "data found but none qualified".
       Logger.warn(
         `calibration for faction ${factionId}: no qualifying war chains — ${source} returned ${qualifyingChains.length} candidates; background trickle will keep trying, or set manual thresholds`,
       );
     } else {
-      // qualifyingChains > 0 but all were deduped
       Logger.info(
         `calibration for faction ${factionId}: found ${qualifyingChains.length} war chains but all already seen (dedup) — baseline unchanged at ${existingBaseline}`,
       );
@@ -932,58 +786,35 @@
   }
 
   // =========================================================================
-  // 5. ANALYZER — CUSUM (Cumulative Sum) & Robust Statistics (Median/MAD)
-  //
-  //   Model:
-  //     * BASELINE = Median of COMPLETED qualifying war-chain average
-  //       rates (hits / durationMin). Immune to extreme outliers (pushes).
-  //     * MAD = Median Absolute Deviation, measures normal variance.
-  //     * LIVE SIGNAL = CUSUM Score. Accumulates excess hits per poll
-  //       above the expected baseline rate + slack.
-  //     * THRESHOLDS = Alarm triggers when CUSUM crosses H (control limit).
+  // 5. ANALYZER
   // =========================================================================
   function freshState() {
     return {
-      historyChains: [], // [{rate, chainId}] all verified war chains
+      historyChains: [],
       baselineMedian: null,
       baselineMad: null,
-      calibrationSource: null, // 'attacks', 'war-chains', 'live', or null
-
-      // Live CUSUM state:
+      calibrationSource: null,
       liveChainId: null,
       liveChainStart: null,
       liveCurrent: 0,
       liveRate: null,
       tightRefreshes: 0,
       totalHits: 0,
-
-      // CUSUM trackers
       cusumScore: 0,
       lastTickHits: 0,
       lastTickTs: 0,
-
       lastStatus: "Normal",
       lastPollTs: null,
     };
   }
 
-  // Merge a loaded (possibly older-format) state over fresh defaults so every
-  // expected field exists. Arrays that were saved as the wrong type (or by a
-  // version that didn't have them) are reset to []; scalars keep their loaded
-  // value when present. This is what makes old stored state safe to load after
-  // the two-population rework.
   function migrateState(loaded) {
     const base = freshState();
     if (!loaded || typeof loaded !== "object") return base;
     const merged = { ...base, ...loaded };
-    // Guarantee the array exists. Old populations are ignored.
     if (!Array.isArray(merged.historyChains)) merged.historyChains = [];
-
-    // If migrating from two-population, pool normal chains into history
-    if (loaded.baselineChains && Array.isArray(loaded.baselineChains)) {
+    if (loaded.baselineChains && Array.isArray(loaded.baselineChains))
       merged.historyChains = loaded.baselineChains.slice();
-    }
-
     return merged;
   }
 
@@ -996,26 +827,22 @@
       : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  // --- Shared: turn a list of {rate} into median/mad ---
   function computeStatsFromRates(parsed) {
-    if (parsed.length < CONFIG.calibration.minChainsForCalibration) {
+    if (parsed.length < CONFIG.calibration.minChainsForCalibration)
       return { ok: false, sampleCount: parsed.length };
-    }
     const rates = parsed.map((p) => p.rate);
     const med = median(rates);
     const deviations = rates.map((r) => Math.abs(r - med));
     const mad = median(deviations);
-
     return {
       ok: true,
       sampleCount: parsed.length,
-      meanRate: med, // Keep key name for compat with debug cache, but it's median now
-      variance: mad, // Keep key name for compat, but it's MAD now
+      meanRate: med,
+      variance: mad,
       stdDev: mad,
     };
   }
 
-  // Recompute baseline median/mad from the stored history chains.
   function recomputeBaseline(state) {
     const rates = (state.historyChains || []).map((c) => c.rate);
     if (rates.length === 0) {
@@ -1028,26 +855,18 @@
     state.baselineMad = median(deviations);
   }
 
-  // Route a concluded chain into the history.
   function ingestConcludedChain(state, chainId, rate, overrides) {
     if (!Array.isArray(state.historyChains)) state.historyChains = [];
     if (state.historyChains.some((c) => c.chainId === chainId)) return false;
-
-    // Simply add to history. Median is naturally immune to outliers,
-    // so pushes cannot poison the baseline even if included.
     state.historyChains.push({ chainId, rate });
-    if (state.historyChains.length > CONFIG.cache.maxChainsPerFaction) {
+    if (state.historyChains.length > CONFIG.cache.maxChainsPerFaction)
       state.historyChains.shift();
-    }
-
     recomputeBaseline(state);
     if (!state.calibrationSource) state.calibrationSource = "live";
     return "history";
   }
 
-  // Resolve effective baseline + CUSUM thresholds, honoring user overrides.
   function resolveThresholds(state, overrides) {
-    // How many of the most recent baseline (normal) chains to use.
     const wantN =
       typeof overrides.baselineCount === "number" && overrides.baselineCount > 0
         ? overrides.baselineCount
@@ -1075,14 +894,12 @@
       baselineProv = "inferred";
     }
 
-    // Set a minimum floor of 0.1 for MAD to avoid tiny-variance bugs
     const mad =
       hasInferredBaseline && poolMad !== null ? Math.max(poolMad, 0.1) : null;
 
-    // Thresholds now represent the CUSUM Control Limit (H)
     const resolve = (ov, multi) => {
       if (ov && ov.mode === "abs")
-        return { value: ov.value, prov: "manual-abs" }; // Raw score override
+        return { value: ov.value, prov: "manual-abs" };
       if (ov && ov.mode === "mult" && baseline !== null)
         return { value: baseline * ov.value, prov: "manual-×" };
       if (baseline !== null)
@@ -1115,17 +932,12 @@
     };
   }
 
-  // Process one live /chain reading using CUSUM. Handles chain transitions,
-  // updates the CUSUM score, and sets status by comparing it against limits.
   function updateAnalysis(state, chain, nowMs, overrides) {
     const nowSec = Math.floor(nowMs / 1000);
 
-    // --- Chain transition: the chain we were tracking is no longer current ---
-    if (state.liveChainId !== null && state.liveChainId !== chain.id) {
+    if (state.liveChainId !== null && state.liveChainId !== chain.id)
       finalizePreviousChain(state, overrides);
-    }
 
-    // --- Start tracking a new chain ---
     if (state.liveChainId !== chain.id) {
       state.liveChainId = chain.id;
       state.liveChainStart = chain.start || nowSec;
@@ -1137,7 +949,6 @@
       state.lastTickHits = chain.current;
       state.lastTickTs = nowMs;
     } else {
-      // --- CUSUM Core Logic ---
       const hitDelta = chain.current - state.lastTickHits;
       const timeDeltaMin = (nowMs - state.lastTickTs) / 60000;
 
@@ -1148,7 +959,6 @@
       }
 
       const thresholds = resolveThresholds(state, overrides || {});
-
       if (thresholds && thresholds.baseline !== null && timeDeltaMin > 0) {
         const expectedHits = thresholds.baseline * timeDeltaMin;
         const slack =
@@ -1157,8 +967,6 @@
             : thresholds.baseline * 0.2) *
           CONFIG.cusum.slackMultiplier *
           timeDeltaMin;
-
-        // Only accumulate if hits are > expected + slack
         state.cusumScore = Math.max(
           0,
           state.cusumScore + hitDelta - (expectedHits + slack),
@@ -1176,21 +984,19 @@
       chain.current >= CONFIG.liveModel.warmupMinHits;
     state.liveRate = elapsedMin > 0 ? chain.current / elapsedMin : null;
 
-    // --- Status: compare live CUSUM Score to resolved thresholds ---
     let status = "Normal";
     const thresholds = resolveThresholds(state, overrides || {});
     if (thresholds && warmedUp && state.liveRate !== null) {
       if (
         thresholds.pushingAt !== null &&
         state.cusumScore >= thresholds.pushingAt
-      ) {
+      )
         status = "PUSHING";
-      } else if (
+      else if (
         thresholds.elevatedAt !== null &&
         state.cusumScore >= thresholds.elevatedAt
-      ) {
+      )
         status = "Elevated";
-      }
     } else if (!warmedUp && state.liveRate !== null) {
       status = "Warming";
     }
@@ -1203,17 +1009,12 @@
     return state;
   }
 
-  // Fold the just-concluded live chain into the right population if it looks
-  // like war tempo. Classification (baseline vs. elevated vs. push) happens
-  // inside ingestConcludedChain against the pre-existing thresholds, so a push
-  // chain won't pollute the baseline. Heuristic length gate mirrors the
-  // report-based war-chain gate (we don't have the report here).
   function finalizePreviousChain(state, overrides) {
     if (state.liveChainStart === null || state.liveCurrent <= 0) return;
     const durMin = Math.max((Date.now() / 1000 - state.liveChainStart) / 60, 0);
     if (durMin <= 0) return;
-    if (state.liveCurrent < CONFIG.calibration.minWarChainLength) return; // too short to trust
-    if (state.liveCurrent > CONFIG.calibration.maxBaselineChainLength) return; // exclude massive chaining events
+    if (state.liveCurrent < CONFIG.calibration.minWarChainLength) return;
+    if (state.liveCurrent > CONFIG.calibration.maxBaselineChainLength) return;
     const rate = state.liveCurrent / durMin;
     const bucket = ingestConcludedChain(
       state,
@@ -1221,15 +1022,14 @@
       rate,
       overrides,
     );
-    if (bucket) {
+    if (bucket)
       Logger.info(
         `concluded chain ${state.liveChainId} (${rate.toFixed(1)} hits/min avg) recorded as ${bucket}`,
       );
-    }
   }
 
   // =========================================================================
-  // 6. CORE LOOP — ties collection + analysis together per watched faction
+  // 6. CORE LOOP — Promise.all for concurrent processing
   // =========================================================================
   async function pollAll() {
     const apiKey = Storage.getApiKey();
@@ -1237,47 +1037,45 @@
     if (!apiKey || watchlist.length === 0) return;
 
     let didUpdate = false;
-    for (const factionId of watchlist) {
-      await ensureFactionName(factionId, apiKey); // cheap, cached, cosmetic
-      const result = await fetchFactionChain(factionId, apiKey);
-      const cache = RawCache.get(factionId);
-      cache.lastPollTime = Date.now();
 
-      let state = Storage.load(factionId) || freshState();
-      const overrides = Storage.getOverrides(factionId);
+    // Execute multiple fetching promises concurrently without I/O blocking
+    await Promise.all(
+      watchlist.map(async (factionId) => {
+        await ensureFactionName(factionId, apiKey);
+        const result = await fetchFactionChain(factionId, apiKey);
+        const cache = RawCache.get(factionId);
+        cache.lastPollTime = Date.now();
 
-      // CRITICAL: on an error/rate-limit/network failure, skip this faction
-      // entirely. Do NOT treat it as "no chain" — that would falsely conclude
-      // an ongoing chain and corrupt the baseline with a truncated average.
-      // Record the error time in SHARED state so any tab can show a stale hint.
-      if (!result.ok) {
-        cache.lastError = Date.now();
-        state.lastErrorTs = Date.now();
+        let state = Storage.load(factionId) || freshState();
+        const overrides = Storage.getOverrides(factionId);
+
+        if (!result.ok) {
+          cache.lastError = Date.now();
+          state.lastErrorTs = Date.now();
+          Storage.save(factionId, state);
+          return;
+        }
+
+        const chain = result.chain;
+        cache.lastChain = chain;
+
+        if (chain && chain.current > 0) {
+          state = updateAnalysis(state, chain, Date.now(), overrides);
+        } else if (state.liveChainId !== null) {
+          finalizePreviousChain(state, overrides);
+          state.liveChainId = null;
+          state.liveRate = null;
+          state.lastStatus = "Idle";
+          state.resolved = resolveThresholds(state, overrides);
+        }
+        state.lastSuccessTs = Date.now();
         Storage.save(factionId, state);
-        continue;
-      }
+        didUpdate = true;
+      }),
+    );
 
-      const chain = result.chain; // may be null: API confirms no active chain
-      cache.lastChain = chain;
-
-      if (chain && chain.current > 0) {
-        // Active chain — update the live signal + status.
-        state = updateAnalysis(state, chain, Date.now(), overrides);
-      } else if (state.liveChainId !== null) {
-        // API explicitly confirmed no active chain, and we were tracking one —
-        // it has genuinely concluded. Classify it, then go idle.
-        finalizePreviousChain(state, overrides);
-        state.liveChainId = null;
-        state.liveRate = null;
-        state.lastStatus = "Idle";
-        state.resolved = resolveThresholds(state, overrides);
-      }
-      state.lastSuccessTs = Date.now(); // a good fetch clears the "stale" condition
-      Storage.save(factionId, state);
-      didUpdate = true;
-    }
     if (didUpdate) {
-      Storage.markDataUpdated(); // broadcast: followers re-render on this change
+      Storage.markDataUpdated();
       Logger.info(
         `poll cycle complete (${watchlist.length} faction(s) watched)`,
       );
@@ -1288,21 +1086,13 @@
       );
     }
 
-    // Background calibration trickle: spend a tiny budget each cycle verifying
-    // unchecked historical chains, so baselines fill toward the target over
-    // time without a rate spike. Runs after live updates so live polling always
-    // has priority on the rate budget.
     await backgroundCalibrateTick(apiKey, watchlist);
   }
 
-  // One low-budget calibration step per poll cycle. Picks the watched faction
-  // furthest from its baseline target and verifies up to backgroundReportsPerCycle
-  // of its still-unchecked chains, folding any war chains into its baseline.
   async function backgroundCalibrateTick(apiKey, watchlist) {
     const budget = CONFIG.calibration.backgroundReportsPerCycle;
     if (budget <= 0 || !limiter.canCall()) return;
 
-    // Find the faction that most needs more baseline data.
     let pick = null,
       fewest = Infinity;
     for (const factionId of watchlist) {
@@ -1313,28 +1103,22 @@
         pick = factionId;
       }
     }
-    if (!pick) return; // everyone's baseline is full enough
+    if (!pick) return;
 
-    // Load the state for progress tracking.
     const pickState = Storage.load(pick);
     const pickCount = pickState ? (pickState.historyChains || []).length : 0;
 
-    // Show progress toward the target war-chain count.
     UI.showTask(
       `Background: ${factionLabel(pick)} — ${pickCount}/${CONFIG.calibration.targetWarChains} war chains`,
     );
     UI.refresh();
 
-    // Pull the chain list (cheap; one call) and find chains we haven't cached
-    // a verdict for yet.
     const rawChains = await fetchPastChains(pick, apiKey);
     if (!rawChains.length) return;
     const parsed = parseChainList(rawChains);
     const unchecked = parsed.filter((c) => !ChainCache.getChain(pick, c.id));
     if (!unchecked.length) return;
 
-    // Verify a few, capped by the per-cycle budget. filterToWarChains handles
-    // caching + folding via the same path as an explicit calibrate.
     const slice = unchecked.slice(0, budget);
     const warChains = await filterToWarChains(slice, pick, apiKey, {
       target: Infinity,
@@ -1362,37 +1146,28 @@
         UI.refresh();
       }
     } else {
-      // No new war chains this tick — clear the task so the bar disappears.
       UI.clearTask();
       UI.refresh();
     }
   }
 
   // =========================================================================
-  // 7. UI — minimal floating panel, no dependencies
+  // 7. UI — Virtual-DOM pattern via Targeted ID updates
   // =========================================================================
   const UI = {
     panel: null,
-
-    // -----------------------------------------------------------------------
-    // 7a. TASK INDICATOR — shows what the script is currently doing so the
-    //     user never has to wonder "why is nothing updating?"
-    // -----------------------------------------------------------------------
     _task: { msg: "", progress: null, total: null },
 
     showTask(msg, progress = null, total = null) {
       this._task = { msg, progress, total };
     },
-
     clearTask() {
       this._task = { msg: "", progress: null, total: null };
     },
-
     _renderTaskBar() {
       const el = document.getElementById("pd-task");
       if (!el) return;
       if (!this._task.msg) {
-        // No active task — hide the bar cleanly
         el.style.display = "none";
         return;
       }
@@ -1402,11 +1177,8 @@
     },
     init() {
       const saved = Storage.getUiState();
-
       const panel = document.createElement("div");
       panel.id = "push-detector-panel";
-      // Positioned via left/top so drag math is straightforward. Restore the
-      // saved spot if present, else default to the top-right area.
       const pos = UI.clampToViewport(
         saved.left ?? window.innerWidth - 360,
         saved.top ?? 60,
@@ -1440,7 +1212,6 @@
             <button id="pd-setup-save" style="${UI.btnStyle} background:#2f5130; border-color:#3f7040;">save changes</button>
           </div>
         </div>
-        <!-- Current task indicator — shown during calibration, polling, etc. -->
         <div id="pd-task" style="display:none; margin-bottom:6px; padding:4px 8px; background:#1a2030; border:1px solid #254060; border-radius:4px; font-size:10px; color:#7ab8ff; display:flex; align-items:center; gap:6px;">
           <span id="pd-task-spinner" style="display:inline-block; width:8px; height:8px; border:1.5px solid #7ab8ff; border-top-color:transparent; border-radius:50%; animation: pd-spin 0.7s linear infinite; flex:none;"></span>
           <span id="pd-task-msg" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
@@ -1472,7 +1243,6 @@
         UI.toggleSetup(false);
       this.panel = panel;
 
-      // Restore debug-open state
       this.debugOpen = !!saved.debugOpen;
       panel.querySelector("#pd-debug").style.display = this.debugOpen
         ? "block"
@@ -1482,8 +1252,6 @@
       this.watchViewportResize(panel);
       this.syncAcrossTabs(panel);
 
-      // Footer rate indicator ticks independently of polls so it stays live
-      // even between 30s cycles.
       this.refreshFooter();
       setInterval(() => this.refreshFooter(), 2000);
     },
@@ -1493,12 +1261,10 @@
       "width:100%; box-sizing:border-box; font:11px monospace; background:#0e0e0e; color:#eee; border:1px solid #444; border-radius:3px; padding:3px 5px;",
     debugOpen: false,
 
-    // Keep a proposed left/top within the visible viewport, leaving a small
-    // margin so the panel can't be dragged fully off-screen and lost.
     clampToViewport(left, top, el) {
       const margin = 8;
       const w = el ? el.offsetWidth : 300;
-      const h = el ? el.offsetHeight : 40; // header height is enough to grab
+      const h = el ? el.offsetHeight : 40;
       const maxLeft =
         window.innerWidth - Math.min(w, window.innerWidth) - margin;
       const maxTop =
@@ -1508,26 +1274,25 @@
         top: Math.max(margin, Math.min(top, Math.max(margin, maxTop))),
       };
     },
-
     persistPosition(panel) {
       const state = Storage.getUiState();
       state.left = parseInt(panel.style.left, 10);
       state.top = parseInt(panel.style.top, 10);
       Storage.setUiState(state);
     },
-
     enableDrag(handle, panel) {
       let startX,
         startY,
         startLeft,
         startTop,
         dragging = false;
-
       const onMove = (e) => {
         if (!dragging) return;
-        const dx = e.clientX - startX;
-        const dy = e.clientY - startY;
-        const pos = UI.clampToViewport(startLeft + dx, startTop + dy, panel);
+        const pos = UI.clampToViewport(
+          startLeft + (e.clientX - startX),
+          startTop + (e.clientY - startY),
+          panel,
+        );
         panel.style.left = pos.left + "px";
         panel.style.top = pos.top + "px";
       };
@@ -1536,10 +1301,9 @@
         dragging = false;
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
-        UI.persistPosition(panel); // save only once, on release
+        UI.persistPosition(panel);
       };
       handle.addEventListener("mousedown", (e) => {
-        // Ignore drags that start on the buttons in the header
         if (e.target.closest("button")) return;
         dragging = true;
         startX = e.clientX;
@@ -1551,8 +1315,6 @@
         e.preventDefault();
       });
     },
-
-    // If the window shrinks below the panel's saved spot, pull it back in.
     watchViewportResize(panel) {
       window.addEventListener("resize", () => {
         const pos = UI.clampToViewport(
@@ -1565,16 +1327,12 @@
         UI.persistPosition(panel);
       });
     },
-
-    // Mirror position/debug-state changes made in OTHER tabs. GM storage is
-    // shared, and GM_addValueChangeListener fires with remote=true when a
-    // different tab writes — so dragging the panel in one tab moves it in all.
     syncAcrossTabs(panel) {
-      if (typeof GM_addValueChangeListener !== "function") return; // not available in all managers
+      if (typeof GM_addValueChangeListener !== "function") return;
       GM_addValueChangeListener(
         "wpd_uistate",
         (_name, _old, newVal, remote) => {
-          if (!remote || !newVal) return; // ignore our own writes
+          if (!remote || !newVal) return;
           let state;
           try {
             state = JSON.parse(newVal);
@@ -1599,7 +1357,6 @@
         },
       );
     },
-
     toggleDebug() {
       this.debugOpen = !this.debugOpen;
       this.panel.querySelector("#pd-debug").style.display = this.debugOpen
@@ -1610,7 +1367,6 @@
       Storage.setUiState(state);
       if (this.debugOpen) this.refreshDebug();
     },
-
     statusColor(status) {
       return status === "PUSHING"
         ? "#ff5555"
@@ -1620,10 +1376,8 @@
             ? "#7ab8ff"
             : status === "Idle"
               ? "#888"
-              : "#5fc46a"; // Normal
+              : "#5fc46a";
     },
-
-    // Short human tag for a threshold's provenance.
     provTag(prov) {
       return prov === "manual" || prov === "manual-abs"
         ? '<span style="color:#c090ff;">manual</span>'
@@ -1634,16 +1388,35 @@
             : "";
     },
 
-    // Build one collapsible faction card. Open/closed state is restored by the
-    // caller via the data-faction/open attributes (survives poll refreshes).
-    factionCard(id, openSet) {
+    // Generates the immutable skeleton wrapper
+    factionCardOuter(id) {
+      const label = escapeHtml(factionLabel(id));
+      return `
+        <details data-faction="${id}" style="margin-bottom:6px; background:#1e1e1e; border:1px solid #333; border-radius:5px;">
+          <summary style="cursor:pointer; list-style:none; padding:6px 8px; display:flex; align-items:center; gap:8px;">
+            <span id="pd-fac-${id}-label" style="flex:1; font-weight:bold; color:#eee;">${label}</span>
+            <span id="pd-fac-${id}-pill" style="font-size:9px; letter-spacing:.5px; color:#111; padding:1px 6px; border-radius:8px; font-weight:bold;"></span>
+          </summary>
+          <div style="padding:0 8px 8px;">
+            <div id="pd-fac-${id}-summary" style="font-size:11px; color:#bbb; margin-bottom:2px;"></div>
+            <div id="pd-fac-${id}-basis" style="font-size:10px; color:#777;"></div>
+            <div id="pd-fac-${id}-stale"></div>
+            <div id="pd-fac-${id}-insight"></div>
+            <div id="pd-fac-${id}-tight"></div>
+            ${this.overrideEditorHtml(id, Storage.getOverrides(id))}
+          </div>
+        </details>`;
+    },
+
+    // Updates text content of specific elements without triggering DOM redraws on <input>s
+    updateFactionCard(id) {
       const s = Storage.load(id);
       const ov = Storage.getOverrides(id);
-      const label = escapeHtml(factionLabel(id));
-      const open = openSet.has(String(id)) ? " open" : "";
       const r = s?.resolved || (s ? resolveThresholds(s, ov) : null);
 
-      // Header pill + one-line summary reflect current state.
+      const lblEl = document.getElementById(`pd-fac-${id}-label`);
+      if (lblEl) lblEl.textContent = factionLabel(id);
+
       let pill, pillColor, summary;
       if (!s) {
         pill = "NO DATA";
@@ -1667,8 +1440,16 @@
             : "Chain starting…";
       }
 
-      // Basis line: where the baseline comes from.
-      const chainCount = s?.baselineChains?.length || 0;
+      const pillEl = document.getElementById(`pd-fac-${id}-pill`);
+      if (pillEl) {
+        pillEl.textContent = pill;
+        pillEl.style.background = pillColor;
+      }
+
+      const sumEl = document.getElementById(`pd-fac-${id}-summary`);
+      if (sumEl) sumEl.textContent = summary;
+
+      const chainCount = s?.historyChains?.length || 0;
       let basis;
       if (!s || chainCount === 0) {
         basis =
@@ -1684,15 +1465,13 @@
               : "past war chains";
         basis = `Baseline from ${chainCount} ${srcTxt}`;
       }
+      const basisEl = document.getElementById(`pd-fac-${id}-basis`);
+      if (basisEl) basisEl.textContent = basis;
 
-      // Insight table — only when we have something to compare against.
       let insightHtml = "";
       if (r) {
         const row = (lbl, val, color, tag) =>
-          `<div style="display:flex; justify-content:space-between; padding:1px 0; gap:8px;">
-             <span style="color:#999;">${lbl}${tag ? ` ${tag}` : ""}</span>
-             <span style="color:${color || "#ddd"}; font-variant-numeric:tabular-nums; white-space:nowrap;">${val}</span>
-           </div>`;
+          `<div style="display:flex; justify-content:space-between; padding:1px 0; gap:8px;"><span style="color:#999;">${lbl}${tag ? ` ${tag}` : ""}</span><span style="color:${color || "#ddd"}; font-variant-numeric:tabular-nums; white-space:nowrap;">${val}</span></div>`;
         const curColor =
           s.lastStatus === "Normal" ||
           s.lastStatus === "Idle" ||
@@ -1705,7 +1484,6 @@
             : "—";
         const fmt = (v) =>
           v !== null && v !== undefined ? `${v.toFixed(1)} hits/min` : "—";
-
         const cusumColor =
           s.cusumScore > 0
             ? s.cusumScore >= r.pushingAt
@@ -1716,7 +1494,6 @@
             : "#ddd";
         const cusumScoreText =
           typeof s.cusumScore === "number" ? s.cusumScore.toFixed(1) : "0.0";
-
         insightHtml = `<div style="margin-top:5px; padding:5px 6px; background:#141414; border-radius:4px; font-size:11px;">
              ${row("Current (this chain)", curVal, curColor)}
              ${row("Baseline Median", fmt(r.baseline), "#ddd", this.provTag(r.provenance.baseline))}
@@ -1727,55 +1504,29 @@
              ${r.provenance.baseline === "inferred" ? `<div style="margin-top:2px; font-size:9px; color:${r.lowConfidence ? "#ffb040" : "#666"};">${r.lowConfidence ? "⚠ low confidence — " : ""}baseline from ${r.baselineN} war chain${r.baselineN === 1 ? "" : "s"}${r.baselineN < r.baselineWantN ? ` (building toward ${r.baselineWantN})` : ""}</div>` : ""}
            </div>`;
       }
+      const insEl = document.getElementById(`pd-fac-${id}-insight`);
+      if (insEl) insEl.innerHTML = insightHtml;
 
-      // Chain-management signal (tight refreshes) — only meaningful with hits.
       let tightHtml = "";
       if (s && s.totalHits > 0) {
         const tightPct = Math.round((100 * s.tightRefreshes) / s.totalHits);
-        tightHtml = `<div style="margin-top:4px; font-size:10px; color:#888;">
-             ${tightPct}% of hits landed with &lt;${CONFIG.tightTimeoutThreshold}s left
-             ${tightPct >= 50 ? '<span style="color:#ffb040;">— actively managed</span>' : ""}
-           </div>`;
+        tightHtml = `<div style="margin-top:4px; font-size:10px; color:#888;">${tightPct}% of hits landed with &lt;${CONFIG.tightTimeoutThreshold}s left ${tightPct >= 50 ? '<span style="color:#ffb040;">— actively managed</span>' : ""}</div>`;
       }
+      const tightEl = document.getElementById(`pd-fac-${id}-tight`);
+      if (tightEl) tightEl.innerHTML = tightHtml;
 
-      // Per-faction override editor (collapsed within the card).
-      const ovEl = this.overrideEditorHtml(id, ov);
-
-      // Stale-data banner: the most recent fetch for this faction errored (and
-      // hasn't since succeeded). During an API/network outage mid-war, the
-      // numbers above may be behind — a concluded chain might still show as
-      // active, or a live rate may be frozen. Warn rather than mislead.
       let staleHtml = "";
       if (
         s &&
         s.lastErrorTs &&
         (!s.lastSuccessTs || s.lastErrorTs > s.lastSuccessTs)
       ) {
-        const ago = this.agoStr(s.lastErrorTs);
-        staleHtml = `<div style="margin-top:4px; font-size:10px; color:#ffb040; background:#2a1e0e; border:1px solid #5a3d1a; border-radius:4px; padding:3px 6px;">
-             ⚠ data may be stale — last fetch failed (${ago}); showing last known values
-           </div>`;
+        staleHtml = `<div style="margin-top:4px; font-size:10px; color:#ffb040; background:#2a1e0e; border:1px solid #5a3d1a; border-radius:4px; padding:3px 6px;">⚠ data may be stale — last fetch failed (${this.agoStr(s.lastErrorTs)}); showing last known values</div>`;
       }
-
-      return `
-        <details data-faction="${id}"${open} style="margin-bottom:6px; background:#1e1e1e; border:1px solid #333; border-radius:5px;">
-          <summary style="cursor:pointer; list-style:none; padding:6px 8px; display:flex; align-items:center; gap:8px;">
-            <span style="flex:1; font-weight:bold; color:#eee;">${label}</span>
-            <span style="font-size:9px; letter-spacing:.5px; color:#111; background:${pillColor}; padding:1px 6px; border-radius:8px; font-weight:bold;">${pill}</span>
-          </summary>
-          <div style="padding:0 8px 8px;">
-            <div style="font-size:11px; color:#bbb; margin-bottom:2px;">${summary}</div>
-            <div style="font-size:10px; color:#777;">${basis}</div>
-            ${staleHtml}
-            ${insightHtml}
-            ${tightHtml}
-            ${ovEl}
-          </div>
-        </details>`;
+      const staleEl = document.getElementById(`pd-fac-${id}-stale`);
+      if (staleEl) staleEl.innerHTML = staleHtml;
     },
 
-    // Collapsible manual-override editor inside a faction card. Values persist
-    // per faction; blank fields fall back to inference.
     overrideEditorHtml(id, ov) {
       const inS =
         "width:64px; box-sizing:border-box; font:11px monospace; background:#0e0e0e; color:#eee; border:1px solid #444; border-radius:3px; padding:2px 4px;";
@@ -1789,10 +1540,8 @@
           <div style="margin-top:5px; font-size:10px; display:grid; grid-template-columns:auto 1fr; gap:4px 6px; align-items:center;">
             <label style="color:#999;"># chains for baseline</label>
             <input class="pd-ov-count" data-fid="${id}" type="number" step="1" min="1" placeholder="${CONFIG.calibration.defaultBaselineChains}" value="${ov.baselineCount ?? ""}" style="${inS}" />
-
             <label style="color:#999;">Baseline</label>
             <input class="pd-ov-base" data-fid="${id}" type="number" step="0.1" placeholder="inferred" value="${ov.baseline ?? ""}" style="${inS}" />
-
             <label style="color:#999;">Elevated</label>
             <span>
               <input class="pd-ov-el-val" data-fid="${id}" type="number" step="0.1" placeholder="auto" value="${ov.elevated?.value ?? ""}" style="${inS}" />
@@ -1801,7 +1550,6 @@
                 <option value="mult"${elMode === "mult" ? " selected" : ""}>× base</option>
               </select>
             </span>
-
             <label style="color:#999;">Push</label>
             <span>
               <input class="pd-ov-pu-val" data-fid="${id}" type="number" step="0.1" placeholder="auto" value="${ov.pushing?.value ?? ""}" style="${inS}" />
@@ -1818,129 +1566,85 @@
         </details>`;
     },
 
-    // Wire override editor buttons after each render (delegated by data-fid).
-    bindOverrideEditors() {
+    bindOverrideEditors(id) {
       const body = this.panel.querySelector("#pd-body");
-      body.querySelectorAll(".pd-ov-save").forEach((btn) => {
-        btn.onclick = () => {
-          const fid = btn.getAttribute("data-fid");
+      const saveBtn = body.querySelector(`.pd-ov-save[data-fid="${id}"]`);
+      const clearBtn = body.querySelector(`.pd-ov-clear[data-fid="${id}"]`);
+
+      if (saveBtn)
+        saveBtn.onclick = () => {
           const num = (sel) => {
-            const raw = body.querySelector(`.${sel}[data-fid="${fid}"]`).value;
-            if (raw.trim() === "") return null; // explicit: empty field -> no override
+            const raw = body.querySelector(`.${sel}[data-fid="${id}"]`).value;
+            if (raw.trim() === "") return null;
             const v = parseFloat(raw);
             return Number.isFinite(v) ? v : null;
           };
           const mode = (sel) =>
-            body.querySelector(`.${sel}[data-fid="${fid}"]`).value;
-          const baseline = num("pd-ov-base");
+            body.querySelector(`.${sel}[data-fid="${id}"]`).value;
           const baselineCount = num("pd-ov-count");
-          const elVal = num("pd-ov-el-val");
-          const puVal = num("pd-ov-pu-val");
-          Storage.setOverrides(fid, {
-            baseline,
+          Storage.setOverrides(id, {
+            baseline: num("pd-ov-base"),
             baselineCount:
               baselineCount !== null && baselineCount >= 1
                 ? Math.round(baselineCount)
                 : null,
             elevated:
-              elVal !== null
-                ? { mode: mode("pd-ov-el-mode"), value: elVal }
+              num("pd-ov-el-val") !== null
+                ? { mode: mode("pd-ov-el-mode"), value: num("pd-ov-el-val") }
                 : null,
             pushing:
-              puVal !== null
-                ? { mode: mode("pd-ov-pu-mode"), value: puVal }
+              num("pd-ov-pu-val") !== null
+                ? { mode: mode("pd-ov-pu-mode"), value: num("pd-ov-pu-val") }
                 : null,
           });
-          Logger.info(`overrides saved for faction ${fid}`);
-          if (document.activeElement && document.activeElement.blur)
-            document.activeElement.blur();
+          Logger.info(`overrides saved for faction ${id}`);
           this.refresh(true);
         };
-      });
-      body.querySelectorAll(".pd-ov-clear").forEach((btn) => {
-        btn.onclick = () => {
-          const fid = btn.getAttribute("data-fid");
-          Storage.setOverrides(fid, {});
-          Logger.info(`overrides cleared for faction ${fid}`);
-          if (document.activeElement && document.activeElement.blur)
-            document.activeElement.blur();
+
+      if (clearBtn)
+        clearBtn.onclick = () => {
+          Storage.setOverrides(id, {});
+          Logger.info(`overrides cleared for faction ${id}`);
+          const inputs = body.querySelectorAll(`input[data-fid="${id}"]`);
+          inputs.forEach((el) => (el.value = "")); // Reset visuals
           this.refresh(true);
         };
-      });
-      // When the user finishes editing (blur), flush any refresh we deferred
-      // while they were typing, so the card catches up to the latest data.
-      body.querySelectorAll("input, select").forEach((el) => {
-        el.addEventListener("blur", () => {
-          if (this._deferredRefresh) {
-            // Defer to the next frame so a click on save/clear runs first.
-            setTimeout(() => {
-              if (this._deferredRefresh) this.refresh();
-            }, 150);
-          }
-        });
-      });
     },
 
     refresh(force) {
       if (!this.panel) return;
-
-      // Render the task indicator first so it's always up to date.
       this._renderTaskBar();
-
       const body = this.panel.querySelector("#pd-body");
-
-      // Don't rewrite the DOM out from under a user actively typing an override
-      // (on ANY tab, including the leader whose 30s poll would otherwise wipe
-      // the field). Defer this render; the next tick or the input's blur will
-      // pick it up. `force` bypasses this for deliberate user actions (save,
-      // clear, calibrate) that SHOULD update the view immediately.
-      if (!force) {
-        const active = document.activeElement;
-        if (
-          active &&
-          this.panel.contains(active) &&
-          (active.tagName === "INPUT" || active.tagName === "SELECT")
-        ) {
-          this._deferredRefresh = true;
-          return;
-        }
-      }
-      this._deferredRefresh = false;
-
       const watchlist = Storage.getWatchedFactions();
+
       if (watchlist.length === 0) {
         body.innerHTML =
           '<div style="color:#999; font-size:11px;">No factions watched. Click <b>⚙ setup</b> to add your API key and faction IDs.</div>';
         return;
       }
-      // Preserve which cards are open across the refresh (poll-driven re-render
-      // must not collapse a card the user opened). Track both faction cards and
-      // their nested override editors.
-      const openSet = new Set(
-        Array.from(body.querySelectorAll("details[data-faction][open]")).map(
-          (d) => d.getAttribute("data-faction"),
-        ),
-      );
-      const openOv = new Set(
-        Array.from(body.querySelectorAll("details[data-ovfor][open]")).map(
-          (d) => d.getAttribute("data-ovfor"),
-        ),
-      );
-      body.innerHTML = watchlist
-        .map((id) => this.factionCard(id, openSet))
-        .join("");
-      // Restore nested override-editor open state.
-      openOv.forEach((fid) => {
-        const el = body.querySelector(`details[data-ovfor="${fid}"]`);
-        if (el) el.open = true;
+
+      const existingIds = new Set();
+      body.querySelectorAll("details[data-faction]").forEach((el) => {
+        const id = el.getAttribute("data-faction");
+        if (!watchlist.includes(id)) el.remove();
+        else existingIds.add(id);
       });
-      this.bindOverrideEditors();
+
+      if (!body.querySelector("details[data-faction]")) body.innerHTML = "";
+
+      watchlist.forEach((id) => {
+        if (!existingIds.has(id)) {
+          body.insertAdjacentHTML("beforeend", this.factionCardOuter(id));
+          this.bindOverrideEditors(id);
+        }
+        this.updateFactionCard(id);
+      });
+
       if (this.debugOpen) this.refreshDebug();
     },
+
     refreshDebug() {
       if (!this.panel || !this.debugOpen) return;
-
-      // Status line
       const watchlist = Storage.getWatchedFactions();
       const lastPolls = watchlist
         .map((id) => RawCache.get(id).lastPollTime)
@@ -1951,34 +1655,28 @@
       this.panel.querySelector("#pd-debug-status").textContent =
         `last poll: ${lastPollStr} · watching ${watchlist.length} faction(s)`;
 
-      // Log feed — newest first, color-coded. Preserve scroll position so a
-      // poll-driven refresh doesn't yank the user back to the top mid-read.
       const logEl = this.panel.querySelector("#pd-log");
       const logPrevScroll = logEl.scrollTop;
       const logColor = { error: "#ff6666", warn: "#ffaa33", info: "#7ab8ff" };
-      const logHtml =
+      logEl.innerHTML =
         Logger.entries
           .slice()
           .reverse()
           .slice(0, 25)
-          .map((e) => {
-            const time = new Date(e.t).toLocaleTimeString();
-            return `<div style="color:${logColor[e.level]}">${time} · ${escapeHtml(e.msg)}</div>`;
-          })
+          .map(
+            (e) =>
+              `<div style="color:${logColor[e.level]}">${new Date(e.t).toLocaleTimeString()} · ${escapeHtml(e.msg)}</div>`,
+          )
           .join("") || '<div style="color:#666;">no log entries yet</div>';
-      logEl.innerHTML = logHtml;
-      logEl.scrollTop = logPrevScroll; // hold the reader's place across refresh
+      logEl.scrollTop = logPrevScroll;
 
-      // Raw per-faction data — native <details> keeps this simple and accessible.
-      // Capture which sections are open (keyed by faction id, stable across
-      // renders) so a refresh from new poll data doesn't collapse them.
       const rawEl = this.panel.querySelector("#pd-raw");
       const openFactions = new Set(
         Array.from(rawEl.querySelectorAll("details[open][data-faction]")).map(
           (d) => d.getAttribute("data-faction"),
         ),
       );
-      const rawHtml =
+      rawEl.innerHTML =
         watchlist
           .map((id) => {
             const cache = RawCache.get(id);
@@ -1988,22 +1686,11 @@
             const calibJson = cache.lastCalibration
               ? JSON.stringify(cache.lastCalibration, null, 2)
               : "not calibrated yet";
-            const openAttr = openFactions.has(String(id)) ? " open" : "";
-            return `
-          <details data-faction="${id}"${openAttr} style="margin-bottom:4px;">
-            <summary style="cursor:pointer; color:#aaa; font-size:10px;">faction ${id} — raw data</summary>
-            <div style="font-size:10px; color:#888; margin:3px 0 1px;">last /chain response</div>
-            <pre style="background:#111; border-radius:4px; padding:4px 6px; margin:0 0 4px; max-height:140px; overflow:auto; font-size:10px;">${escapeHtml(chainJson)}</pre>
-            <div style="font-size:10px; color:#888; margin:3px 0 1px;">last calibration result</div>
-            <pre style="background:#111; border-radius:4px; padding:4px 6px; margin:0; max-height:140px; overflow:auto; font-size:10px;">${escapeHtml(calibJson)}</pre>
-          </details>
-        `;
+            return `<details data-faction="${id}"${openFactions.has(String(id)) ? " open" : ""} style="margin-bottom:4px;"><summary style="cursor:pointer; color:#aaa; font-size:10px;">faction ${id} — raw data</summary><div style="font-size:10px; color:#888; margin:3px 0 1px;">last /chain response</div><pre style="background:#111; border-radius:4px; padding:4px 6px; margin:0 0 4px; max-height:140px; overflow:auto; font-size:10px;">${escapeHtml(chainJson)}</pre><div style="font-size:10px; color:#888; margin:3px 0 1px;">last calibration result</div><pre style="background:#111; border-radius:4px; padding:4px 6px; margin:0; max-height:140px; overflow:auto; font-size:10px;">${escapeHtml(calibJson)}</pre></details>`;
           })
           .join("") ||
         '<div style="color:#666; font-size:10px;">no factions watched yet</div>';
-      rawEl.innerHTML = rawHtml;
 
-      // Cache summary — one line per cached faction, pinned marker for own
       const cacheRows =
         ChainCache.summary()
           .map(
@@ -2014,6 +1701,7 @@
       this.panel.querySelector("#pd-cache").innerHTML =
         `<div style="color:#888; font-size:10px; margin:6px 0 2px;">chain cache (${ChainCache.summary().length}/${CONFIG.cache.maxFactions} factions)</div>${cacheRows}`;
     },
+
     async calibrateAll() {
       const apiKey = Storage.getApiKey();
       const watchlist = Storage.getWatchedFactions();
@@ -2025,18 +1713,18 @@
       const total = watchlist.length;
       this.showTask("Calibrating", 0, total);
       for (const factionId of watchlist) {
-        await calibrateFaction(factionId, apiKey); // logs its own result via Logger
+        await calibrateFaction(factionId, apiKey);
         progress++;
         this.showTask(
           `Calibrating ${factionLabel(factionId)}…`,
           Math.round((progress / total) * 100),
         );
-        // Yield to the event loop so the task bar can visibly update between factions.
         await new Promise((r) => setTimeout(r, 50));
       }
       this.clearTask();
       this.refresh(true);
     },
+
     async clearCacheAndRecalculate() {
       if (
         !confirm(
@@ -2044,7 +1732,6 @@
         )
       )
         return;
-
       const apiKey = Storage.getApiKey();
       const watchlist = Storage.getWatchedFactions();
       if (!apiKey || watchlist.length === 0) {
@@ -2052,13 +1739,10 @@
         return;
       }
 
-      // 1. Wipe the Chain Cache completely
       const cacheIndex = ChainCache.loadIndex();
-      for (const id of Object.keys(cacheIndex)) {
-        ChainCache.dropFaction(id);
-      }
+      for (const id of Object.keys(cacheIndex)) ChainCache.dropFaction(id);
+      Storage.clearCache();
 
-      // 2. Wipe existing history and baselines for watched factions
       for (const id of watchlist) {
         const state = Storage.load(id);
         if (state) {
@@ -2069,15 +1753,11 @@
           Storage.save(id, state);
         }
       }
-
       Logger.info("Cache and history wiped. Beginning fresh recalculation...");
       this.refresh(true);
-
-      // 3. Rerun calibration
       await this.calibrateAll();
     },
-    // Toggle the inline setup form. When opening, populate inputs from stored
-    // values; `force` can explicitly open (true) or close (false).
+
     toggleSetup(force) {
       const form = this.panel.querySelector("#pd-setup");
       const willOpen =
@@ -2104,21 +1784,15 @@
         .filter(Boolean);
       const msg = this.panel.querySelector("#pd-setup-msg");
 
-      // Validate before saving. A Torn API key is exactly 16 alphanumeric
-      // characters — catch the common mistake of pasting the wrong thing
-      // (e.g. the whole userscript) into the key field, which would otherwise
-      // fire malformed requests and cascade into CORS/network errors.
       if (key && !/^[A-Za-z0-9]{16}$/.test(key)) {
         msg.style.color = "#ff6666";
-        msg.textContent =
-          "Key must be 16 letters/numbers — check you pasted the API key, not something else.";
+        msg.textContent = "Key must be 16 letters/numbers.";
         return;
       }
-      // Faction IDs should be numeric.
       const badId = [own, ...watch].find((id) => id && !/^\d+$/.test(id));
       if (badId) {
         msg.style.color = "#ff6666";
-        msg.textContent = `"${badId}" isn't a valid faction ID (numbers only).`;
+        msg.textContent = `"${badId}" isn't a valid faction ID.`;
         return;
       }
 
@@ -2126,28 +1800,17 @@
       Storage.setOwnFactionId(own || null);
       Storage.setWatchedFactions(watch);
       CONFIG.cache.ownFactionId = own || null;
-
       msg.style.color = "#5fc46a";
       msg.textContent = "Saved ✓";
-      // Auto-close the setup form shortly after a successful save.
       setTimeout(() => {
         if (msg) msg.textContent = "";
         this.toggleSetup(false);
       }, 1200);
 
-      // Blur any focused field, then force the render past the typing-guard —
-      // this is a deliberate save, so the view must update now.
-      if (document.activeElement && document.activeElement.blur)
-        document.activeElement.blur();
       this.refresh(true);
-      // Apply immediately only if this tab is the poller; otherwise the leader
-      // will pick up the new settings from shared storage on its next tick.
       if (TabLeader.isLeader()) pollAll();
     },
 
-    // Footer: rolling call rate, color-coded against the budget, plus how long
-    // ago the last API call fired. Independent of the poll loop so it stays
-    // live between cycles.
     refreshFooter() {
       if (!this.panel) return;
       const rate = limiter.ratePerMinute();
@@ -2155,15 +1818,11 @@
       const dot = this.panel.querySelector("#pd-rate-dot");
       const text = this.panel.querySelector("#pd-rate-text");
       const last = this.panel.querySelector("#pd-lastcall");
-
-      // Thresholds are against our self-imposed budget (limiter.max = 60),
-      // which already sits under Torn's 100/min hard cap.
       const color =
         util >= 0.9 ? "#ff5555" : util >= 0.6 ? "#ffb040" : "#5fc46a";
       dot.style.background = color;
       text.textContent = `${rate} calls/min (of ${limiter.max})`;
       text.style.color = color;
-
       const lastTs = limiter.lastCallTime();
       last.textContent = lastTs
         ? `last: ${this.agoStr(lastTs)}`
@@ -2174,13 +1833,9 @@
       const sec = Math.round((Date.now() - ts) / 1000);
       if (sec < 1) return "just now";
       if (sec < 60) return `${sec}s ago`;
-      const min = Math.round(sec / 60);
-      return `${min}m ago`;
+      return `${Math.round(sec / 60)}m ago`;
     },
 
-    // Small footer badge showing whether THIS tab is the polling leader.
-    // A follower tab shows "following" — it's not making API calls, it's
-    // rendering from the shared state the leader keeps fresh.
     refreshLeaderBadge(isLeader) {
       if (!this.panel) return;
       const el = this.panel.querySelector("#pd-leader");
@@ -2191,26 +1846,13 @@
   };
 
   // =========================================================================
-  // 7b. TAB LEADER ELECTION — ensures only ONE tab polls the API, so N open
-  //     tabs make 1x the calls, not Nx. The rate limiter is per-tab (in-memory),
-  //     so without this, 3 tabs = 3x the real API load with each tab's limiter
-  //     none the wiser — a fast way to blow Torn's 100/min IP/key cap.
-  //
-  //     Mechanism: a shared heartbeat in GM storage. The leader writes
-  //     {id, ts} every few seconds. Any tab whose heartbeat is stale takes
-  //     over. Followers don't poll — they just re-render from shared storage,
-  //     which the leader keeps fresh.
+  // 7b. TAB LEADER ELECTION
   // =========================================================================
   const TabLeader = {
     key: "wpd_leader",
     tabId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    // Add a small random offset to the heartbeat so that tabs opening
-    // simultaneously are unlikely to synchronize and both try to claim at
-    // the same time. Without this, two tabs within ~100ms of each other
-    // share the same interval cadence and race on every beat.
     heartbeatMs: 3000 + Math.random() * 1000,
-    staleMs: 8000, // > 2 heartbeats: tolerate a missed beat before failover
-
+    staleMs: 8000,
     read() {
       const raw = GM_getValue(this.key, null);
       try {
@@ -2223,26 +1865,22 @@
       const cur = this.read();
       return cur && cur.id === this.tabId;
     },
-    // Claim leadership if vacant or stale. Returns true if we (now) lead.
     tryClaim() {
       const cur = this.read();
       const now = Date.now();
       if (!cur || now - cur.ts > this.staleMs || cur.id === this.tabId) {
         GM_setValue(this.key, JSON.stringify({ id: this.tabId, ts: now }));
-        return this.isLeader(); // re-read guards against a race with another tab
+        return this.isLeader();
       }
       return false;
     },
-    // Leader-only: refresh the heartbeat timestamp.
     beat() {
-      if (this.isLeader()) {
+      if (this.isLeader())
         GM_setValue(
           this.key,
           JSON.stringify({ id: this.tabId, ts: Date.now() }),
         );
-      }
     },
-    // Release leadership on unload so a new leader is elected promptly.
     release() {
       if (this.isLeader()) GM_deleteValue(this.key);
     },
@@ -2253,25 +1891,18 @@
   // =========================================================================
   UI.init();
 
-  // Only the leader tab polls the API; followers render from shared storage.
-  // A single loop at the heartbeat cadence handles leadership upkeep and
-  // (leader-only) polling. Followers re-render ONLY when the shared data
-  // timestamp changes — never on every heartbeat — so a user typing a manual
-  // override in a follower tab isn't interrupted by a 3s DOM rewrite.
   let lastPollAt = 0;
   let lastRenderedDataTs = Storage.getDataUpdatedTs();
   async function tick() {
-    const leading = TabLeader.tryClaim(); // claim if vacant/stale, else false
+    const leading = TabLeader.tryClaim();
     if (leading) {
       TabLeader.beat();
       if (Date.now() - lastPollAt >= CONFIG.pollIntervalMs) {
         lastPollAt = Date.now();
-        await pollAll(); // marks data updated + refreshes this (leader) tab
+        await pollAll();
         lastRenderedDataTs = Storage.getDataUpdatedTs();
       }
     } else {
-      // Follower: re-render only if the leader has published newer data since
-      // our last render. Otherwise leave the DOM (and any active input) alone.
       const dataTs = Storage.getDataUpdatedTs();
       if (dataTs !== lastRenderedDataTs) {
         lastRenderedDataTs = dataTs;
@@ -2281,12 +1912,10 @@
     UI.refreshLeaderBadge(TabLeader.isLeader());
   }
 
-  // Instant follower sync: when the leader bumps the broadcast key, re-render
-  // immediately (still guarded by the timestamp check inside). This makes
-  // followers update the moment new data lands, without polling for it.
   if (typeof GM_addValueChangeListener === "function") {
     GM_addValueChangeListener("wpd_data_ts", (_n, _o, newVal, remote) => {
-      if (!remote) return; // our own write; already handled
+      if (!remote) return;
+      Storage.clearCache(); // Force Followers to re-sync map from GM memory
       const dataTs = typeof newVal === "number" ? newVal : Number(newVal) || 0;
       if (dataTs !== lastRenderedDataTs && !TabLeader.isLeader()) {
         lastRenderedDataTs = dataTs;
@@ -2295,10 +1924,7 @@
     });
   }
 
-  // Kick once immediately, then on the heartbeat interval.
   tick();
   setInterval(tick, TabLeader.heartbeatMs);
-
-  // Hand off cleanly so another tab takes over without waiting for staleness.
   window.addEventListener("beforeunload", () => TabLeader.release());
 })();
