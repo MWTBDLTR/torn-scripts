@@ -13,6 +13,8 @@
 // ==/UserScript==
 
 /* CHANGELOG
+ * 1.1.8 - Added Faction API perm toggle for more accurate calibration via incoming attacks
+ *       - Updated fetchChainVerdict to ignore ongoing chains
  * 1.1.7 - Implemented concurrent polling via Promise.all for faster cycle times
  *       - Replaced DOM innerHTML wiping with targeted ID element updates (fixes focus loss)
  *       - Added in-memory JSON state caching to prevent excessive synchronous GM_getValue reads
@@ -162,6 +164,13 @@
     },
     markDataUpdated() {
       GM_setValue("wpd_data_ts", Date.now());
+    },
+    getAttacksPerm() {
+      // Default to false so we don't assume they have faction access
+      return GM_getValue("wpd_attacks_perm", false);
+    },
+    setAttacksPerm(bool) {
+      GM_setValue("wpd_attacks_perm", !!bool);
     },
   };
 
@@ -557,9 +566,20 @@
         );
         return null;
       }
+
       const report = data.chainreport;
+
+      // If the report is ongoing (no end timestamp), reject it immediately.
+      // Torn returns 0 or omits the key for ongoing chains.
+      const ended = !!report.end && report.end > 0;
+      if (!ended) {
+        Logger.info(`chainreport ${chainId} ignored: chain is still ongoing`);
+        return null;
+      }
+
       const d = report?.details;
       if (!d || !d.chain) return null;
+
       const warHits = d.war ?? 0;
       const length = d.chain;
       const bonuses = bonusesReached(length);
@@ -567,7 +587,7 @@
         length >= CONFIG.calibration.minWarChainLength
           ? warHits > 0
           : warHits >= bonuses;
-      const ended = !!report.end && report.end > 0;
+
       return { qualifies, warHits, bonuses, length, ended };
     } catch (err) {
       Logger.error(`chainreport ${chainId} failed: ${err}`);
@@ -668,7 +688,16 @@
   }
 
   async function calibrateFaction(factionId, apiKey) {
-    const priorAttacks = await fetchIncomingAttacksFrom(factionId, apiKey);
+    const hasAttacksPerm = Storage.getAttacksPerm();
+    let priorAttacks = [];
+    // Only fetch if they toggled the permission on
+    if (hasAttacksPerm) {
+      priorAttacks = await fetchIncomingAttacksFrom(factionId, apiKey);
+    } else {
+      Logger.info(
+        `calibration for faction ${factionId}: skipping /attacks check (Faction API permission disabled)`,
+      );
+    }
     const attackChains = groupAttacksByChain(priorAttacks);
 
     let qualifyingChains;
@@ -1206,6 +1235,8 @@
           <input id="pd-in-own" type="text" style="${UI.inputStyle}" placeholder="e.g. 9055" />
           <label style="display:block; font-size:10px; color:#999; margin:6px 0 1px;">Watched faction IDs (comma-separated)</label>
           <input id="pd-in-watch" type="text" style="${UI.inputStyle}" placeholder="e.g. 16335, 30009" />
+          <label style="display:flex; align-items:center; gap:6px; font-size:10px; color:#999; margin:6px 0 1px; cursor:pointer;">
+          <input type="checkbox" id="pd-in-attacks-perm" />I have Faction API access (enables calibration via incoming attacks)</label>
           <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:8px;">
             <span id="pd-setup-msg" style="flex:1; font-size:10px; color:#5fc46a; align-self:center;"></span>
             <button id="pd-setup-cancel" style="${UI.btnStyle}">cancel</button>
@@ -1769,6 +1800,8 @@
           Storage.getOwnFactionId() || "";
         this.panel.querySelector("#pd-in-watch").value =
           Storage.getWatchedFactions().join(", ");
+        this.panel.querySelector("#pd-in-attacks-perm").checked =
+          Storage.getAttacksPerm();
         this.panel.querySelector("#pd-setup-msg").textContent = "";
       }
       form.style.display = willOpen ? "block" : "none";
@@ -1782,6 +1815,7 @@
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const attacksPerm = this.panel.querySelector("#pd-in-attacks-perm",).checked;
       const msg = this.panel.querySelector("#pd-setup-msg");
 
       if (key && !/^[A-Za-z0-9]{16}$/.test(key)) {
@@ -1799,6 +1833,7 @@
       Storage.setApiKey(key);
       Storage.setOwnFactionId(own || null);
       Storage.setWatchedFactions(watch);
+      Storage.setAttacksPerm(attacksPerm);
       CONFIG.cache.ownFactionId = own || null;
       msg.style.color = "#5fc46a";
       msg.textContent = "Saved ✓";
